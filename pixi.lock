@@ -7,6 +7,7 @@ platforms:
 environments:
   default:
     channels:
+    - url: https://prefix.dev/locietta-toolchains/
     - url: https://conda.anaconda.org/conda-forge/
     packages:
       win-64:
@@ -28,6 +29,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/vc14_runtime-14.51.36231-h1b9f54f_39.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/vcomp14-14.51.36231-h1b9f54f_39.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/zstd-1.5.7-h534d264_6.conda
+      - conda: https://prefix.dev/locietta-toolchains/win-64/liminal-gcc16-ucrt64-16.1.0-msys2_5_1.conda
 packages:
 - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.6.17-h4c7d964_0.conda
   sha256: 7f458e4a82514d7bebbfef23d92817794a16aaf1c748a15f04870d4fb49aeab2
@@ -275,3 +277,10 @@ packages:
     - zstd >=1.5.7,<1.6.0a0
   size: 388453
   timestamp: 1764777142545
+- conda: https://prefix.dev/locietta-toolchains/win-64/liminal-gcc16-ucrt64-16.1.0-msys2_5_1.conda
+  sha256: 83794f2e7a048654abb034167ef6ace171c5ba25e65b0a44221e27e56dad6a75
+  md5: e7751e48982c7a0fcc97aedfd8126724
+  license: LicenseRef-MSYS2-UCRT64-toolchain
+  run_exports: {}
+  size: 99113378
+  timestamp: 1784545256288

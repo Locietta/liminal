@@ -1,6 +1,6 @@
 [workspace]
 authors = ["Locietta <locietta@gmail.com>"]
-channels = ["conda-forge"]
+channels = ["https://prefix.dev/locietta-toolchains", "conda-forge"]
 name = "liminal"
 platforms = ["win-64"]
 version = "0.1.0"
@@ -9,3 +9,4 @@ version = "0.1.0"
 
 [dependencies]
 python = ">=3.14"
+liminal-gcc16-ucrt64 = "==16.1.0"
