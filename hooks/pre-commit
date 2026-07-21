@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Git pre-commit hook: format staged C++ files.
+
+If any file's formatted content differs from the staged content, the commit
+is rejected and the formatted version is left on disk so the user can review
+and either commit it or add // NOLINT escapes.
+"""
+
+import os
+import subprocess
+import sys
+
+REPO_ROOT = subprocess.check_output(
+    ["git", "rev-parse", "--show-toplevel"], text=True
+).strip()
+
+EXTS_CLANG = {".cpp", ".h", ".hpp"}
+
+
+def get_staged_files():
+    """Return list of staged file paths (relative to repo root)."""
+    out = subprocess.check_output(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"], text=True
+    )
+    return [f.strip() for f in out.splitlines() if f.strip()]
+
+
+def format_file(filepath):
+    """Format a single file in-place. Returns True if the file type is supported."""
+    ext = os.path.splitext(filepath)[1].lower()
+
+    if ext in EXTS_CLANG:
+        subprocess.run(
+            ["clang-format", "-i", filepath], capture_output=True, timeout=30
+        )
+        return True
+
+    return False
+
+
+def main():
+    staged = get_staged_files()
+    if not staged:
+        return 0
+
+    failed = []
+
+    for relpath in staged:
+        abspath = os.path.join(REPO_ROOT, relpath)
+        if not os.path.isfile(abspath):
+            continue
+
+        ext = os.path.splitext(relpath)[1].lower()
+        if ext not in EXTS_CLANG:
+            continue
+
+        with open(abspath, "r", encoding="utf-8") as f:
+            before = f.read()
+
+        format_file(abspath)
+
+        with open(abspath, "r", encoding="utf-8") as f:
+            after = f.read()
+
+        if before != after:
+            failed.append(relpath)
+
+    if failed:
+        print(
+            "pre-commit: formatting changes required — commit aborted.", file=sys.stderr
+        )
+        print("", file=sys.stderr)
+        print("The following files were reformatted on disk:", file=sys.stderr)
+        for f in failed:
+            print(f"  {f}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Review the changes, then either:", file=sys.stderr)
+        print(
+            "  git add <files> && git commit   # accept formatted version",
+            file=sys.stderr,
+        )
+        print("  # or add // NOLINT escapes and commit again", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
