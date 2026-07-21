@@ -6,15 +6,17 @@ add_rules("mode.release", "mode.debug", "mode.releasedbg")
 set_languages("cxxlatest")
 
 if is_os("windows") then
-    set_toolchains("mingw") -- force to use gcc on windows, as msvc and clang don't support reflection yet
-
-    -- detect mingw from conda environment, if we are in one
-    if os.getenv("CONDA_PREFIX") then
-        local mingw_path = path.join(os.getenv("CONDA_PREFIX"), "Library", "ucrt64")
-        if os.isdir(mingw_path) then
-            set_toolchains("mingw", {mingw = mingw_path})
-        end
+    local msys2_root = os.getenv("MSYS2")
+    if not msys2_root then
+        raise("Please set %MSYS2% to the root of your MSYS2 installation.")
     end
+    local ucrt64_root = path.join(msys2_root, "ucrt64")
+    if not os.isdir(ucrt64_root) then
+        raise("MSYS2 does not contain the ucrt64 environment: " .. ucrt64_root)
+    end
+
+    -- Force GCC until static reflection is available on the native Windows toolchains.
+    set_toolchains("mingw", {mingw = ucrt64_root})
 
     add_defines("_CRT_SECURE_NO_WARNINGS")
     add_defines("WIN32_LEAN_AND_MEAN", "UNICODE", "_UNICODE", "NOMINMAX", "_WINDOWS")
