@@ -27,6 +27,14 @@ end
 add_repositories("loia-pinned xmake", {rootdir = os.scriptdir()})
 add_moduledirs("xmake/modules")
 
+option("__pixi_package_manager")
+    set_showmenu(false)
+    on_check(function (option)
+        import("package.manager.pixi.register")()
+        option:enable(true)
+    end)
+option_end()
+
 includes("xmake/rules/*.lua")
 
 add_includedirs(".")
