@@ -5,3 +5,6 @@
 # clangd
 .cache
 .clice
+
+build/
+.xmake/
