@@ -11,11 +11,11 @@ namespace lighter::http { namespace detail {
 
 struct RequestAwaiter;
 
-struct inflight_request_state : std::enable_shared_from_this<inflight_request_state> {
-    explicit inflight_request_state(http::Request req) noexcept : request(std::move(req)) {}
+struct InflightRequestState : std::enable_shared_from_this<InflightRequestState> {
+    explicit InflightRequestState(http::Request req) noexcept : request(std::move(req)) {}
 
     Manager *mgr = nullptr;
-    inflight_request request;
+    InflightRequest request;
     RequestAwaiter *awaiter = nullptr;
     bool registered = false;
     bool completed = false;
@@ -42,16 +42,16 @@ struct inflight_request_state : std::enable_shared_from_this<inflight_request_st
 
     void complete(Error err, bool resume) noexcept;
 
-    void complete(curl::easy_error code, bool resume) noexcept { complete(Error::from_curl(code), resume); }
+    void complete(curl::EasyError code, bool resume) noexcept { complete(Error::from_curl(code), resume); }
 };
 
 struct RequestAwaiter : uv::AwaitOp<RequestAwaiter> {
     using promise_t = Task<Response, Error>::promise_type;
     using result_type = Outcome<Response, Error, Cancellation>;
 
-    inflight_request_ref state;
+    InflightRequestRef state;
 
-    RequestAwaiter(Manager &manager, inflight_request_ref request_state) : state(std::move(request_state)) {
+    RequestAwaiter(Manager &manager, InflightRequestRef request_state) : state(std::move(request_state)) {
         state->mgr = &manager;
         state->awaiter = this;
     }
@@ -120,7 +120,7 @@ struct RequestAwaiter : uv::AwaitOp<RequestAwaiter> {
     }
 };
 
-void inflight_request_state::complete(Error err, bool resume) noexcept {
+void InflightRequestState::complete(Error err, bool resume) noexcept {
     if (completed) {
         return;
     }
@@ -137,14 +137,14 @@ void inflight_request_state::complete(Error err, bool resume) noexcept {
     }
 }
 
-inflight_request_ref make_inflight_request_state(http::Request request) noexcept {
-    return std::make_shared<inflight_request_state>(std::move(request));
+InflightRequestRef make_inflight_request_state(http::Request request) noexcept {
+    return std::make_shared<InflightRequestState>(std::move(request));
 }
 
-void *inflight_request_opaque(const inflight_request_ref &request) noexcept { return request.get(); }
+void *inflight_request_opaque(const InflightRequestRef &request) noexcept { return request.get(); }
 
-inflight_request_ref retain_inflight_request(void *opaque) noexcept {
-    auto *request = static_cast<inflight_request_state *>(opaque);
+InflightRequestRef retain_inflight_request(void *opaque) noexcept {
+    auto *request = static_cast<InflightRequestState *>(opaque);
     if (!request) {
         return {};
     }
@@ -152,13 +152,13 @@ inflight_request_ref retain_inflight_request(void *opaque) noexcept {
     return request->weak_from_this().lock();
 }
 
-void mark_inflight_request_removed(const inflight_request_ref &request) noexcept {
+void mark_inflight_request_removed(const InflightRequestRef &request) noexcept {
     if (request) {
         request->registered = false;
     }
 }
 
-void complete_inflight_request(const inflight_request_ref &request, curl::easy_error result, bool resume_inline) noexcept {
+void complete_inflight_request(const InflightRequestRef &request, curl::EasyError result, bool resume_inline) noexcept {
     if (!request) {
         return;
     }

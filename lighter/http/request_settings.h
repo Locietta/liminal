@@ -20,17 +20,17 @@ template <typename T> curl_option_hook make_curl_option(CURLoption option, T &&v
     static_assert(std::is_copy_constructible_v<stored_t>, "native curl option values must be copy constructible");
 
     if constexpr (std::same_as<stored_t, std::string>) {
-        return [option, value = std::move(value)](CURL *easy) -> curl::easy_error { return curl::setopt(easy, option, value.c_str()); };
+        return [option, value = std::move(value)](CURL *easy) -> curl::EasyError { return curl::setopt(easy, option, value.c_str()); };
     } else if constexpr (std::same_as<stored_t, std::string_view>) {
         std::string owned(value);
-        return [option, owned = std::move(owned)](CURL *easy) -> curl::easy_error { return curl::setopt(easy, option, owned.c_str()); };
+        return [option, owned = std::move(owned)](CURL *easy) -> curl::EasyError { return curl::setopt(easy, option, owned.c_str()); };
     } else {
-        return [option, value = std::forward<T>(value)](CURL *easy) -> curl::easy_error { return curl::setopt(easy, option, value); };
+        return [option, value = std::forward<T>(value)](CURL *easy) -> curl::EasyError { return curl::setopt(easy, option, value); };
     }
 }
 
-class RequestSettings {
-public:
+struct RequestSettings {
+
     RequestSettings() = default;
     RequestSettings(const RequestSettings &) = default;
     RequestSettings(RequestSettings &&) noexcept = default;

@@ -20,8 +20,8 @@ using uv_poll_t = uv_poll_s;
 
 namespace lighter::http {
 
-class Manager {
-public:
+struct Manager {
+
     Manager(const Manager &) = delete;
     Manager &operator=(const Manager &) = delete;
 
@@ -36,9 +36,9 @@ public:
 
     static void unregister_loop(EventLoop &loop);
 
-    curl::multi_error add_request(CURL *easy) noexcept;
+    curl::MultiError add_request(CURL *easy) noexcept;
 
-    curl::multi_error remove_request(CURL *easy) noexcept;
+    curl::MultiError remove_request(CURL *easy) noexcept;
 
     void drive_timeout() noexcept;
 

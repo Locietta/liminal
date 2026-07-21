@@ -13,16 +13,16 @@
 
 namespace lighter::http::detail {
 
-class inflight_request : public RequestSettings {
-public:
-    explicit inflight_request(http::Request request) noexcept;
-    inflight_request(const inflight_request &) = delete;
-    inflight_request &operator=(const inflight_request &) = delete;
-    inflight_request(inflight_request &&) = delete;
-    inflight_request &operator=(inflight_request &&) = delete;
+struct InflightRequest : RequestSettings {
+
+    explicit InflightRequest(http::Request request) noexcept;
+    InflightRequest(const InflightRequest &) = delete;
+    InflightRequest &operator=(const InflightRequest &) = delete;
+    InflightRequest(InflightRequest &&) = delete;
+    InflightRequest &operator=(InflightRequest &&) = delete;
 
     bool fail(Error err) noexcept;
-    bool fail(curl::easy_error code) noexcept;
+    bool fail(curl::EasyError code) noexcept;
     bool prepare() noexcept;
     bool bind_runtime(void *opaque) noexcept;
     void clear_runtime_binding() noexcept;
@@ -56,7 +56,7 @@ private:
     bool apply_curl_options() noexcept;
 };
 
-template <typename T> bool easy_setopt(inflight_request &request, CURLoption option, T value) noexcept {
+template <typename T> bool easy_setopt(InflightRequest &request, CURLoption option, T value) noexcept {
     if (auto err = curl::setopt(request.easy.get(), option, value); !curl::ok(err)) {
         return request.fail(err);
     }

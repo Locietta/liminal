@@ -2,7 +2,7 @@
 
 namespace lighter::http::detail {
 
-curl::easy_error ensure_curl_runtime() noexcept {
+curl::EasyError ensure_curl_runtime() noexcept {
     struct RuntimeState {
         RuntimeState() noexcept : code(curl::global_init()) {}
 
@@ -12,7 +12,7 @@ curl::easy_error ensure_curl_runtime() noexcept {
             }
         }
 
-        curl::easy_error code = CURLE_OK;
+        curl::EasyError code = CURLE_OK;
     };
 
     static RuntimeState runtime;

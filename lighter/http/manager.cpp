@@ -124,7 +124,7 @@ void Manager::unregister_loop(EventLoop &loop) {
     managers().erase(&loop);
 }
 
-curl::multi_error Manager::add_request(CURL *easy) noexcept {
+curl::MultiError Manager::add_request(CURL *easy) noexcept {
     auto err = curl::multi_add_handle(multi.get(), easy);
     if (curl::ok(err)) {
         active_requests += 1;
@@ -132,7 +132,7 @@ curl::multi_error Manager::add_request(CURL *easy) noexcept {
     return err;
 }
 
-curl::multi_error Manager::remove_request(CURL *easy) noexcept {
+curl::MultiError Manager::remove_request(CURL *easy) noexcept {
     auto err = curl::multi_remove_handle(multi.get(), easy);
     if (curl::ok(err) && active_requests > 0) {
         active_requests -= 1;
@@ -163,7 +163,7 @@ void Manager::drain_completed() noexcept { drain_completed_impl(nullptr); }
 void Manager::drain_completed_arming(void *arming_request) noexcept { drain_completed_impl(arming_request); }
 
 void Manager::drain_completed_impl(void *arming_request) noexcept {
-    std::vector<std::pair<detail::inflight_request_ref, curl::easy_error>> deferred;
+    std::vector<std::pair<detail::InflightRequestRef, curl::EasyError>> deferred;
     int pending = 0;
     while (auto *msg = curl::multi_info_read(multi.get(), &pending)) {
         if (msg->msg != CURLMSG_DONE) {

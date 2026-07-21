@@ -91,7 +91,7 @@ long to_curl_ssl_max(http::TlsVersion value) noexcept {
     return 0;
 }
 
-inflight_request::inflight_request(http::Request request) noexcept
+InflightRequest::InflightRequest(http::Request request) noexcept
     : RequestSettings(std::move(request)), shared(std::move(request.shared)), method_name(std::move(request.method_name)),
       url_string(std::move(request.url_string)), query_params(std::move(request.query_params)), body_text(std::move(request.body_text)) {
     easy = curl::EasyHandle::create();
@@ -100,14 +100,14 @@ inflight_request::inflight_request(http::Request request) noexcept
         return;
     }
 
-    if (!easy_setopt(*this, CURLOPT_WRITEFUNCTION, &inflight_request::on_write) || !easy_setopt(*this, CURLOPT_WRITEDATA, this) ||
-        !easy_setopt(*this, CURLOPT_HEADERFUNCTION, &inflight_request::on_header) || !easy_setopt(*this, CURLOPT_HEADERDATA, this)) {
+    if (!easy_setopt(*this, CURLOPT_WRITEFUNCTION, &InflightRequest::on_write) || !easy_setopt(*this, CURLOPT_WRITEDATA, this) ||
+        !easy_setopt(*this, CURLOPT_HEADERFUNCTION, &InflightRequest::on_header) || !easy_setopt(*this, CURLOPT_HEADERDATA, this)) {
         return;
     }
 }
 
-std::size_t inflight_request::on_write(char *data, std::size_t size, std::size_t count, void *userdata) {
-    auto *self = static_cast<inflight_request *>(userdata);
+std::size_t InflightRequest::on_write(char *data, std::size_t size, std::size_t count, void *userdata) {
+    auto *self = static_cast<InflightRequest *>(userdata);
     assert(self != nullptr && "curl write callback requires inflight_request");
 
     const auto bytes = size * count;
@@ -116,8 +116,8 @@ std::size_t inflight_request::on_write(char *data, std::size_t size, std::size_t
     return bytes;
 }
 
-std::size_t inflight_request::on_header(char *data, std::size_t size, std::size_t count, void *userdata) {
-    auto *self = static_cast<inflight_request *>(userdata);
+std::size_t InflightRequest::on_header(char *data, std::size_t size, std::size_t count, void *userdata) {
+    auto *self = static_cast<InflightRequest *>(userdata);
     assert(self != nullptr && "curl header callback requires inflight_request");
 
     const auto bytes = size * count;
@@ -146,14 +146,14 @@ std::size_t inflight_request::on_header(char *data, std::size_t size, std::size_
     return bytes;
 }
 
-bool inflight_request::fail(Error err) noexcept {
+bool InflightRequest::fail(Error err) noexcept {
     result = std::move(err);
     return false;
 }
 
-bool inflight_request::fail(curl::easy_error code) noexcept { return fail(Error::from_curl(code)); }
+bool InflightRequest::fail(curl::EasyError code) noexcept { return fail(Error::from_curl(code)); }
 
-bool inflight_request::apply_url() noexcept {
+bool InflightRequest::apply_url() noexcept {
     if (url_string.empty()) {
         return fail(Error::invalid_request("request url must not be empty"));
     }
@@ -167,7 +167,7 @@ bool inflight_request::apply_url() noexcept {
     return easy_setopt(*this, CURLOPT_URL, final_url.c_str());
 }
 
-bool inflight_request::apply_method() noexcept {
+bool InflightRequest::apply_method() noexcept {
     if (method_name.empty()) {
         return fail(Error::invalid_request("request method must not be empty"));
     }
@@ -187,7 +187,7 @@ bool inflight_request::apply_method() noexcept {
     return easy_setopt(*this, CURLOPT_CUSTOMREQUEST, method_name.c_str());
 }
 
-bool inflight_request::apply_body() noexcept {
+bool InflightRequest::apply_body() noexcept {
     if (body_text.empty()) {
         return true;
     }
@@ -200,7 +200,7 @@ bool inflight_request::apply_body() noexcept {
            easy_setopt(*this, CURLOPT_COPYPOSTFIELDS, body_text.c_str());
 }
 
-bool inflight_request::apply_headers() noexcept {
+bool InflightRequest::apply_headers() noexcept {
     for (const auto &item : header_list) {
         std::string line = item.name;
         line += ": ";
@@ -217,7 +217,7 @@ bool inflight_request::apply_headers() noexcept {
     return easy_setopt(*this, CURLOPT_HTTPHEADER, header_lines.get());
 }
 
-bool inflight_request::apply_cookies() noexcept {
+bool InflightRequest::apply_cookies() noexcept {
     if (cookie_string.empty()) {
         return true;
     }
@@ -225,7 +225,7 @@ bool inflight_request::apply_cookies() noexcept {
     return easy_setopt(*this, CURLOPT_COOKIE, cookie_string.c_str());
 }
 
-bool inflight_request::apply_user_agent() noexcept {
+bool InflightRequest::apply_user_agent() noexcept {
     if (user_agent_value.empty()) {
         return true;
     }
@@ -233,7 +233,7 @@ bool inflight_request::apply_user_agent() noexcept {
     return easy_setopt(*this, CURLOPT_USERAGENT, user_agent_value.c_str());
 }
 
-bool inflight_request::apply_redirect() noexcept {
+bool InflightRequest::apply_redirect() noexcept {
     if (!redirect_policy_value.follow) {
         return easy_setopt(*this, CURLOPT_FOLLOWLOCATION, 0L);
     }
@@ -243,7 +243,7 @@ bool inflight_request::apply_redirect() noexcept {
            easy_setopt(*this, CURLOPT_AUTOREFERER, redirect_policy_value.referer ? 1L : 0L);
 }
 
-bool inflight_request::apply_tls() noexcept {
+bool InflightRequest::apply_tls() noexcept {
     if (tls_config.min_version && tls_config.max_version &&
         tls_version_rank(*tls_config.min_version) > tls_version_rank(*tls_config.max_version)) {
         return fail(Error::invalid_request("min tls version must not exceed max tls version"));
@@ -294,7 +294,7 @@ bool inflight_request::apply_tls() noexcept {
     return true;
 }
 
-bool inflight_request::apply_proxy() noexcept {
+bool InflightRequest::apply_proxy() noexcept {
     if (disable_proxy) {
         return easy_setopt(*this, CURLOPT_PROXY, "");
     }
@@ -323,7 +323,7 @@ bool inflight_request::apply_proxy() noexcept {
     return true;
 }
 
-bool inflight_request::apply_timeout() noexcept {
+bool InflightRequest::apply_timeout() noexcept {
     if (!timeout_value) {
         return true;
     }
@@ -340,7 +340,7 @@ bool inflight_request::apply_timeout() noexcept {
     return easy_setopt(*this, CURLOPT_TIMEOUT_MS, static_cast<long>(timeout_ms));
 }
 
-bool inflight_request::apply_curl_options() noexcept {
+bool InflightRequest::apply_curl_options() noexcept {
     for (const auto &option : curl_options) {
         if (auto err = option(easy.get()); !curl::ok(err)) {
             return fail(err);
@@ -350,7 +350,7 @@ bool inflight_request::apply_curl_options() noexcept {
     return true;
 }
 
-bool inflight_request::prepare() noexcept {
+bool InflightRequest::prepare() noexcept {
     if (!easy || result.kind != ErrorKind::CURL || !curl::ok(result.curl_code)) {
         return false;
     }
@@ -363,7 +363,7 @@ bool inflight_request::prepare() noexcept {
            apply_tls() && apply_proxy() && apply_timeout() && apply_curl_options();
 }
 
-bool inflight_request::bind_runtime(void *opaque) noexcept {
+bool InflightRequest::bind_runtime(void *opaque) noexcept {
     if (!easy || result.kind != ErrorKind::CURL || !curl::ok(result.curl_code)) {
         return false;
     }
@@ -371,7 +371,7 @@ bool inflight_request::bind_runtime(void *opaque) noexcept {
     return easy_setopt(*this, CURLOPT_PRIVATE, opaque);
 }
 
-void inflight_request::clear_runtime_binding() noexcept {
+void InflightRequest::clear_runtime_binding() noexcept {
     if (!easy) {
         return;
     }
@@ -379,7 +379,7 @@ void inflight_request::clear_runtime_binding() noexcept {
     [[maybe_unused]] auto err = curl::setopt(easy.get(), CURLOPT_PRIVATE, nullptr);
 }
 
-Outcome<Response, Error, Cancellation> inflight_request::finish() noexcept {
+Outcome<Response, Error, Cancellation> InflightRequest::finish() noexcept {
     if (result.kind != ErrorKind::CURL || !curl::ok(result.curl_code)) {
         return Outcome<Response, Error, Cancellation>(outcome_error(std::move(result)));
     }

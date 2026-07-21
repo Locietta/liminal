@@ -15,10 +15,10 @@ struct SharedResources;
 
 namespace lighter::http {
 
-class bound_client;
+struct BoundClient;
 
-class Client : public detail::RequestSettings {
-public:
+struct Client : detail::RequestSettings {
+
     Client();
     ~Client();
 
@@ -28,11 +28,11 @@ public:
     Client(Client &&) noexcept;
     Client &operator=(Client &&) noexcept;
 
-    bound_client on(EventLoop &loop = EventLoop::current()) & noexcept;
-    bound_client on(EventLoop &loop = EventLoop::current()) && noexcept;
+    BoundClient on(EventLoop &loop = EventLoop::current()) & noexcept;
+    BoundClient on(EventLoop &loop = EventLoop::current()) && noexcept;
 
 private:
-    friend class bound_client;
+    friend struct BoundClient;
     std::shared_ptr<detail::SharedResources> shared;
 };
 

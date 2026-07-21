@@ -32,22 +32,22 @@ std::shared_ptr<SharedResources> make_shared_resources();
 
 namespace lighter::http {
 
-class Request;
-class bound_client;
+struct Request;
+struct BoundClient;
 
 } // namespace lighter::http
 
 namespace lighter::http::detail {
 
-class inflight_request;
+struct InflightRequest;
 Task<Response, Error> execute_request(Request request, EventLoop &loop);
 
 } // namespace lighter::http::detail
 
 namespace lighter::http {
 
-class Request : public detail::RequestSettings {
-public:
+struct Request : detail::RequestSettings {
+
     Request() = delete;
 
     Request(std::shared_ptr<detail::SharedResources> shared, EventLoop *dispatch_loop) noexcept;
@@ -84,8 +84,8 @@ public:
 #endif
 
 private:
-    friend class bound_client;
-    friend class detail::inflight_request;
+    friend struct BoundClient;
+    friend struct detail::InflightRequest;
     void remember_error(Error err) noexcept;
     static Task<Response, Error> failed(Error err);
 

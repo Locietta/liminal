@@ -7,36 +7,36 @@
 
 namespace lighter::curl {
 
-using easy_error = CURLcode;
-using multi_error = CURLMcode;
-using share_error = CURLSHcode;
+using EasyError = CURLcode;
+using MultiError = CURLMcode;
+using ShareError = CURLSHcode;
 
-inline bool ok(easy_error code) noexcept { return code == CURLE_OK; }
+inline bool ok(EasyError code) noexcept { return code == CURLE_OK; }
 
-inline bool ok(multi_error code) noexcept { return code == CURLM_OK; }
+inline bool ok(MultiError code) noexcept { return code == CURLM_OK; }
 
-inline bool ok(share_error code) noexcept { return code == CURLSHE_OK; }
+inline bool ok(ShareError code) noexcept { return code == CURLSHE_OK; }
 
-inline easy_error to_easy_error(multi_error code) noexcept { return ok(code) ? CURLE_OK : CURLE_FAILED_INIT; }
+inline EasyError to_easy_error(MultiError code) noexcept { return ok(code) ? CURLE_OK : CURLE_FAILED_INIT; }
 
-inline easy_error to_easy_error(share_error code) noexcept { return ok(code) ? CURLE_OK : CURLE_FAILED_INIT; }
+inline EasyError to_easy_error(ShareError code) noexcept { return ok(code) ? CURLE_OK : CURLE_FAILED_INIT; }
 
-inline std::string_view message(easy_error code) noexcept {
+inline std::string_view message(EasyError code) noexcept {
     auto *text = ::curl_easy_strerror(code);
     return text ? std::string_view(text) : std::string_view();
 }
 
-inline std::string_view message(multi_error code) noexcept {
+inline std::string_view message(MultiError code) noexcept {
     auto *text = ::curl_multi_strerror(code);
     return text ? std::string_view(text) : std::string_view();
 }
 
-inline std::string_view message(share_error code) noexcept {
+inline std::string_view message(ShareError code) noexcept {
     auto *text = ::curl_share_strerror(code);
     return text ? std::string_view(text) : std::string_view();
 }
 
-inline easy_error global_init(long flags = CURL_GLOBAL_DEFAULT) noexcept { return ::curl_global_init(flags); }
+inline EasyError global_init(long flags = CURL_GLOBAL_DEFAULT) noexcept { return ::curl_global_init(flags); }
 
 inline void global_cleanup() noexcept { ::curl_global_cleanup(); }
 
@@ -70,47 +70,47 @@ inline void slist_free_all(curl_slist *list) noexcept {
     }
 }
 
-template <typename T> inline easy_error setopt(CURL *handle, CURLoption option, T value) noexcept {
+template <typename T> inline EasyError setopt(CURL *handle, CURLoption option, T value) noexcept {
     assert(handle != nullptr && "curl::setopt requires non-null easy handle");
-    return static_cast<easy_error>(::curl_easy_setopt(handle, option, value));
+    return static_cast<EasyError>(::curl_easy_setopt(handle, option, value));
 }
 
-template <typename T> inline easy_error getinfo(CURL *handle, CURLINFO info, T value) noexcept {
+template <typename T> inline EasyError getinfo(CURL *handle, CURLINFO info, T value) noexcept {
     assert(handle != nullptr && "curl::getinfo requires non-null easy handle");
-    return static_cast<easy_error>(::curl_easy_getinfo(handle, info, value));
+    return static_cast<EasyError>(::curl_easy_getinfo(handle, info, value));
 }
 
-template <typename T> inline multi_error multi_setopt(CURLM *handle, CURLMoption option, T value) noexcept {
+template <typename T> inline MultiError multi_setopt(CURLM *handle, CURLMoption option, T value) noexcept {
     assert(handle != nullptr && "curl::multi_setopt requires non-null multi handle");
-    return static_cast<multi_error>(::curl_multi_setopt(handle, option, value));
+    return static_cast<MultiError>(::curl_multi_setopt(handle, option, value));
 }
 
-template <typename T> inline share_error share_setopt(CURLSH *handle, CURLSHoption option, T value) noexcept {
+template <typename T> inline ShareError share_setopt(CURLSH *handle, CURLSHoption option, T value) noexcept {
     assert(handle != nullptr && "curl::share_setopt requires non-null share handle");
-    return static_cast<share_error>(::curl_share_setopt(handle, option, value));
+    return static_cast<ShareError>(::curl_share_setopt(handle, option, value));
 }
 
-inline multi_error multi_add_handle(CURLM *multi, CURL *easy) noexcept {
+inline MultiError multi_add_handle(CURLM *multi, CURL *easy) noexcept {
     assert(multi != nullptr && "curl::multi_add_handle requires non-null multi handle");
     assert(easy != nullptr && "curl::multi_add_handle requires non-null easy handle");
-    return static_cast<multi_error>(::curl_multi_add_handle(multi, easy));
+    return static_cast<MultiError>(::curl_multi_add_handle(multi, easy));
 }
 
-inline multi_error multi_remove_handle(CURLM *multi, CURL *easy) noexcept {
+inline MultiError multi_remove_handle(CURLM *multi, CURL *easy) noexcept {
     assert(multi != nullptr && "curl::multi_remove_handle requires non-null multi handle");
     assert(easy != nullptr && "curl::multi_remove_handle requires non-null easy handle");
-    return static_cast<multi_error>(::curl_multi_remove_handle(multi, easy));
+    return static_cast<MultiError>(::curl_multi_remove_handle(multi, easy));
 }
 
-inline multi_error multi_assign(CURLM *multi, curl_socket_t socket, void *ptr) noexcept {
+inline MultiError multi_assign(CURLM *multi, curl_socket_t socket, void *ptr) noexcept {
     assert(multi != nullptr && "curl::multi_assign requires non-null multi handle");
-    return static_cast<multi_error>(::curl_multi_assign(multi, socket, ptr));
+    return static_cast<MultiError>(::curl_multi_assign(multi, socket, ptr));
 }
 
-inline multi_error multi_socket_action(CURLM *multi, curl_socket_t socket, int events, int *running_handles) noexcept {
+inline MultiError multi_socket_action(CURLM *multi, curl_socket_t socket, int events, int *running_handles) noexcept {
     assert(multi != nullptr && "curl::multi_socket_action requires non-null multi handle");
     assert(running_handles != nullptr && "curl::multi_socket_action requires running counter");
-    return static_cast<multi_error>(::curl_multi_socket_action(multi, socket, events, running_handles));
+    return static_cast<MultiError>(::curl_multi_socket_action(multi, socket, events, running_handles));
 }
 
 inline CURLMsg *multi_info_read(CURLM *multi, int *msgs_in_queue) noexcept {
@@ -124,8 +124,8 @@ inline curl_slist *slist_append(curl_slist *list, const char *text) noexcept {
     return ::curl_slist_append(list, text);
 }
 
-class EasyHandle {
-public:
+struct EasyHandle {
+
     EasyHandle() noexcept = default;
 
     explicit EasyHandle(CURL *handle) noexcept : handle(handle) {}
@@ -161,8 +161,8 @@ private:
     CURL *handle = nullptr;
 };
 
-class MultiHandle {
-public:
+struct MultiHandle {
+
     MultiHandle() noexcept = default;
 
     explicit MultiHandle(CURLM *handle) noexcept : handle(handle) {}
@@ -198,8 +198,8 @@ private:
     CURLM *handle = nullptr;
 };
 
-class ShareHandle {
-public:
+struct ShareHandle {
+
     ShareHandle() noexcept = default;
 
     explicit ShareHandle(CURLSH *handle) noexcept : handle(handle) {}
@@ -235,8 +235,8 @@ private:
     CURLSH *handle = nullptr;
 };
 
-class SList {
-public:
+struct SList {
+
     SList() noexcept = default;
 
     explicit SList(curl_slist *list) noexcept : head(list) {}

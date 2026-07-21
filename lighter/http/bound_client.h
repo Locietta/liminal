@@ -11,9 +11,9 @@
 
 namespace lighter::http {
 
-class bound_client {
-public:
-    bound_client(Client owner, EventLoop &loop) noexcept;
+struct BoundClient {
+
+    BoundClient(Client owner, EventLoop &loop) noexcept;
 
     http::Request request(std::string method, std::string url) const noexcept;
     http::Request get(std::string url) const noexcept;

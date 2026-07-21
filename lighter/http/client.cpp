@@ -56,8 +56,8 @@ Client::Client(Client &&) noexcept = default;
 
 Client &Client::operator=(Client &&) noexcept = default;
 
-bound_client Client::on(EventLoop &loop) & noexcept { return bound_client(*this, loop); }
+BoundClient Client::on(EventLoop &loop) & noexcept { return BoundClient(*this, loop); }
 
-bound_client Client::on(EventLoop &loop) && noexcept { return bound_client(std::move(*this), loop); }
+BoundClient Client::on(EventLoop &loop) && noexcept { return BoundClient(std::move(*this), loop); }
 
 } // namespace lighter::http
