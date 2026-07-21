@@ -11,7 +11,7 @@
 #include <utility>
 #include <variant>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/utils/memory.h>
 #include <lighter/utils/small_vector.h>
 #include <lighter/async/runtime/node.h>
@@ -20,25 +20,22 @@
 
 namespace lighter {
 
-template <bool All, typename... Tasks>
-class WhenOp : public AggregateOp {
-    constexpr static bool k_capture_cancel =
-        !std::is_void_v<detail::aggregated_cancel_t<detail::task_cancel_type_t<Tasks>...>>;
+template <bool All, typename... Tasks> class WhenOp : public AggregateOp {
+    constexpr static bool k_capture_cancel = !std::is_void_v<detail::aggregated_cancel_t<detail::task_cancel_type_t<Tasks>...>>;
 
 public:
     using error_type = detail::aggregated_channel_t<detail::task_error_type_t<Tasks>...>;
     using cancel_type = detail::aggregated_cancel_t<detail::task_cancel_type_t<Tasks>...>;
 
-    using success_type =
-        std::conditional_t<All,
-                           std::tuple<detail::task_success_t<Tasks, k_capture_cancel>...>,
-                           std::variant<detail::task_success_t<Tasks, k_capture_cancel>...>>;
+    using success_type = std::conditional_t<All, std::tuple<detail::task_success_t<Tasks, k_capture_cancel>...>,
+                                            std::variant<detail::task_success_t<Tasks, k_capture_cancel>...>>;
 
     using result_type = detail::aggregate_result_t<success_type, error_type, cancel_type>;
 
     template <detail::awaitable... U>
-    explicit WhenOp(U... asyncs) : AggregateOp(All ? AsyncNode::NodeKind::WHEN_ALL : AsyncNode::NodeKind::WHEN_ANY),
-                                   tasks(detail::normalize_task(std::move(asyncs))...) {
+    explicit WhenOp(U... asyncs)
+        : AggregateOp(All ? AsyncNode::NodeKind::WHEN_ALL : AsyncNode::NodeKind::WHEN_ANY),
+          tasks(detail::normalize_task(std::move(asyncs))...) {
         static_assert(All || sizeof...(Tasks) > 0, "WhenAny requires at least one Task");
         if constexpr (!std::is_void_v<cancel_type>) {
             this->intercept_cancel();
@@ -56,9 +53,8 @@ public:
     }
 
     template <typename Promise>
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<Promise> parent_handle,
-                  std::source_location location = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> parent_handle,
+                                          std::source_location location = std::source_location::current()) noexcept {
         children.clear();
         children.reserve(sizeof...(Tasks));
         std::apply([&](auto &...ts) { (children.push_back(detail::node_from(ts)), ...); }, tasks);
@@ -72,41 +68,34 @@ public:
         // child Error was recorded, even if an external cancel raced it.
         if constexpr (!std::is_void_v<error_type>) {
             if (first_error_child != AggregateOp::k_npos) {
-                auto error = detail::tuple_visit_at_return<error_type>(
-                    first_error_child,
-                    tasks,
-                    [&](auto, auto &task) -> error_type {
-                        using task_t = std::remove_reference_t<decltype(task)>;
-                        if constexpr (!std::is_void_v<detail::task_error_type_t<task_t>>) {
-                            auto result = detail::take_result(task);
-                            assert(result.has_error());
-                            return error_type(std::move(result).error());
-                        } else {
-                            assert(false && "Error child must expose an Error channel");
-                            std::abort();
-                        }
-                    });
+                auto error = detail::tuple_visit_at_return<error_type>(first_error_child, tasks, [&](auto, auto &task) -> error_type {
+                    using task_t = std::remove_reference_t<decltype(task)>;
+                    if constexpr (!std::is_void_v<detail::task_error_type_t<task_t>>) {
+                        auto result = detail::take_result(task);
+                        assert(result.has_error());
+                        return error_type(std::move(result).error());
+                    } else {
+                        assert(false && "Error child must expose an Error channel");
+                        std::abort();
+                    }
+                });
                 return result_type(outcome_error(std::move(error)));
             }
         }
 
         if constexpr (!std::is_void_v<cancel_type>) {
             if (this->state == AsyncNode::CANCELLED) {
-                assert(first_cancel_child != AggregateOp::k_npos &&
-                       "INTERCEPT_CANCEL aggregate cancelled with no attributed child");
-                auto cancel = detail::tuple_visit_at_return<cancel_type>(
-                    first_cancel_child,
-                    tasks,
-                    [&](auto, auto &task) -> cancel_type {
-                        using task_t = std::remove_reference_t<decltype(task)>;
-                        if constexpr (std::is_void_v<detail::task_cancel_type_t<task_t>>) {
-                            return cancel_type(Cancellation{});
-                        } else {
-                            auto result = detail::take_result(task);
-                            assert(result.is_cancelled());
-                            return cancel_type(std::move(result).cancellation());
-                        }
-                    });
+                assert(first_cancel_child != AggregateOp::k_npos && "INTERCEPT_CANCEL aggregate cancelled with no attributed child");
+                auto cancel = detail::tuple_visit_at_return<cancel_type>(first_cancel_child, tasks, [&](auto, auto &task) -> cancel_type {
+                    using task_t = std::remove_reference_t<decltype(task)>;
+                    if constexpr (std::is_void_v<detail::task_cancel_type_t<task_t>>) {
+                        return cancel_type(Cancellation{});
+                    } else {
+                        auto result = detail::take_result(task);
+                        assert(result.is_cancelled());
+                        return cancel_type(std::move(result).cancellation());
+                    }
+                });
                 return result_type(outcome_cancel(std::move(cancel)));
             }
         }
@@ -123,36 +112,28 @@ private:
     auto collect_success() -> success_type {
         if constexpr (All) {
             return [this]<usize... I>(std::index_sequence<I...>) {
-                return success_type(
-                    detail::take_success_result<k_capture_cancel>(std::get<I>(tasks))...);
+                return success_type(detail::take_success_result<k_capture_cancel>(std::get<I>(tasks))...);
             }(std::index_sequence_for<Tasks...>{});
         } else {
             assert(winner != AggregateOp::k_npos && "WhenAny winner not set");
-            return detail::tuple_visit_at_return<success_type>(
-                winner,
-                tasks,
-                [&](auto I, auto &task) -> success_type {
-                    return success_type(std::in_place_index<I.value>,
-                                        detail::take_success_result<k_capture_cancel>(task));
-                });
+            return detail::tuple_visit_at_return<success_type>(winner, tasks, [&](auto I, auto &task) -> success_type {
+                return success_type(std::in_place_index<I.value>, detail::take_success_result<k_capture_cancel>(task));
+            });
         }
     }
 
     std::tuple<Tasks...> tasks;
 };
 
-template <bool All, typename Task>
-class WhenOp<All, detail::RangeTasks<Task>> : public AggregateOp {
+template <bool All, typename Task> class WhenOp<All, detail::RangeTasks<Task>> : public AggregateOp {
     constexpr static bool k_capture_cancel = !std::is_void_v<detail::task_cancel_type_t<Task>>;
 
 public:
     using error_type = detail::task_error_type_t<Task>;
     using cancel_type = detail::task_cancel_type_t<Task>;
 
-    using success_type =
-        std::conditional_t<All,
-                           SmallVector<detail::task_success_t<Task, k_capture_cancel>>,
-                           std::pair<usize, detail::task_success_t<Task, k_capture_cancel>>>;
+    using success_type = std::conditional_t<All, SmallVector<detail::task_success_t<Task, k_capture_cancel>>,
+                                            std::pair<usize, detail::task_success_t<Task, k_capture_cancel>>>;
 
     using result_type = detail::aggregate_result_t<success_type, error_type, cancel_type>;
 
@@ -186,9 +167,8 @@ public:
     }
 
     template <typename Promise>
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<Promise> parent_handle,
-                  std::source_location location = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> parent_handle,
+                                          std::source_location location = std::source_location::current()) noexcept {
         children.clear();
         children.reserve(tasks.size());
         for (auto &task : tasks) {
@@ -211,8 +191,7 @@ public:
 
         if constexpr (!std::is_void_v<cancel_type>) {
             if (this->state == AsyncNode::CANCELLED) {
-                assert(first_cancel_child != AggregateOp::k_npos &&
-                       "INTERCEPT_CANCEL aggregate cancelled with no attributed child");
+                assert(first_cancel_child != AggregateOp::k_npos && "INTERCEPT_CANCEL aggregate cancelled with no attributed child");
                 auto result = detail::take_result(tasks[first_cancel_child]);
                 assert(result.is_cancelled());
                 return result_type(outcome_cancel(std::move(result).cancellation()));
@@ -264,8 +243,7 @@ private:
 ///
 /// Accepts any awaitable that satisfies the `awaitable` concept, including synchronous
 /// awaiters like `Semaphore::AcquireAwaiter`.
-template <typename... Tasks>
-class WhenAll : private WhenOp<true, Tasks...> {
+template <typename... Tasks> class WhenAll : private WhenOp<true, Tasks...> {
     using WhenOp<true, Tasks...>::WhenOp;
 
 public:
@@ -295,8 +273,7 @@ public:
 ///
 /// Accepts any awaitable that satisfies the `awaitable` concept, including synchronous
 /// awaiters like `Semaphore::AcquireAwaiter`.
-template <typename... Tasks>
-class WhenAny : private WhenOp<false, Tasks...> {
+template <typename... Tasks> class WhenAny : private WhenOp<false, Tasks...> {
     using WhenOp<false, Tasks...>::WhenOp;
 
 public:
@@ -305,34 +282,24 @@ public:
     using WhenOp<false, Tasks...>::await_resume;
 };
 
-template <>
-class WhenAny<> {
+template <> class WhenAny<> {
 public:
     WhenAny() = delete;
 };
 
-template <detail::awaitable... Tasks>
-WhenAll(Tasks...) -> WhenAll<detail::normalized_task_t<Tasks>...>;
+template <detail::awaitable... Tasks> WhenAll(Tasks...) -> WhenAll<detail::normalized_task_t<Tasks>...>;
 
-template <detail::async_range Range>
-WhenAll(Range) -> WhenAll<detail::RangeTasks<detail::normalized_range_task_t<Range>>>;
+template <detail::async_range Range> WhenAll(Range) -> WhenAll<detail::RangeTasks<detail::normalized_range_task_t<Range>>>;
 
 template <detail::awaitable... Tasks>
     requires(sizeof...(Tasks) > 0)
 WhenAny(Tasks...) -> WhenAny<detail::normalized_task_t<Tasks>...>;
 
-template <detail::async_range Range>
-WhenAny(Range) -> WhenAny<detail::RangeTasks<detail::normalized_range_task_t<Range>>>;
+template <detail::async_range Range> WhenAny(Range) -> WhenAny<detail::RangeTasks<detail::normalized_range_task_t<Range>>>;
 
-template <detail::awaitable... Tasks>
-auto when_all(Tasks &&...tasks) {
-    return WhenAll(std::forward<Tasks>(tasks)...);
-}
+template <detail::awaitable... Tasks> auto when_all(Tasks &&...tasks) { return WhenAll(std::forward<Tasks>(tasks)...); }
 
-template <detail::async_range Range>
-auto when_all(Range &&range) {
-    return WhenAll(std::forward<Range>(range));
-}
+template <detail::async_range Range> auto when_all(Range &&range) { return WhenAll(std::forward<Range>(range)); }
 
 template <detail::awaitable... Tasks>
     requires(sizeof...(Tasks) > 0)
@@ -340,9 +307,6 @@ auto when_any(Tasks &&...tasks) {
     return WhenAny(std::forward<Tasks>(tasks)...);
 }
 
-template <detail::async_range Range>
-auto when_any(Range &&range) {
-    return WhenAny(std::forward<Range>(range));
-}
+template <detail::async_range Range> auto when_any(Range &&range) { return WhenAny(std::forward<Range>(range)); }
 
 } // namespace lighter

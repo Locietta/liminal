@@ -7,7 +7,7 @@
 #include <lighter/async/runtime/task.h>
 #include <lighter/async/vocab/error.h>
 #include <lighter/async/vocab/owned.h>
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 
 namespace lighter {
 
@@ -77,15 +77,13 @@ public:
         /// Enable SO_REUSEPORT if supported.
         bool reuse_port;
 
-        constexpr BindOptions(bool ipv6_only = false,
-                              bool reuse_addr = false,
-                              bool reuse_port = false) : ipv6_only(ipv6_only), reuse_addr(reuse_addr), reuse_port(reuse_port) {}
+        constexpr BindOptions(bool ipv6_only = false, bool reuse_addr = false, bool reuse_port = false)
+            : ipv6_only(ipv6_only), reuse_addr(reuse_addr), reuse_port(reuse_port) {}
     };
 
     static Result<Udp> create(EventLoop &loop = EventLoop::current());
 
-    static Result<Udp> create(CreateOptions options = CreateOptions{},
-                              EventLoop &loop = EventLoop::current());
+    static Result<Udp> create(CreateOptions options = CreateOptions{}, EventLoop &loop = EventLoop::current());
 
     static Result<Udp> open(i32 fd, EventLoop &loop = EventLoop::current());
 
@@ -107,13 +105,9 @@ public:
 
     Result<Endpoint> getpeername() const;
 
-    Error set_membership(std::string_view multicast_addr,
-                         std::string_view interface_addr,
-                         Membership m);
+    Error set_membership(std::string_view multicast_addr, std::string_view interface_addr, Membership m);
 
-    Error set_source_membership(std::string_view multicast_addr,
-                                std::string_view interface_addr,
-                                std::string_view source_addr,
+    Error set_source_membership(std::string_view multicast_addr, std::string_view interface_addr, std::string_view source_addr,
                                 Membership m);
 
     Error set_multicast_loop(bool on);

@@ -4,7 +4,7 @@
 #include <chrono>
 #include <type_traits>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/io/awaiter.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/vocab/error.h>
@@ -44,8 +44,7 @@ struct Signal::Self : uv::handle<Signal::Self, uv_signal_t> {
 
 namespace {
 
-template <typename SelfT, typename HandleT>
-struct BasicTickAwait : uv::AwaitOp<BasicTickAwait<SelfT, HandleT>> {
+template <typename SelfT, typename HandleT> struct BasicTickAwait : uv::AwaitOp<BasicTickAwait<SelfT, HandleT>> {
     using await_base = uv::AwaitOp<BasicTickAwait<SelfT, HandleT>>;
     using promise_t = Task<>::promise_type;
 
@@ -84,13 +83,10 @@ struct BasicTickAwait : uv::AwaitOp<BasicTickAwait<SelfT, HandleT>> {
         }
     }
 
-    bool await_ready() const noexcept {
-        return self && self->pending > 0;
-    }
+    bool await_ready() const noexcept { return self && self->pending > 0; }
 
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<promise_t> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         if (!self) {
             return waiting;
         }
@@ -152,13 +148,10 @@ struct SignalAwait : uv::AwaitOp<SignalAwait> {
         }
     }
 
-    bool await_ready() const noexcept {
-        return self && self->pending > 0;
-    }
+    bool await_ready() const noexcept { return self && self->pending > 0; }
 
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<promise_t> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         if (!self) {
             return waiting;
         }
@@ -182,15 +175,13 @@ struct SignalAwait : uv::AwaitOp<SignalAwait> {
 
 } // namespace
 
-#define LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(WatcherType)                                   \
+#define LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(WatcherType)                               \
     WatcherType::WatcherType() noexcept = default;                                        \
     WatcherType::WatcherType(UniqueHandle<Self> self) noexcept : self(std::move(self)) {} \
     WatcherType::~WatcherType() = default;                                                \
     WatcherType::WatcherType(WatcherType &&other) noexcept = default;                     \
     WatcherType &WatcherType::operator=(WatcherType &&other) noexcept = default;          \
-    WatcherType::Self *WatcherType::operator->() noexcept {                               \
-        return self.get();                                                                \
-    }
+    WatcherType::Self *WatcherType::operator->() noexcept { return self.get(); }
 
 LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(Timer)
 LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(Signal)
@@ -217,10 +208,7 @@ void Timer::start(std::chrono::milliseconds timeout, std::chrono::milliseconds r
     assert(timeout.count() >= 0 && "Timer::start timeout must be non-negative");
     assert(repeat.count() >= 0 && "Timer::start repeat must be non-negative");
     uv::timer_start(
-        handle,
-        [](uv_timer_t *h) { timer_await::on_fire(h); },
-        static_cast<u64>(timeout.count()),
-        static_cast<u64>(repeat.count()));
+        handle, [](uv_timer_t *h) { timer_await::on_fire(h); }, static_cast<u64>(timeout.count()), static_cast<u64>(repeat.count()));
 }
 
 void Timer::stop() {
@@ -265,11 +253,7 @@ Error Signal::start(i32 signum) {
     }
 
     auto &handle = self->handle;
-    if (auto err = uv::signal_start(
-            handle,
-            [](uv_signal_t *h, i32) { SignalAwait::on_fire(h); },
-            signum);
-        err) {
+    if (auto err = uv::signal_start(handle, [](uv_signal_t *h, i32) { SignalAwait::on_fire(h); }, signum); err) {
         return err;
     }
 
@@ -307,79 +291,55 @@ Task<void, Error> Signal::wait() {
     }
 }
 
-#define LIGHTER_DEFINE_TICK_WATCHER_METHODS(WatcherType,                                  \
-                                        HandleType,                                   \
-                                        AwaiterType,                                  \
-                                        INIT_FN,                                      \
-                                        START_FN,                                     \
-                                        STOP_FN,                                      \
-                                        NameLiteral)                                  \
-    WatcherType WatcherType::create(EventLoop &loop) {                                \
-        auto self = Self::make();                                                     \
-        auto &handle = self->handle;                                                  \
-        INIT_FN(loop, handle);                                                        \
-                                                                                      \
-        return WatcherType(std::move(self));                                          \
-    }                                                                                 \
-                                                                                      \
-    void WatcherType::start() {                                                       \
-        if (!self) {                                                                  \
-            return;                                                                   \
-        }                                                                             \
-                                                                                      \
-        auto &handle = self->handle;                                                  \
-        START_FN(handle, [](HandleType *h) { AwaiterType::on_fire(h); });             \
-    }                                                                                 \
-                                                                                      \
-    void WatcherType::stop() {                                                        \
-        if (!self) {                                                                  \
-            return;                                                                   \
-        }                                                                             \
-                                                                                      \
-        STOP_FN(self->handle);                                                        \
-    }                                                                                 \
-                                                                                      \
-    Task<> WatcherType::wait() {                                                      \
-        if (!self) {                                                                  \
-            co_return;                                                                \
-        }                                                                             \
-                                                                                      \
-        if (self->pending > 0) {                                                      \
-            self->pending -= 1;                                                       \
-            co_return;                                                                \
-        }                                                                             \
-                                                                                      \
-        if (self->waiter != nullptr) {                                                \
-            assert(false && NameLiteral "::wait supports a single waiter at a time"); \
-            co_return;                                                                \
-        }                                                                             \
-                                                                                      \
-        co_await AwaiterType{self.get()};                                             \
+#define LIGHTER_DEFINE_TICK_WATCHER_METHODS(WatcherType, HandleType, AwaiterType, INIT_FN, START_FN, STOP_FN, NameLiteral) \
+    WatcherType WatcherType::create(EventLoop &loop) {                                                                     \
+        auto self = Self::make();                                                                                          \
+        auto &handle = self->handle;                                                                                       \
+        INIT_FN(loop, handle);                                                                                             \
+                                                                                                                           \
+        return WatcherType(std::move(self));                                                                               \
+    }                                                                                                                      \
+                                                                                                                           \
+    void WatcherType::start() {                                                                                            \
+        if (!self) {                                                                                                       \
+            return;                                                                                                        \
+        }                                                                                                                  \
+                                                                                                                           \
+        auto &handle = self->handle;                                                                                       \
+        START_FN(handle, [](HandleType *h) { AwaiterType::on_fire(h); });                                                  \
+    }                                                                                                                      \
+                                                                                                                           \
+    void WatcherType::stop() {                                                                                             \
+        if (!self) {                                                                                                       \
+            return;                                                                                                        \
+        }                                                                                                                  \
+                                                                                                                           \
+        STOP_FN(self->handle);                                                                                             \
+    }                                                                                                                      \
+                                                                                                                           \
+    Task<> WatcherType::wait() {                                                                                           \
+        if (!self) {                                                                                                       \
+            co_return;                                                                                                     \
+        }                                                                                                                  \
+                                                                                                                           \
+        if (self->pending > 0) {                                                                                           \
+            self->pending -= 1;                                                                                            \
+            co_return;                                                                                                     \
+        }                                                                                                                  \
+                                                                                                                           \
+        if (self->waiter != nullptr) {                                                                                     \
+            assert(false && NameLiteral "::wait supports a single waiter at a time");                                      \
+            co_return;                                                                                                     \
+        }                                                                                                                  \
+                                                                                                                           \
+        co_await AwaiterType{self.get()};                                                                                  \
     }
 
-LIGHTER_DEFINE_TICK_WATCHER_METHODS(Idle,
-                                uv_idle_t,
-                                idle_await,
-                                uv::idle_init,
-                                uv::idle_start,
-                                uv::idle_stop,
-                                "Idle")
+LIGHTER_DEFINE_TICK_WATCHER_METHODS(Idle, uv_idle_t, idle_await, uv::idle_init, uv::idle_start, uv::idle_stop, "Idle")
 
-LIGHTER_DEFINE_TICK_WATCHER_METHODS(Prepare,
-                                uv_prepare_t,
-                                prepare_await,
-                                uv::prepare_init,
-                                uv::prepare_start,
-                                uv::prepare_stop,
-                                "Prepare")
+LIGHTER_DEFINE_TICK_WATCHER_METHODS(Prepare, uv_prepare_t, prepare_await, uv::prepare_init, uv::prepare_start, uv::prepare_stop, "Prepare")
 
-LIGHTER_DEFINE_TICK_WATCHER_METHODS(Check,
-                                uv_check_t,
-                                check_await,
-                                uv::check_init,
-                                uv::check_start,
-                                uv::check_stop,
-                                "Check")
+LIGHTER_DEFINE_TICK_WATCHER_METHODS(Check, uv_check_t, check_await, uv::check_init, uv::check_start, uv::check_stop, "Check")
 
 #undef LIGHTER_DEFINE_TICK_WATCHER_METHODS
 

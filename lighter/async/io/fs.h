@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/runtime/task.h>
 #include <lighter/async/vocab/error.h>
 #include <lighter/async/vocab/owned.h>
@@ -133,9 +133,7 @@ Task<void, Error> mkdir(std::string_view path, i32 mode, EventLoop &loop = Event
 Task<FileStats, Error> stat(std::string_view path, EventLoop &loop = EventLoop::current());
 
 /// Copy a file from path to new_path.
-Task<void, Error> copyfile(std::string_view path,
-                           std::string_view new_path,
-                           CopyfileOptions options = CopyfileOptions{},
+Task<void, Error> copyfile(std::string_view path, std::string_view new_path, CopyfileOptions options = CopyfileOptions{},
                            EventLoop &loop = EventLoop::current());
 
 /// Create a unique temporary directory from a template (must end with "XXXXXX").
@@ -148,8 +146,7 @@ Task<MkstempResult, Error> mkstemp(std::string_view tpl, EventLoop &loop = Event
 Task<void, Error> rmdir(std::string_view path, EventLoop &loop = EventLoop::current());
 
 /// Scan a directory, returning all entries at once.
-Task<std::vector<Dirent>, Error> scandir(std::string_view path,
-                                         EventLoop &loop = EventLoop::current());
+Task<std::vector<Dirent>, Error> scandir(std::string_view path, EventLoop &loop = EventLoop::current());
 
 /// Open a directory for iterative reading.
 Task<DirHandle, Error> opendir(std::string_view path, EventLoop &loop = EventLoop::current());
@@ -167,9 +164,7 @@ Task<FileStats, Error> fstat(i32 fd, EventLoop &loop = EventLoop::current());
 Task<FileStats, Error> lstat(std::string_view path, EventLoop &loop = EventLoop::current());
 
 /// Rename (move) a file or directory.
-Task<void, Error> rename(std::string_view path,
-                         std::string_view new_path,
-                         EventLoop &loop = EventLoop::current());
+Task<void, Error> rename(std::string_view path, std::string_view new_path, EventLoop &loop = EventLoop::current());
 
 /// Flush file data and metadata to disk.
 Task<void, Error> fsync(i32 fd, EventLoop &loop = EventLoop::current());
@@ -181,11 +176,7 @@ Task<void, Error> fdatasync(i32 fd, EventLoop &loop = EventLoop::current());
 Task<void, Error> ftruncate(i32 fd, i64 offset, EventLoop &loop = EventLoop::current());
 
 /// Zero-copy transfer data between file descriptors.
-Task<i64, Error> sendfile(i32 out_fd,
-                          i32 in_fd,
-                          i64 in_offset,
-                          usize length,
-                          EventLoop &loop = EventLoop::current());
+Task<i64, Error> sendfile(i32 out_fd, i32 in_fd, i64 in_offset, usize length, EventLoop &loop = EventLoop::current());
 
 /// Check user permissions for a file (mode: F_OK, R_OK, W_OK, X_OK).
 Task<void, Error> access(std::string_view path, i32 mode, EventLoop &loop = EventLoop::current());
@@ -194,31 +185,19 @@ Task<void, Error> access(std::string_view path, i32 mode, EventLoop &loop = Even
 Task<void, Error> chmod(std::string_view path, i32 mode, EventLoop &loop = EventLoop::current());
 
 /// Change file access and modification times by path.
-Task<void, Error> utime(std::string_view path,
-                        f64 atime,
-                        f64 mtime,
-                        EventLoop &loop = EventLoop::current());
+Task<void, Error> utime(std::string_view path, f64 atime, f64 mtime, EventLoop &loop = EventLoop::current());
 
 /// Change file access and modification times by file descriptor.
-Task<void, Error>
-futime(i32 fd, f64 atime, f64 mtime, EventLoop &loop = EventLoop::current());
+Task<void, Error> futime(i32 fd, f64 atime, f64 mtime, EventLoop &loop = EventLoop::current());
 
 /// Change file access and modification times by path, without following symlinks.
-Task<void, Error> lutime(std::string_view path,
-                         f64 atime,
-                         f64 mtime,
-                         EventLoop &loop = EventLoop::current());
+Task<void, Error> lutime(std::string_view path, f64 atime, f64 mtime, EventLoop &loop = EventLoop::current());
 
 /// Create a hard link.
-Task<void, Error> link(std::string_view path,
-                       std::string_view new_path,
-                       EventLoop &loop = EventLoop::current());
+Task<void, Error> link(std::string_view path, std::string_view new_path, EventLoop &loop = EventLoop::current());
 
 /// Create a symbolic link.
-Task<void, Error> symlink(std::string_view path,
-                          std::string_view new_path,
-                          i32 flags = 0,
-                          EventLoop &loop = EventLoop::current());
+Task<void, Error> symlink(std::string_view path, std::string_view new_path, i32 flags = 0, EventLoop &loop = EventLoop::current());
 
 /// Read the target of a symbolic link.
 Task<std::string, Error> readlink(std::string_view path, EventLoop &loop = EventLoop::current());
@@ -230,20 +209,13 @@ Task<std::string, Error> realpath(std::string_view path, EventLoop &loop = Event
 Task<void, Error> fchmod(i32 fd, i32 mode, EventLoop &loop = EventLoop::current());
 
 /// Change file owner and group by path.
-Task<void, Error> chown(std::string_view path,
-                        u32 uid,
-                        u32 gid,
-                        EventLoop &loop = EventLoop::current());
+Task<void, Error> chown(std::string_view path, u32 uid, u32 gid, EventLoop &loop = EventLoop::current());
 
 /// Change file owner and group by file descriptor.
-Task<void, Error>
-fchown(i32 fd, u32 uid, u32 gid, EventLoop &loop = EventLoop::current());
+Task<void, Error> fchown(i32 fd, u32 uid, u32 gid, EventLoop &loop = EventLoop::current());
 
 /// Change file owner and group by path, without following symlinks.
-Task<void, Error> lchown(std::string_view path,
-                         u32 uid,
-                         u32 gid,
-                         EventLoop &loop = EventLoop::current());
+Task<void, Error> lchown(std::string_view path, u32 uid, u32 gid, EventLoop &loop = EventLoop::current());
 
 struct FsStats {
     /// Filesystem type identifier.
@@ -275,20 +247,13 @@ struct FsStats {
 Task<FsStats, Error> statfs(std::string_view path, EventLoop &loop = EventLoop::current());
 
 /// Open a file asynchronously. Returns the file descriptor on success.
-Task<i32, Error>
-open(std::string_view path, i32 flags, i32 mode = 0, EventLoop &loop = EventLoop::current());
+Task<i32, Error> open(std::string_view path, i32 flags, i32 mode = 0, EventLoop &loop = EventLoop::current());
 
 /// Read from a file descriptor into a buffer. offset = -1 uses current position.
-Task<usize, Error> read(i32 fd,
-                        std::span<char> buf,
-                        i64 offset = -1,
-                        EventLoop &loop = EventLoop::current());
+Task<usize, Error> read(i32 fd, std::span<char> buf, i64 offset = -1, EventLoop &loop = EventLoop::current());
 
 /// Write a buffer to a file descriptor. offset = -1 uses current position.
-Task<usize, Error> write(i32 fd,
-                         std::span<const char> buf,
-                         i64 offset = -1,
-                         EventLoop &loop = EventLoop::current());
+Task<usize, Error> write(i32 fd, std::span<const char> buf, i64 offset = -1, EventLoop &loop = EventLoop::current());
 
 /// Close a file descriptor asynchronously.
 Task<void, Error> close(i32 fd, EventLoop &loop = EventLoop::current());

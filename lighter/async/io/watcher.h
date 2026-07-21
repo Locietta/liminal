@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/runtime/task.h>
 #include <lighter/async/vocab/error.h>
 #include <lighter/async/vocab/owned.h>
@@ -158,9 +158,7 @@ private:
 
 Task<> sleep(std::chrono::milliseconds timeout, EventLoop &loop = EventLoop::current());
 
-inline Task<> sleep(i32 ms, EventLoop &loop = EventLoop::current()) {
-    return sleep(std::chrono::milliseconds{ms}, loop);
-}
+inline Task<> sleep(i32 ms, EventLoop &loop = EventLoop::current()) { return sleep(std::chrono::milliseconds{ms}, loop); }
 
 /// Awaitable returned by yield(): suspends and resumes no earlier than the
 /// next Event-loop iteration, strictly after every callback, deferred resume
@@ -175,14 +173,11 @@ inline Task<> sleep(i32 ms, EventLoop &loop = EventLoop::current()) {
 struct YieldAwaiter : IoOp {
     explicit YieldAwaiter(EventLoop &loop) noexcept;
 
-    bool await_ready() const noexcept {
-        return false;
-    }
+    bool await_ready() const noexcept { return false; }
 
     template <typename Promise>
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<Promise> h,
-                  std::source_location location = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h,
+                                          std::source_location location = std::source_location::current()) noexcept {
         return suspend(h.promise(), location);
     }
 
@@ -196,8 +191,6 @@ private:
 };
 
 /// Suspends until the next Event-loop iteration.
-inline YieldAwaiter yield(EventLoop &loop = EventLoop::current()) {
-    return YieldAwaiter(loop);
-}
+inline YieldAwaiter yield(EventLoop &loop = EventLoop::current()) { return YieldAwaiter(loop); }
 
 } // namespace lighter

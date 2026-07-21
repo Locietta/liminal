@@ -11,7 +11,7 @@
 #include <source_location>
 #include <vector>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/utils/config.h>
 
 namespace lighter {
@@ -69,29 +69,17 @@ public:
 
     std::source_location location;
 
-    bool is_task_frame() const noexcept {
-        return kind == NodeKind::TASK;
-    }
+    bool is_task_frame() const noexcept { return kind == NodeKind::TASK; }
 
-    bool is_wait_node() const noexcept {
-        return NodeKind::MUTEX_WAITER <= kind && kind <= NodeKind::EVENT_WAITER;
-    }
+    bool is_wait_node() const noexcept { return NodeKind::MUTEX_WAITER <= kind && kind <= NodeKind::EVENT_WAITER; }
 
-    bool is_aggregate_op() const noexcept {
-        return NodeKind::WHEN_ALL <= kind && kind <= NodeKind::TASK_GROUP;
-    }
+    bool is_aggregate_op() const noexcept { return NodeKind::WHEN_ALL <= kind && kind <= NodeKind::TASK_GROUP; }
 
-    bool is_finished() const noexcept {
-        return state == FINISHED;
-    }
+    bool is_finished() const noexcept { return state == FINISHED; }
 
-    bool is_cancelled() const noexcept {
-        return state == CANCELLED;
-    }
+    bool is_cancelled() const noexcept { return state == CANCELLED; }
 
-    bool is_failed() const noexcept {
-        return state == FAILED;
-    }
+    bool is_failed() const noexcept { return state == FAILED; }
 
     // Keep this out-of-line. clang -O3 miscompiles direct promise policy writes in
     // coroutine return-object conversions, which can drop INTERCEPT_CANCEL. See also
@@ -138,17 +126,11 @@ public:
     /// to propagate errors directly without resuming the parent coroutine.
     using error_hook = std::coroutine_handle<> (*)(AsyncNode &child, AsyncNode &parent);
 
-    std::coroutine_handle<> handle() {
-        return std::coroutine_handle<>::from_address(address);
-    }
+    std::coroutine_handle<> handle() { return std::coroutine_handle<>::from_address(address); }
 
-    bool has_child() const noexcept {
-        return child != nullptr;
-    }
+    bool has_child() const noexcept { return child != nullptr; }
 
-    void set_child(AsyncNode *node) noexcept {
-        child = node;
-    }
+    void set_child(AsyncNode *node) noexcept { child = node; }
 
     /// A Task's child pointer distinguishes three situations:
     ///   - child == some node: suspended, awaiting that node;
@@ -156,33 +138,19 @@ public:
     ///     (or scheduled to); cancel() must not finalize it - the frame
     ///     observes `state == CANCELLED` at its next suspension point;
     ///   - child == nullptr: Idle - not executing and awaiting nothing.
-    bool is_executing() const noexcept {
-        return child == this;
-    }
+    bool is_executing() const noexcept { return child == this; }
 
-    void mark_executing() noexcept {
-        child = this;
-    }
+    void mark_executing() noexcept { child = this; }
 
-    void set_error_hook(error_hook fn) noexcept {
-        error_hook_fn = fn;
-    }
+    void set_error_hook(error_hook fn) noexcept { error_hook_fn = fn; }
 
-    error_hook get_error_hook() const noexcept {
-        return error_hook_fn;
-    }
+    error_hook get_error_hook() const noexcept { return error_hook_fn; }
 
-    void clear_error_hook() noexcept {
-        error_hook_fn = nullptr;
-    }
+    void clear_error_hook() noexcept { error_hook_fn = nullptr; }
 
-    const AsyncNode *get_parent() const noexcept {
-        return parent;
-    }
+    const AsyncNode *get_parent() const noexcept { return parent; }
 
-    const AsyncNode *get_child() const noexcept {
-        return child;
-    }
+    const AsyncNode *get_child() const noexcept { return child; }
 
 protected:
     /// Stores the raw address of the coroutine frame (handle).
@@ -212,17 +180,11 @@ public:
 
     explicit WaitNode(NodeKind k) : AsyncNode(k) {}
 
-    const AsyncNode *get_parent() const noexcept {
-        return parent;
-    }
+    const AsyncNode *get_parent() const noexcept { return parent; }
 
-    const SyncPrimitive *get_resource() const noexcept {
-        return resource;
-    }
+    const SyncPrimitive *get_resource() const noexcept { return resource; }
 
-    const WaitNode *get_next() const noexcept {
-        return next;
-    }
+    const WaitNode *get_next() const noexcept { return next; }
 
 protected:
     using abandon_fn = void (*)(void *) noexcept;
@@ -261,13 +223,9 @@ protected:
     explicit AggregateOp(NodeKind k) : AsyncNode(k) {}
 
 public:
-    const AsyncNode *get_parent() const noexcept {
-        return parent;
-    }
+    const AsyncNode *get_parent() const noexcept { return parent; }
 
-    const std::vector<AsyncNode *> &get_children() const noexcept {
-        return children;
-    }
+    const std::vector<AsyncNode *> &get_children() const noexcept { return children; }
 
 protected:
     /// The first Event that picked this aggregate's Outcome. Latched once,
@@ -329,20 +287,14 @@ protected:
     struct Pin {
         AggregateOp &op;
 
-        explicit Pin(AggregateOp &op) noexcept : op(op) {
-            op.pending += 1;
-        }
+        explicit Pin(AggregateOp &op) noexcept : op(op) { op.pending += 1; }
 
-        ~Pin() {
-            op.pending -= 1;
-        }
+        ~Pin() { op.pending -= 1; }
     };
 
     /// True once an Outcome has been picked (or an external cancel arrived);
     /// implies the children cancel cascade has already been triggered.
-    bool decided() const noexcept {
-        return decision != Decision::NONE || state == CANCELLED;
-    }
+    bool decided() const noexcept { return decision != Decision::NONE || state == CANCELLED; }
 
     /// Latches `d` as the Outcome and cancels the remaining children.
     ///
@@ -368,8 +320,7 @@ protected:
     usize find_child_index(const AsyncNode &child) const {
         auto it = std::ranges::find(children, &child);
         assert(it != children.end() && "child not found in aggregate");
-        if (it == children.end())
-            std::abort();
+        if (it == children.end()) std::abort();
         return static_cast<usize>(it - children.begin());
     }
 
@@ -390,8 +341,7 @@ protected:
     /// Delivers the final Outcome to the parent. Runs exactly once.
     std::coroutine_handle<> settle() noexcept;
 
-    std::coroutine_handle<> arm_and_resume(AsyncNode &parent_node,
-                                           std::source_location loc) noexcept {
+    std::coroutine_handle<> arm_and_resume(AsyncNode &parent_node, std::source_location loc) noexcept {
         this->location = loc;
 
         assert(parent_node.is_task_frame() && "aggregate parent must be a Task");
@@ -458,9 +408,7 @@ protected:
 public:
     void complete() noexcept;
 
-    const AsyncNode *get_parent() const noexcept {
-        return parent;
-    }
+    const AsyncNode *get_parent() const noexcept { return parent; }
 };
 
 } // namespace lighter

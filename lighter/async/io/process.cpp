@@ -3,7 +3,7 @@
 #include <cassert>
 #include <csignal>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/io/awaiter.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/vocab/error.h>
@@ -33,8 +33,7 @@ static u32 to_uv_process_flags(const Process::CreationOptions &options) {
     return out;
 }
 
-struct Process::Self : uv::handle<Process::Self, uv_process_t>,
-                       uv::LatchedDelivery<Process::ExitStatus> {
+struct Process::Self : uv::handle<Process::Self, uv_process_t>, uv::LatchedDelivery<Process::ExitStatus> {
     uv_process_t handle{};
 };
 
@@ -59,17 +58,12 @@ struct ProcessAwait : uv::AwaitOp<ProcessAwait> {
         }
     }
 
-    static void notify(Process::Self &self, Process::ExitStatus status) {
-        self.deliver(status);
-    }
+    static void notify(Process::Self &self, Process::ExitStatus status) { self.deliver(status); }
 
-    bool await_ready() const noexcept {
-        return false;
-    }
+    bool await_ready() const noexcept { return false; }
 
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<promise_t> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         if (!self) {
             return waiting;
         }
@@ -97,13 +91,9 @@ Process::Process(Process &&other) noexcept = default;
 
 Process &Process::operator=(Process &&other) noexcept = default;
 
-Process::Self *Process::operator->() noexcept {
-    return self.get();
-}
+Process::Self *Process::operator->() noexcept { return self.get(); }
 
-Process::Stdio Process::Stdio::inherit() {
-    return Stdio{};
-}
+Process::Stdio Process::Stdio::inherit() { return Stdio{}; }
 
 Process::Stdio Process::Stdio::ignore() {
     Stdio io{};
@@ -178,12 +168,10 @@ Result<Process::SpawnResult> Process::spawn(const Options &opts, EventLoop &loop
 
                 dst.flags = UV_CREATE_PIPE;
                 if (cfg.readable) {
-                    dst.flags =
-                        static_cast<uv_stdio_flags>(dst.flags | static_cast<i32>(UV_READABLE_PIPE));
+                    dst.flags = static_cast<uv_stdio_flags>(dst.flags | static_cast<i32>(UV_READABLE_PIPE));
                 }
                 if (cfg.writable) {
-                    dst.flags =
-                        static_cast<uv_stdio_flags>(dst.flags | static_cast<i32>(UV_WRITABLE_PIPE));
+                    dst.flags = static_cast<uv_stdio_flags>(dst.flags | static_cast<i32>(UV_WRITABLE_PIPE));
                 }
 
                 dst.data.stream = static_cast<uv_stream_t *>(pipe->handle());

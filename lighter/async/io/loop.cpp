@@ -6,7 +6,7 @@
 #include <mutex>
 #include <vector>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/detail/libuv_helper.h>
 #include <lighter/utils/functional.h>
 #include <lighter/async/io/watcher.h>
@@ -109,15 +109,12 @@ EventLoop &EventLoop::current() {
     return *current_loop;
 }
 
-bool EventLoop::has_current() noexcept {
-    return current_loop != nullptr;
-}
+bool EventLoop::has_current() noexcept { return current_loop != nullptr; }
 
 void each(uv_idle_t *idle) {
     auto self = static_cast<EventLoop::Self *>(idle->data);
 
-    if (self->idle_running && self->tasks.empty() && self->yields_staged.empty() &&
-        self->yields_ready.empty()) {
+    if (self->idle_running && self->tasks.empty() && self->yields_staged.empty() && self->yields_ready.empty()) {
         self->idle_running = false;
         uv::idle_stop(*idle);
         return;
@@ -189,25 +186,19 @@ void EventLoop::defer_resume(AsyncNode &node) {
     }
 }
 
-void EventLoop::drain_deferred() {
-    drain_deferred_queue(self.get());
-}
+void EventLoop::drain_deferred() { drain_deferred_queue(self.get()); }
 
-void EventLoop::on_destroy(Function<void()> callback) {
-    self->destroy_callbacks.push_back(std::move(callback));
-}
+void EventLoop::on_destroy(Function<void()> callback) { self->destroy_callbacks.push_back(std::move(callback)); }
 
 YieldAwaiter::YieldAwaiter(EventLoop &loop) noexcept : loop(&loop) {
     // Cancellation needs no action: the op is intentionally left queued, and
     // the queued completion in each() delivers the CANCELLED Outcome on the
     // next iteration (structured completion). Never dequeuing on cancel is
     // also what keeps the each() batch free of dangling pointers.
-    action = +[](IoOp *) {
-    };
+    action = +[](IoOp *) {};
 }
 
-std::coroutine_handle<> YieldAwaiter::suspend(AsyncNode &parent_node,
-                                              std::source_location loc) noexcept {
+std::coroutine_handle<> YieldAwaiter::suspend(AsyncNode &parent_node, std::source_location loc) noexcept {
     auto *self = loop->operator->();
 
     // Enqueue before attach: when the parent is already cancelled, attach's
@@ -259,8 +250,7 @@ EventLoop::~EventLoop() {
         }
     };
 
-    assert(self->count.load(std::memory_order_acquire) == 0 &&
-           "EventLoop destroyed with live relays");
+    assert(self->count.load(std::memory_order_acquire) == 0 && "EventLoop destroyed with live relays");
 
     {
         std::lock_guard lock(self->mutex);
@@ -284,13 +274,9 @@ EventLoop::~EventLoop() {
     }
 }
 
-EventLoop::operator uv_loop_t &() noexcept {
-    return self->loop;
-}
+EventLoop::operator uv_loop_t &() noexcept { return self->loop; }
 
-EventLoop::operator const uv_loop_t &() const noexcept {
-    return self->loop;
-}
+EventLoop::operator const uv_loop_t &() const noexcept { return self->loop; }
 
 i32 EventLoop::run() {
     auto previous = current_loop;
@@ -300,8 +286,6 @@ i32 EventLoop::run() {
     return result;
 }
 
-void EventLoop::stop() {
-    uv::stop(self->loop);
-}
+void EventLoop::stop() { uv::stop(self->loop); }
 
 } // namespace lighter

@@ -29,4 +29,4 @@ using byte = std::byte;
 
 using namespace types;
 
-} // namespace llc
+} // namespace lighter

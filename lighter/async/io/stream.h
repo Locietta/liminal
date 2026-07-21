@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/runtime/task.h>
 #include <lighter/async/vocab/error.h>
 #include <lighter/async/vocab/owned.h>
@@ -14,16 +14,10 @@ namespace lighter {
 
 class EventLoop;
 
-template <typename Stream>
-class Acceptor;
+template <typename Stream> class Acceptor;
 
 /// Stream handle classification for file descriptors.
-enum class HandleType { UNKNOWN,
-                        FILE,
-                        TTY,
-                        PIPE,
-                        TCP,
-                        UDP };
+enum class HandleType { UNKNOWN, FILE, TTY, PIPE, TCP, UDP };
 
 /// Guess the handle type for a file descriptor.
 HandleType guess_handle(i32 fd);
@@ -88,8 +82,7 @@ protected:
     UniqueHandle<Self> self;
 };
 
-template <typename Stream>
-class Acceptor {
+template <typename Stream> class Acceptor {
 public:
     Acceptor() noexcept;
 
@@ -138,23 +131,18 @@ public:
         /// Listen backlog size.
         i32 backlog = 128;
 
-        constexpr Options(bool ipc = false, bool no_truncate = false, i32 backlog = 128) : ipc(ipc), no_truncate(no_truncate), backlog(backlog) {}
+        constexpr Options(bool ipc = false, bool no_truncate = false, i32 backlog = 128)
+            : ipc(ipc), no_truncate(no_truncate), backlog(backlog) {}
     };
 
     /// Wrap an existing file descriptor.
-    static Result<Pipe> open(i32 fd,
-                             Options opts = Options(),
-                             EventLoop &loop = EventLoop::current());
+    static Result<Pipe> open(i32 fd, Options opts = Options(), EventLoop &loop = EventLoop::current());
 
     /// Connect to a named Pipe.
-    static Task<Pipe, Error> connect(std::string_view name,
-                                     Options opts = Options(),
-                                     EventLoop &loop = EventLoop::current());
+    static Task<Pipe, Error> connect(std::string_view name, Options opts = Options(), EventLoop &loop = EventLoop::current());
 
     /// Listen on a named Pipe.
-    static Result<Acceptor> listen(std::string_view name,
-                                   Options opts = Options(),
-                                   EventLoop &loop = EventLoop::current());
+    static Result<Acceptor> listen(std::string_view name, Options opts = Options(), EventLoop &loop = EventLoop::current());
 
     explicit Pipe(UniqueHandle<Self> self) noexcept;
 
@@ -183,22 +171,18 @@ public:
         /// Listen backlog size.
         i32 backlog = 128;
 
-        constexpr Options(bool ipv6_only = false, bool reuse_port = false, i32 backlog = 128) : ipv6_only(ipv6_only), reuse_port(reuse_port), backlog(backlog) {}
+        constexpr Options(bool ipv6_only = false, bool reuse_port = false, i32 backlog = 128)
+            : ipv6_only(ipv6_only), reuse_port(reuse_port), backlog(backlog) {}
     };
 
     /// Wrap an existing socket descriptor.
     static Result<Tcp> open(i32 fd, EventLoop &loop = EventLoop::current());
 
     /// Connect to a TCP host/port.
-    static Task<Tcp, Error> connect(std::string_view host,
-                                    i32 port,
-                                    EventLoop &loop = EventLoop::current());
+    static Task<Tcp, Error> connect(std::string_view host, i32 port, EventLoop &loop = EventLoop::current());
 
     /// Listen on a TCP host/port.
-    static Result<Acceptor> listen(std::string_view host,
-                                   i32 port,
-                                   Options opts = Options(),
-                                   EventLoop &loop = EventLoop::current());
+    static Result<Acceptor> listen(std::string_view host, i32 port, Options opts = Options(), EventLoop &loop = EventLoop::current());
 
     /// Query the local address/port of a listening Acceptor.
     static Result<i32> local_port(Acceptor &acc);
@@ -217,13 +201,9 @@ public:
         i32 height = 0;
     };
 
-    enum class Mode { NORMAL,
-                      RAW,
-                      IO,
-                      RAW_VT };
+    enum class Mode { NORMAL, RAW, IO, RAW_VT };
 
-    enum class VtermState { SUPPORTED,
-                            UNSUPPORTED };
+    enum class VtermState { SUPPORTED, UNSUPPORTED };
 
     struct Options {
         /// Whether the TTY is readable (stdin).
@@ -233,9 +213,7 @@ public:
     };
 
     /// Wrap a Console file descriptor.
-    static Result<Console> open(i32 fd,
-                                Options opts = Options(),
-                                EventLoop &loop = EventLoop::current());
+    static Result<Console> open(i32 fd, Options opts = Options(), EventLoop &loop = EventLoop::current());
 
     /// Set TTY/Console mode.
     Error set_mode(Mode value);

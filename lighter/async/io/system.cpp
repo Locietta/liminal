@@ -11,7 +11,7 @@
 #include <psapi.h>
 #endif
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/detail/libuv_helper.h>
 #if defined(__linux__)
 #include <lighter/async/io/fs.h>
@@ -19,9 +19,7 @@
 
 namespace lighter::sys {
 
-i32 pid() noexcept {
-    return static_cast<i32>(uv::os_getpid());
-}
+i32 pid() noexcept { return static_cast<i32>(uv::os_getpid()); }
 
 MemoryInfo memory() {
     MemoryInfo info;
@@ -51,9 +49,7 @@ Result<std::vector<CpuCore>> cpu_cores() {
         uv_cpu_info_t *p;
         i32 n;
 
-        ~Guard() {
-            uv::free_cpu_info(p, n);
-        }
+        ~Guard() { uv::free_cpu_info(p, n); }
     } cleanup{infos, count};
 
     std::vector<CpuCore> result;
@@ -73,9 +69,7 @@ Result<std::vector<CpuCore>> cpu_cores() {
     return result;
 }
 
-u32 parallelism() {
-    return uv::available_parallelism();
-}
+u32 parallelism() { return uv::available_parallelism(); }
 
 Result<UnameInfo> uname() {
     uv_utsname_t buf{};
@@ -87,8 +81,7 @@ Result<UnameInfo> uname() {
 
 /// Helper: call a libuv string-returning Function with stack buffer,
 /// retry with heap allocation on UV_ENOBUFS.
-template <typename Fn>
-static Result<std::string> read_uv_string(Fn &&fn, usize initial_size) {
+template <typename Fn> static Result<std::string> read_uv_string(Fn &&fn, usize initial_size) {
     std::string buf(initial_size, '\0');
     usize size = buf.size();
     auto err = fn(buf.data(), size);
@@ -105,9 +98,7 @@ static Result<std::string> read_uv_string(Fn &&fn, usize initial_size) {
 }
 
 Result<std::string> hostname() {
-    return read_uv_string(
-        [](char *buf, usize &size) { return uv::os_gethostname(buf, size); },
-        256);
+    return read_uv_string([](char *buf, usize &size) { return uv::os_gethostname(buf, size); }, 256);
 }
 
 Result<std::chrono::duration<f64>> uptime() {
@@ -119,13 +110,11 @@ Result<std::chrono::duration<f64>> uptime() {
 }
 
 Result<std::string> home_directory() {
-    return read_uv_string([](char *buf, usize &size) { return uv::os_homedir(buf, size); },
-                          1024);
+    return read_uv_string([](char *buf, usize &size) { return uv::os_homedir(buf, size); }, 1024);
 }
 
 Result<std::string> temp_directory() {
-    return read_uv_string([](char *buf, usize &size) { return uv::os_tmpdir(buf, size); },
-                          1024);
+    return read_uv_string([](char *buf, usize &size) { return uv::os_tmpdir(buf, size); }, 1024);
 }
 
 Result<i32> priority(i32 pid) {
@@ -136,9 +125,7 @@ Result<i32> priority(i32 pid) {
     return value;
 }
 
-Error set_priority(i32 value, i32 pid) {
-    return uv::os_setpriority(static_cast<uv_pid_t>(pid), value);
-}
+Error set_priority(i32 value, i32 pid) { return uv::os_setpriority(static_cast<uv_pid_t>(pid), value); }
 
 Result<ProcessStat> process(i32 pid) {
     bool is_self = (pid == 0);
@@ -261,9 +248,7 @@ Result<ProcessStat> process(i32 pid) {
     if (is_self) {
         h = GetCurrentProcess();
     } else {
-        h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-                        FALSE,
-                        static_cast<DWORD>(pid));
+        h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, static_cast<DWORD>(pid));
         if (!h) {
             return outcome_error(Error::k_no_such_process);
         }

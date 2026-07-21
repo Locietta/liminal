@@ -6,17 +6,14 @@
 #include <utility>
 #include <vector>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/io/awaiter.h>
 
 namespace lighter {
 
 namespace {
 
-Error ensure_reading(Stream::Self *self,
-                     Stream::Self::ReadMode mode,
-                     uv_alloc_cb alloc_cb,
-                     uv_read_cb read_cb) {
+Error ensure_reading(Stream::Self *self, Stream::Self::ReadMode mode, uv_alloc_cb alloc_cb, uv_read_cb read_cb) {
     if (self == nullptr) {
         return Error::k_invalid_argument;
     }
@@ -98,14 +95,11 @@ struct StreamReadAwait : uv::AwaitOp<StreamReadAwait> {
         }
     }
 
-    bool await_ready() const noexcept {
-        return false;
-    }
+    bool await_ready() const noexcept { return false; }
 
     template <typename Promise>
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<Promise> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         if (!self) {
             return waiting;
         }
@@ -122,9 +116,7 @@ struct StreamReadAwait : uv::AwaitOp<StreamReadAwait> {
         return this->attach(waiting.promise(), loc);
     }
 
-    Error await_resume() noexcept {
-        return self->error_code;
-    }
+    Error await_resume() noexcept { return self->error_code; }
 };
 
 struct StreamReadSomeAwait : uv::AwaitOp<StreamReadSomeAwait> {
@@ -202,14 +194,11 @@ struct StreamReadSomeAwait : uv::AwaitOp<StreamReadSomeAwait> {
         aw->complete();
     }
 
-    bool await_ready() const noexcept {
-        return false;
-    }
+    bool await_ready() const noexcept { return false; }
 
     template <typename Promise>
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<Promise> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         if (!self) {
             return waiting;
         }
@@ -273,13 +262,10 @@ struct StreamWriteAwait : uv::AwaitOp<StreamWriteAwait> {
         }
     }
 
-    bool await_ready() const noexcept {
-        return false;
-    }
+    bool await_ready() const noexcept { return false; }
 
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<promise_t> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         if (!self) {
             return waiting;
         }
@@ -287,8 +273,7 @@ struct StreamWriteAwait : uv::AwaitOp<StreamWriteAwait> {
         self->writer.arm(*this);
         req.data = this;
 
-        uv_buf_t buf = uv::buf_init(storage.empty() ? nullptr : storage.data(),
-                                    static_cast<u32>(storage.size()));
+        uv_buf_t buf = uv::buf_init(storage.empty() ? nullptr : storage.data(), static_cast<u32>(storage.size()));
         if (auto err = uv::write(req, self->stream, std::span<const uv_buf_t>{&buf, 1}, on_write)) {
             error_code = err;
             self->writer.disarm();
@@ -316,17 +301,11 @@ Stream &Stream::operator=(Stream &&other) noexcept = default;
 
 Stream::~Stream() = default;
 
-Stream::Self *Stream::operator->() noexcept {
-    return self.get();
-}
+Stream::Self *Stream::operator->() noexcept { return self.get(); }
 
-void *Stream::handle() noexcept {
-    return self ? &self->stream : nullptr;
-}
+void *Stream::handle() noexcept { return self ? &self->stream : nullptr; }
 
-const void *Stream::handle() const noexcept {
-    return self ? &self->stream : nullptr;
-}
+const void *Stream::handle() const noexcept { return self ? &self->stream : nullptr; }
 
 HandleType guess_handle(i32 fd) {
     switch (uv::guess_handle(fd)) {
@@ -428,8 +407,7 @@ void Stream::stop() {
         // aw->out instead of self->error_code. Propagate the Error there too
         // so the caller observes operation_aborted rather than a default Error.
         if (mode == Self::ReadMode::DIRECT) {
-            static_cast<StreamReadSomeAwait *>(reader)->out =
-                outcome_error(Error::k_operation_aborted);
+            static_cast<StreamReadSomeAwait *>(reader)->out = outcome_error(Error::k_operation_aborted);
         }
 
         reader->complete();

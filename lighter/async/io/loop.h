@@ -7,15 +7,14 @@
 #include <utility>
 
 #include <uv.h>
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/utils/functional.h>
 
 namespace lighter {
 
 class AsyncNode;
 
-template <typename T, typename E, typename C>
-class Task;
+template <typename T, typename E, typename C> class Task;
 
 /// A thread-safe Relay for posting callbacks to an Event loop.
 ///
@@ -105,9 +104,7 @@ public:
     struct Self;
 
     /// Internal accessor for the implementation struct.
-    Self *operator->() {
-        return self.get();
-    }
+    Self *operator->() { return self.get(); }
 
     friend class AsyncNode;
 
@@ -137,8 +134,7 @@ public:
     /// Schedules a Task for execution on this Event loop.
     /// If the Task is passed by rvalue (temporary), the loop takes ownership
     /// (sets root=true). The Task will be destroyed after it completes.
-    template <typename TaskT>
-    void schedule(TaskT &&task, std::source_location location = std::source_location::current()) {
+    template <typename TaskT> void schedule(TaskT &&task, std::source_location location = std::source_location::current()) {
         auto &promise = task.h.promise();
         if constexpr (std::is_rvalue_reference_v<TaskT &&>) {
             promise.root = true;
@@ -168,8 +164,7 @@ private:
 
 /// Convenience: creates a loop, schedules all tasks, runs to completion,
 /// and returns a tuple of their values (via task::value()).
-template <typename... Tasks>
-auto run(Tasks &&...tasks) {
+template <typename... Tasks> auto run(Tasks &&...tasks) {
     EventLoop loop;
     (loop.schedule(tasks), ...);
     loop.run();

@@ -6,7 +6,7 @@
 #include <optional>
 #include <utility>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/detail/libuv_helper.h>
 #include <lighter/async/io/stream.h>
 #include <lighter/async/runtime/node.h>
@@ -16,28 +16,20 @@
 
 namespace lighter::uv {
 
-template <typename StatusT>
-inline bool is_cancelled_status(StatusT status) noexcept {
+template <typename StatusT> inline bool is_cancelled_status(StatusT status) noexcept {
     return static_cast<i64>(status) == static_cast<i64>(UV_ECANCELED);
 }
 
 struct SingleWaiter {
     IoOp *waiter = nullptr;
 
-    bool has_waiter() const noexcept {
-        return waiter != nullptr;
-    }
+    bool has_waiter() const noexcept { return waiter != nullptr; }
 
-    void arm(IoOp &op) noexcept {
-        waiter = &op;
-    }
+    void arm(IoOp &op) noexcept { waiter = &op; }
 
-    void disarm() noexcept {
-        waiter = nullptr;
-    }
+    void disarm() noexcept { waiter = nullptr; }
 
-    template <typename StatusT>
-    bool mark_cancelled_if(StatusT status) noexcept {
+    template <typename StatusT> bool mark_cancelled_if(StatusT status) noexcept {
         if (waiter == nullptr || !is_cancelled_status(status)) {
             return false;
         }
@@ -47,8 +39,7 @@ struct SingleWaiter {
     }
 };
 
-template <typename ResultT>
-struct WaiterBinding : SingleWaiter {
+template <typename ResultT> struct WaiterBinding : SingleWaiter {
     ResultT *active = nullptr;
 
     void arm(IoOp &op, ResultT &slot) noexcept {
@@ -74,22 +65,17 @@ struct WaiterBinding : SingleWaiter {
     }
 };
 
-template <typename Derived, AsyncNode::NodeKind Kind = AsyncNode::NodeKind::SYSTEM_IO>
-struct AwaitOp : IoOp {
-    AwaitOp() : IoOp(Kind) {
-        this->action = &Derived::on_cancel;
-    }
+template <typename Derived, AsyncNode::NodeKind Kind = AsyncNode::NodeKind::SYSTEM_IO> struct AwaitOp : IoOp {
+    AwaitOp() : IoOp(Kind) { this->action = &Derived::on_cancel; }
 
-    template <typename CleanupFn>
-    static void complete_cancel(IoOp *op, CleanupFn &&cleanup) noexcept {
+    template <typename CleanupFn> static void complete_cancel(IoOp *op, CleanupFn &&cleanup) noexcept {
         assert(op && "complete_cancel requires a non-null operation");
         auto *aw = static_cast<Derived *>(op);
         cleanup(*aw);
         aw->complete();
     }
 
-    template <typename StatusT>
-    bool mark_cancelled_if(StatusT status) noexcept {
+    template <typename StatusT> bool mark_cancelled_if(StatusT status) noexcept {
         if (!is_cancelled_status(status)) {
             return false;
         }
@@ -99,13 +85,10 @@ struct AwaitOp : IoOp {
     }
 };
 
-template <typename ResultT>
-struct QueuedDelivery : WaiterBinding<ResultT> {
+template <typename ResultT> struct QueuedDelivery : WaiterBinding<ResultT> {
     std::deque<ResultT> pending;
 
-    bool has_pending() const noexcept {
-        return !pending.empty();
-    }
+    bool has_pending() const noexcept { return !pending.empty(); }
 
     ResultT take_pending() {
         assert(!pending.empty() && "take_pending requires queued value");
@@ -127,13 +110,10 @@ struct QueuedDelivery : WaiterBinding<ResultT> {
     }
 };
 
-template <typename ResultT>
-struct StoredDelivery : WaiterBinding<ResultT> {
+template <typename ResultT> struct StoredDelivery : WaiterBinding<ResultT> {
     std::optional<ResultT> pending;
 
-    bool has_pending() const noexcept {
-        return pending.has_value();
-    }
+    bool has_pending() const noexcept { return pending.has_value(); }
 
     ResultT take_pending() {
         assert(pending.has_value() && "take_pending requires stored value");
@@ -155,13 +135,10 @@ struct StoredDelivery : WaiterBinding<ResultT> {
     }
 };
 
-template <typename ResultT>
-struct LatchedDelivery : WaiterBinding<ResultT> {
+template <typename ResultT> struct LatchedDelivery : WaiterBinding<ResultT> {
     std::optional<ResultT> pending;
 
-    bool has_pending() const noexcept {
-        return pending.has_value();
-    }
+    bool has_pending() const noexcept { return pending.has_value(); }
 
     const ResultT &peek_pending() const noexcept {
         assert(pending.has_value() && "peek_pending requires latched value");
@@ -180,13 +157,10 @@ struct LatchedDelivery : WaiterBinding<ResultT> {
     }
 };
 
-template <typename ValueT>
-struct LatestValueDelivery : WaiterBinding<Result<ValueT>> {
+template <typename ValueT> struct LatestValueDelivery : WaiterBinding<Result<ValueT>> {
     std::optional<Result<ValueT>> pending;
 
-    bool has_pending() const noexcept {
-        return pending.has_value();
-    }
+    bool has_pending() const noexcept { return pending.has_value(); }
 
     Result<ValueT> take_pending() {
         assert(pending.has_value() && "take_pending requires stored value");
@@ -226,9 +200,7 @@ struct StreamHandle {
 };
 
 struct Stream::Self : uv::handle<Stream::Self, uv_stream_t>, StreamHandle {
-    enum class ReadMode { NONE,
-                          BUFFERED,
-                          DIRECT };
+    enum class ReadMode { NONE, BUFFERED, DIRECT };
 
     uv::SingleWaiter reader;
     uv::SingleWaiter writer;
@@ -238,9 +210,7 @@ struct Stream::Self : uv::handle<Stream::Self, uv_stream_t>, StreamHandle {
 };
 
 template <typename Stream>
-struct Acceptor<Stream>::Self : uv::handle<Acceptor<Stream>::Self, uv_stream_t>,
-                                StreamHandle,
-                                uv::QueuedDelivery<Result<Stream>> {
+struct Acceptor<Stream>::Self : uv::handle<Acceptor<Stream>::Self, uv_stream_t>, StreamHandle, uv::QueuedDelivery<Result<Stream>> {
     i32 pipe_ipc = 0;
 };
 

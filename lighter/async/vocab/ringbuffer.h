@@ -4,25 +4,20 @@
 #include <cstddef>
 #include <memory>
 #include <utility>
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 
 namespace lighter {
 
 class RingBuffer {
 public:
     /// contract: pre(cap > 0)
-    explicit RingBuffer(usize cap = 64 * 1024)
-        : storage(std::make_unique_for_overwrite<char[]>(cap)), capacity(cap) {
+    explicit RingBuffer(usize cap = 64 * 1024) : storage(std::make_unique_for_overwrite<char[]>(cap)), capacity(cap) {
         assert(cap > 0 && "RingBuffer capacity must be greater than zero");
     }
 
-    usize readable_bytes() const {
-        return size;
-    }
+    usize readable_bytes() const { return size; }
 
-    usize writable_bytes() const {
-        return capacity - size;
-    }
+    usize writable_bytes() const { return capacity - size; }
 
     usize read(char *dest, usize len);
 

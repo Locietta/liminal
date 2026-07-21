@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/io/stream.h>
 #include <lighter/async/runtime/task.h>
 #include <lighter/async/vocab/error.h>
@@ -117,8 +117,7 @@ public:
     struct SpawnResult;
 
     /// Spawn a child Process within the given loop.
-    static Result<SpawnResult> spawn(const Options &opts,
-                                     EventLoop &loop = EventLoop::current());
+    static Result<SpawnResult> spawn(const Options &opts, EventLoop &loop = EventLoop::current());
 
     /// Await Process termination and fetch exit status.
     Task<WaitResult> wait();

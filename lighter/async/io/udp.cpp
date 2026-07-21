@@ -4,7 +4,7 @@
 #include <optional>
 #include <utility>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/io/awaiter.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/vocab/error.h>
@@ -134,11 +134,7 @@ struct UdpRecvAwait : uv::AwaitOp<UdpRecvAwait> {
         buf->len = static_cast<decltype(buf->len)>(u->buffer.size());
     }
 
-    static void on_read(uv_udp_t *handle,
-                        isize nread,
-                        const uv_buf_t *buf,
-                        const struct sockaddr *addr,
-                        u32 flags) {
+    static void on_read(uv_udp_t *handle, isize nread, const uv_buf_t *buf, const struct sockaddr *addr, u32 flags) {
         auto *u = static_cast<Udp::Self *>(handle->data);
         assert(u != nullptr && "on_read requires Udp state in handle->data");
 
@@ -177,13 +173,10 @@ struct UdpRecvAwait : uv::AwaitOp<UdpRecvAwait> {
         u->recv.deliver(std::move(out));
     }
 
-    bool await_ready() const noexcept {
-        return false;
-    }
+    bool await_ready() const noexcept { return false; }
 
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<promise_t> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         if (!self) {
             return waiting;
         }
@@ -226,7 +219,8 @@ struct UdpSendAwait : uv::AwaitOp<UdpSendAwait> {
     // Completion status returned from await_resume().
     Error result;
 
-    UdpSendAwait(Udp::Self *u, std::span<const char> data, std::optional<sockaddr_storage> &&d) : self(u), storage(data.begin(), data.end()), dest(std::move(d)) {}
+    UdpSendAwait(Udp::Self *u, std::span<const char> data, std::optional<sockaddr_storage> &&d)
+        : self(u), storage(data.begin(), data.end()), dest(std::move(d)) {}
 
     static void on_cancel(IoOp *op) {
         auto *aw = static_cast<UdpSendAwait *>(op);
@@ -260,9 +254,8 @@ struct UdpSendAwait : uv::AwaitOp<UdpSendAwait> {
         return false;
     }
 
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<promise_t> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         if (!self) {
             result = Error::k_invalid_argument;
             return waiting;
@@ -275,14 +268,11 @@ struct UdpSendAwait : uv::AwaitOp<UdpSendAwait> {
 
         self->send.arm(*this, result);
 
-        uv_buf_t buf = uv::buf_init(storage.empty() ? nullptr : storage.data(),
-                                    static_cast<u32>(storage.size()));
+        uv_buf_t buf = uv::buf_init(storage.empty() ? nullptr : storage.data(), static_cast<u32>(storage.size()));
 
-        const sockaddr *addr =
-            dest.has_value() ? reinterpret_cast<const sockaddr *>(&dest.value()) : nullptr;
+        const sockaddr *addr = dest.has_value() ? reinterpret_cast<const sockaddr *>(&dest.value()) : nullptr;
 
-        if (auto err =
-                uv::udp_send(req, self->handle, std::span<const uv_buf_t>{&buf, 1}, addr, on_send)) {
+        if (auto err = uv::udp_send(req, self->handle, std::span<const uv_buf_t>{&buf, 1}, addr, on_send)) {
             result = err;
             self->send.disarm();
             return waiting;
@@ -312,9 +302,7 @@ Udp::Udp(Udp &&other) noexcept = default;
 
 Udp &Udp::operator=(Udp &&other) noexcept = default;
 
-Udp::Self *Udp::operator->() noexcept {
-    return self.get();
-}
+Udp::Self *Udp::operator->() noexcept { return self.get(); }
 
 static Result<Udp::Endpoint> endpoint_from_sockaddr(const sockaddr *addr) {
     if (addr == nullptr) {
@@ -444,9 +432,7 @@ Task<void, Error> Udp::send(std::span<const char> data, std::string_view host, i
         co_await fail(resolved.error());
     }
 
-    if (auto err = co_await UdpSendAwait{self.get(),
-                                         data,
-                                         std::optional<sockaddr_storage>(resolved->storage)}) {
+    if (auto err = co_await UdpSendAwait{self.get(), data, std::optional<sockaddr_storage>(resolved->storage)}) {
         co_await fail(std::move(err));
     }
 }
@@ -471,11 +457,9 @@ Error Udp::try_send(std::span<const char> data, std::string_view host, i32 port)
         return resolved.error();
     }
 
-    uv_buf_t buf =
-        uv::buf_init(const_cast<char *>(data.data()), static_cast<u32>(data.size()));
-    if (auto sent = uv::udp_try_send(self->handle,
-                                     std::span<const uv_buf_t>{&buf, 1},
-                                     reinterpret_cast<const sockaddr *>(&resolved->storage));
+    uv_buf_t buf = uv::buf_init(const_cast<char *>(data.data()), static_cast<u32>(data.size()));
+    if (auto sent =
+            uv::udp_try_send(self->handle, std::span<const uv_buf_t>{&buf, 1}, reinterpret_cast<const sockaddr *>(&resolved->storage));
         !sent) {
         return sent.error();
     }
@@ -488,10 +472,8 @@ Error Udp::try_send(std::span<const char> data) {
         return Error::k_invalid_argument;
     }
 
-    uv_buf_t buf =
-        uv::buf_init(const_cast<char *>(data.data()), static_cast<u32>(data.size()));
-    if (auto sent = uv::udp_try_send(self->handle, std::span<const uv_buf_t>{&buf, 1}, nullptr);
-        !sent) {
+    uv_buf_t buf = uv::buf_init(const_cast<char *>(data.data()), static_cast<u32>(data.size()));
+    if (auto sent = uv::udp_try_send(self->handle, std::span<const uv_buf_t>{&buf, 1}, nullptr); !sent) {
         return sent.error();
     }
 
@@ -552,18 +534,14 @@ Result<Udp::Endpoint> Udp::getpeername() const {
     return endpoint_from_sockaddr(reinterpret_cast<sockaddr *>(&storage));
 }
 
-Error Udp::set_membership(std::string_view multicast_addr,
-                          std::string_view interface_addr,
-                          Membership m) {
+Error Udp::set_membership(std::string_view multicast_addr, std::string_view interface_addr, Membership m) {
     if (!self) {
         return Error::k_invalid_argument;
     }
 
     std::string multicast_storage(multicast_addr);
     std::string interface_storage(interface_addr);
-    if (auto err = uv::udp_set_membership(self->handle,
-                                          multicast_storage.c_str(),
-                                          interface_storage.c_str(),
+    if (auto err = uv::udp_set_membership(self->handle, multicast_storage.c_str(), interface_storage.c_str(),
                                           m == Membership::JOIN ? UV_JOIN_GROUP : UV_LEAVE_GROUP)) {
         return err;
     }
@@ -571,9 +549,7 @@ Error Udp::set_membership(std::string_view multicast_addr,
     return {};
 }
 
-Error Udp::set_source_membership(std::string_view multicast_addr,
-                                 std::string_view interface_addr,
-                                 std::string_view source_addr,
+Error Udp::set_source_membership(std::string_view multicast_addr, std::string_view interface_addr, std::string_view source_addr,
                                  Membership m) {
     if (!self) {
         return Error::k_invalid_argument;
@@ -582,12 +558,8 @@ Error Udp::set_source_membership(std::string_view multicast_addr,
     std::string multicast_storage(multicast_addr);
     std::string interface_storage(interface_addr);
     std::string source_storage(source_addr);
-    if (auto err =
-            uv::udp_set_source_membership(self->handle,
-                                          multicast_storage.c_str(),
-                                          interface_storage.c_str(),
-                                          source_storage.c_str(),
-                                          m == Membership::JOIN ? UV_JOIN_GROUP : UV_LEAVE_GROUP)) {
+    if (auto err = uv::udp_set_source_membership(self->handle, multicast_storage.c_str(), interface_storage.c_str(), source_storage.c_str(),
+                                                 m == Membership::JOIN ? UV_JOIN_GROUP : UV_LEAVE_GROUP)) {
         return err;
     }
 

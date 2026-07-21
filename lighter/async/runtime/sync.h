@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <source_location>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/runtime/node.h>
 #include <lighter/async/runtime/task.h>
 
@@ -35,14 +35,10 @@ public:
     /// Removes a waiter from the wait queue.
     void remove(WaitNode *link);
 
-    const WaitNode *get_head() const noexcept {
-        return head;
-    }
+    const WaitNode *get_head() const noexcept { return head; }
 
 protected:
-    bool has_waiters() const noexcept {
-        return head != nullptr;
-    }
+    bool has_waiters() const noexcept { return head != nullptr; }
 
     WaitNode *pop_waiter() noexcept {
         auto *link = head;
@@ -62,8 +58,7 @@ protected:
     /// waiter and queue its awaiting Task on the Event loop - so no waiter
     /// can be enqueued or removed re-entrantly while this loop runs: popping
     /// until the queue is empty is a stable snapshot of the callers.
-    template <typename Fn>
-    void drain_waiters(Fn &&fn) {
+    template <typename Fn> void drain_waiters(Fn &&fn) {
         while (auto *waiter = pop_waiter()) {
             fn(*waiter);
         }
@@ -90,14 +85,10 @@ public:
             abandon = &abandon_grant;
         }
 
-        bool await_ready() noexcept {
-            return owner->try_lock();
-        }
+        bool await_ready() noexcept { return owner->try_lock(); }
 
         template <typename Promise>
-        auto await_suspend(
-            std::coroutine_handle<Promise> h,
-            std::source_location location = std::source_location::current()) noexcept {
+        auto await_suspend(std::coroutine_handle<Promise> h, std::source_location location = std::source_location::current()) noexcept {
             owner->insert(this);
             return attach(h.promise(), location);
         }
@@ -117,9 +108,7 @@ public:
         Mutex *owner = nullptr;
     };
 
-    LockAwaiter lock() noexcept {
-        return LockAwaiter(*this);
-    }
+    LockAwaiter lock() noexcept { return LockAwaiter(*this); }
 
     bool try_lock() noexcept {
         if (locked) {
@@ -145,8 +134,8 @@ private:
 
 class Semaphore : public SyncPrimitive {
 public:
-    explicit Semaphore(isize initial = 0,
-                       std::source_location location = std::source_location::current()) : SyncPrimitive(SyncPrimitive::Kind::SEMAPHORE) {
+    explicit Semaphore(isize initial = 0, std::source_location location = std::source_location::current())
+        : SyncPrimitive(SyncPrimitive::Kind::SEMAPHORE) {
         assert(initial >= 0 && "Semaphore initial count must be non-negative");
         this->location = location;
         count = initial;
@@ -164,14 +153,10 @@ public:
             abandon = &abandon_grant;
         }
 
-        bool await_ready() noexcept {
-            return owner->try_acquire();
-        }
+        bool await_ready() noexcept { return owner->try_acquire(); }
 
         template <typename Promise>
-        auto await_suspend(
-            std::coroutine_handle<Promise> h,
-            std::source_location location = std::source_location::current()) noexcept {
+        auto await_suspend(std::coroutine_handle<Promise> h, std::source_location location = std::source_location::current()) noexcept {
             owner->insert(this);
             return attach(h.promise(), location);
         }
@@ -191,9 +176,7 @@ public:
         Semaphore *owner = nullptr;
     };
 
-    AcquireAwaiter acquire() noexcept {
-        return AcquireAwaiter(*this);
-    }
+    AcquireAwaiter acquire() noexcept { return AcquireAwaiter(*this); }
 
     bool try_acquire() noexcept {
         if (count <= 0) {
@@ -228,8 +211,8 @@ private:
 
 class Event : public SyncPrimitive {
 public:
-    explicit Event(bool signaled = false,
-                   std::source_location location = std::source_location::current()) : SyncPrimitive(SyncPrimitive::Kind::EVENT), signaled(signaled) {
+    explicit Event(bool signaled = false, std::source_location location = std::source_location::current())
+        : SyncPrimitive(SyncPrimitive::Kind::EVENT), signaled(signaled) {
         this->location = location;
     }
 
@@ -239,14 +222,10 @@ public:
     struct WaitAwaiter : WaitNode {
         explicit WaitAwaiter(Event &owner) : WaitNode(AsyncNode::NodeKind::EVENT_WAITER), owner(&owner) {}
 
-        bool await_ready() noexcept {
-            return owner->is_set();
-        }
+        bool await_ready() noexcept { return owner->is_set(); }
 
         template <typename Promise>
-        auto await_suspend(
-            std::coroutine_handle<Promise> h,
-            std::source_location location = std::source_location::current()) noexcept {
+        auto await_suspend(std::coroutine_handle<Promise> h, std::source_location location = std::source_location::current()) noexcept {
             owner->insert(this);
             return attach(h.promise(), location);
         }
@@ -277,18 +256,14 @@ public:
         drain_waiters([this](WaitNode &waiter) { resume_waiter(waiter); });
     }
 
-    void reset() noexcept {
-        signaled = false;
-    }
+    void reset() noexcept { signaled = false; }
 
     /// Interrupts the current wait queue without changing the signaled state.
     void interrupt() noexcept {
         drain_waiters([this](WaitNode &waiter) { cancel_waiter(waiter); });
     }
 
-    bool is_set() const noexcept {
-        return signaled;
-    }
+    bool is_set() const noexcept { return signaled; }
 
 private:
     bool signaled = false;
@@ -296,7 +271,8 @@ private:
 
 class ConditionVariable : public SyncPrimitive {
 public:
-    ConditionVariable(std::source_location location = std::source_location::current()) : SyncPrimitive(SyncPrimitive::Kind::CONDITION_VARIABLE) {
+    ConditionVariable(std::source_location location = std::source_location::current())
+        : SyncPrimitive(SyncPrimitive::Kind::CONDITION_VARIABLE) {
         this->location = location;
     }
 
@@ -307,14 +283,10 @@ public:
         /// Reuses EventWaiter kind - see Semaphore::AcquireAwaiter comment.
         explicit WaitAwaiter(ConditionVariable &owner) : WaitNode(AsyncNode::NodeKind::EVENT_WAITER), owner(&owner) {}
 
-        bool await_ready() const noexcept {
-            return false;
-        }
+        bool await_ready() const noexcept { return false; }
 
         template <typename Promise>
-        auto await_suspend(
-            std::coroutine_handle<Promise> h,
-            std::source_location location = std::source_location::current()) noexcept {
+        auto await_suspend(std::coroutine_handle<Promise> h, std::source_location location = std::source_location::current()) noexcept {
             owner->insert(this);
             return attach(h.promise(), location);
         }

@@ -2,7 +2,7 @@
 
 #include <cassert>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/io/awaiter.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/runtime/task.h>
@@ -39,19 +39,14 @@ struct WorkOp : uv::AwaitOp<WorkOp> {
         }
     }
 
-    bool await_ready() const noexcept {
-        return false;
-    }
+    bool await_ready() const noexcept { return false; }
 
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<promise_t> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         return this->attach(waiting.promise(), loc);
     }
 
-    Error await_resume() noexcept {
-        return result;
-    }
+    Error await_resume() noexcept { return result; }
 };
 
 } // namespace

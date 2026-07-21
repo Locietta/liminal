@@ -4,7 +4,7 @@
 #include <string_view>
 #include <utility>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/vocab/outcome.h>
 
 namespace lighter {
@@ -18,21 +18,13 @@ public:
 
     constexpr explicit Error(i32 code) noexcept : code(code) {}
 
-    constexpr i32 value() const noexcept {
-        return code;
-    }
+    constexpr i32 value() const noexcept { return code; }
 
-    constexpr void clear() noexcept {
-        code = 0;
-    }
+    constexpr void clear() noexcept { code = 0; }
 
-    constexpr bool has_error() const noexcept {
-        return code != 0;
-    }
+    constexpr bool has_error() const noexcept { return code != 0; }
 
-    constexpr explicit operator bool() const noexcept {
-        return has_error();
-    }
+    constexpr explicit operator bool() const noexcept { return has_error(); }
 
     std::string_view message() const;
 
@@ -138,13 +130,10 @@ struct Cancellation {
 
     explicit Cancellation(std::string reason) : message(std::move(reason)) {}
 
-    std::string_view reason() const noexcept {
-        return message;
-    }
+    std::string_view reason() const noexcept { return message; }
 };
 
 /// Result<T>: value-or-Error (no cancel channel). I/O functions use this.
-template <typename T>
-using Result = Outcome<T, Error, void>;
+template <typename T> using Result = Outcome<T, Error, void>;
 
 } // namespace lighter

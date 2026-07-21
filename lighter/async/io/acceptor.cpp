@@ -4,7 +4,7 @@
 #include <type_traits>
 #include <utility>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/io/awaiter.h>
 #include <lighter/async/io/loop.h>
 
@@ -12,8 +12,7 @@ namespace lighter {
 
 namespace {
 
-template <typename T>
-constexpr inline bool k_always_false_v = false;
+template <typename T> constexpr inline bool k_always_false_v = false;
 
 Result<u32> to_uv_pipe_flags(const Pipe::Options &opts) {
     u32 out = 0;
@@ -29,9 +28,7 @@ Result<u32> to_uv_pipe_flags(const Pipe::Options &opts) {
     return out;
 }
 
-Result<u32> to_uv_pipe_connect_flags(const Pipe::Options &opts) {
-    return to_uv_pipe_flags(opts);
-}
+Result<u32> to_uv_pipe_connect_flags(const Pipe::Options &opts) { return to_uv_pipe_flags(opts); }
 
 Result<u32> to_uv_tcp_bind_flags(const Tcp::Options &opts) {
     u32 out = 0;
@@ -56,8 +53,7 @@ Result<u32> to_uv_tcp_bind_flags(const Tcp::Options &opts) {
     return out;
 }
 
-template <typename Stream>
-struct AcceptAwait : uv::AwaitOp<AcceptAwait<Stream>> {
+template <typename Stream> struct AcceptAwait : uv::AwaitOp<AcceptAwait<Stream>> {
     using await_base = uv::AwaitOp<AcceptAwait<Stream>>;
     using promise_t = Task<Stream, Error>::promise_type;
     using self_t = typename Acceptor<Stream>::Self;
@@ -77,13 +73,10 @@ struct AcceptAwait : uv::AwaitOp<AcceptAwait<Stream>> {
         });
     }
 
-    bool await_ready() const noexcept {
-        return false;
-    }
+    bool await_ready() const noexcept { return false; }
 
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<promise_t> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         if (!self) {
             return waiting;
         }
@@ -99,8 +92,7 @@ struct AcceptAwait : uv::AwaitOp<AcceptAwait<Stream>> {
     }
 };
 
-template <typename Stream>
-void on_connection(uv_stream_t *server, i32 status) {
+template <typename Stream> void on_connection(uv_stream_t *server, i32 status) {
     using self_t = typename Acceptor<Stream>::Self;
 
     assert(server != nullptr && "on_connection requires non-null server");
@@ -133,8 +125,7 @@ void on_connection(uv_stream_t *server, i32 status) {
     }
 }
 
-template <typename Stream>
-struct ConnectAwait : uv::AwaitOp<ConnectAwait<Stream>> {
+template <typename Stream> struct ConnectAwait : uv::AwaitOp<ConnectAwait<Stream>> {
     using await_base = uv::AwaitOp<ConnectAwait<Stream>>;
     using promise_t = Task<Stream, Error>::promise_type;
     using self_ptr = Stream::Self::pointer;
@@ -219,13 +210,10 @@ struct ConnectAwait : uv::AwaitOp<ConnectAwait<Stream>> {
         aw->complete();
     }
 
-    bool await_ready() const noexcept {
-        return false;
-    }
+    bool await_ready() const noexcept { return false; }
 
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<promise_t> waiting,
-                  std::source_location loc = std::source_location::current()) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
         if (!self || !ready) {
             return waiting;
         }
@@ -236,10 +224,7 @@ struct ConnectAwait : uv::AwaitOp<ConnectAwait<Stream>> {
         if constexpr (std::is_same_v<Stream, Pipe>) {
             err = uv::pipe_connect2(req, self->pipe, name.c_str(), name.size(), flags, on_connect);
         } else if constexpr (std::is_same_v<Stream, Tcp>) {
-            err = uv::tcp_connect(req,
-                                  self->tcp,
-                                  reinterpret_cast<const sockaddr *>(&addr),
-                                  on_connect);
+            err = uv::tcp_connect(req, self->tcp, reinterpret_cast<const sockaddr *>(&addr), on_connect);
         } else {
             static_assert(k_always_false_v<Stream>, "unsupported connect Stream type");
         }
@@ -252,32 +237,22 @@ struct ConnectAwait : uv::AwaitOp<ConnectAwait<Stream>> {
         return this->attach(waiting.promise(), loc);
     }
 
-    Result<Stream> await_resume() noexcept {
-        return std::move(outcome);
-    }
+    Result<Stream> await_resume() noexcept { return std::move(outcome); }
 };
 
 } // namespace
 
-template <typename Stream>
-Acceptor<Stream>::Acceptor() noexcept = default;
+template <typename Stream> Acceptor<Stream>::Acceptor() noexcept = default;
 
-template <typename Stream>
-Acceptor<Stream>::Acceptor(Acceptor &&other) noexcept = default;
+template <typename Stream> Acceptor<Stream>::Acceptor(Acceptor &&other) noexcept = default;
 
-template <typename Stream>
-Acceptor<Stream> &Acceptor<Stream>::operator=(Acceptor &&other) noexcept = default;
+template <typename Stream> Acceptor<Stream> &Acceptor<Stream>::operator=(Acceptor &&other) noexcept = default;
 
-template <typename Stream>
-Acceptor<Stream>::~Acceptor() = default;
+template <typename Stream> Acceptor<Stream>::~Acceptor() = default;
 
-template <typename Stream>
-typename Acceptor<Stream>::Self *Acceptor<Stream>::operator->() noexcept {
-    return self.get();
-}
+template <typename Stream> typename Acceptor<Stream>::Self *Acceptor<Stream>::operator->() noexcept { return self.get(); }
 
-template <typename Stream>
-Task<Stream, Error> Acceptor<Stream>::accept() {
+template <typename Stream> Task<Stream, Error> Acceptor<Stream>::accept() {
     if (!self) {
         co_await fail(Error::k_invalid_argument);
     }
@@ -293,8 +268,7 @@ Task<Stream, Error> Acceptor<Stream>::accept() {
     co_return co_await AcceptAwait<Stream>{self.get()};
 }
 
-template <typename Stream>
-Error Acceptor<Stream>::stop() {
+template <typename Stream> Error Acceptor<Stream>::stop() {
     if (!self) {
         return Error::k_invalid_argument;
     }
@@ -304,8 +278,7 @@ Error Acceptor<Stream>::stop() {
     return {};
 }
 
-template <typename Stream>
-Acceptor<Stream>::Acceptor(UniqueHandle<Self> self) noexcept : self(std::move(self)) {}
+template <typename Stream> Acceptor<Stream>::Acceptor(UniqueHandle<Self> self) noexcept : self(std::move(self)) {}
 
 template class Acceptor<Pipe>;
 template class Acceptor<Tcp>;
@@ -398,8 +371,7 @@ Task<Tcp, Error> Tcp::connect(std::string_view host, i32 port, EventLoop &loop) 
     co_return co_await ConnectAwait<Tcp>{std::move(self), host, port};
 }
 
-Result<Tcp::Acceptor>
-Tcp::listen(std::string_view host, i32 port, Tcp::Options opts, EventLoop &loop) {
+Result<Tcp::Acceptor> Tcp::listen(std::string_view host, i32 port, Tcp::Options opts, EventLoop &loop) {
     auto self = Tcp::Acceptor::Self::make();
     if (auto err = uv::tcp_init(loop, self->tcp)) {
         return outcome_error(err);

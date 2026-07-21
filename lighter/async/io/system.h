@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/async/vocab/error.h>
 
 namespace lighter::sys {

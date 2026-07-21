@@ -9,7 +9,7 @@
 #include <exception>
 #endif
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/utils/config.h>
 #include <lighter/async/runtime/node.h>
 #include <lighter/async/runtime/traits.h>
@@ -17,13 +17,10 @@
 
 namespace lighter {
 
-template <typename... Errors>
-class TaskGroup : public AggregateOp {
+template <typename... Errors> class TaskGroup : public AggregateOp {
 public:
     using error_type = detail::task_group_error_type_t<Errors...>;
-    using result_type = std::conditional_t<std::is_void_v<error_type>,
-                                           void,
-                                           Outcome<void, std::vector<error_type>, void>>;
+    using result_type = std::conditional_t<std::is_void_v<error_type>, void, Outcome<void, std::vector<error_type>, void>>;
 
     explicit TaskGroup([[maybe_unused]] EventLoop &loop) : AggregateOp(NodeKind::TASK_GROUP) {}
 
@@ -39,8 +36,7 @@ public:
                 continue;
             }
             assert(child->kind == AsyncNode::NodeKind::TASK);
-            assert((child->state == AsyncNode::FINISHED || child->state == AsyncNode::CANCELLED ||
-                    child->state == AsyncNode::FAILED) &&
+            assert((child->state == AsyncNode::FINISHED || child->state == AsyncNode::CANCELLED || child->state == AsyncNode::FAILED) &&
                    "TaskGroup destroyed before all children completed; co_await join() first");
             static_cast<TaskFrame *>(child)->handle().destroy();
         }
@@ -90,9 +86,7 @@ public:
         AsyncNode::resume_and_drain(settle_if_idle());
     }
 
-    auto join() {
-        return JoinAwaiter{*this};
-    }
+    auto join() { return JoinAwaiter{*this}; }
 
 private:
     using error_handler_fn = void (*)(AsyncNode &child, TaskGroup &group);
@@ -111,12 +105,10 @@ private:
         }
 
         template <typename Promise>
-        std::coroutine_handle<> await_suspend(
-            std::coroutine_handle<Promise> h,
-            std::source_location location = std::source_location::current()) noexcept {
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h,
+                                              std::source_location location = std::source_location::current()) noexcept {
             assert(!group.settled && "join() called twice on the same TaskGroup");
-            assert(group.pending > 0 &&
-                   "join await_suspend called even though TaskGroup is complete");
+            assert(group.pending > 0 && "join await_suspend called even though TaskGroup is complete");
             group.location = location;
             auto *parent_node = static_cast<AsyncNode *>(&h.promise());
             assert(parent_node->is_task_frame() && "TaskGroup join must be awaited from a Task");
@@ -161,8 +153,7 @@ private:
     };
 
     void collect_errors() {
-        assert(children.size() == error_handlers.size() &&
-               "TaskGroup child/Error-handler vectors diverged");
+        assert(children.size() == error_handlers.size() && "TaskGroup child/Error-handler vectors diverged");
         for (usize i = 0; i < children.size(); ++i) {
             if (children[i] && children[i]->state == AsyncNode::FAILED) {
                 error_handlers[i](*children[i], *this);
@@ -184,8 +175,7 @@ private:
         reclaimed = 0;
     }
 
-    template <typename T, typename E>
-    static void extract_error(AsyncNode &child, TaskGroup &g) {
+    template <typename T, typename E> static void extract_error(AsyncNode &child, TaskGroup &g) {
         if (child.propagated_exception) {
 #if LIGHTER_ENABLE_EXCEPTIONS
             g.exceptions.push_back(child.propagated_exception);
@@ -194,8 +184,7 @@ private:
         }
 
         if constexpr (!std::is_void_v<E>) {
-            auto *promise =
-                static_cast<TaskPromiseObject<T, E> *>(static_cast<TaskFrame *>(&child));
+            auto *promise = static_cast<TaskPromiseObject<T, E> *>(static_cast<TaskFrame *>(&child));
             if (promise->value.has_value() && promise->value->has_error()) {
                 if constexpr (std::is_same_v<E, error_type>) {
                     g.errors.push_back(std::move(*promise->value).error());
@@ -210,9 +199,7 @@ private:
 
     std::vector<error_handler_fn> error_handlers;
 
-    std::
-        conditional_t<std::is_void_v<error_type>, std::type_identity<void>, std::vector<error_type>>
-            errors;
+    std::conditional_t<std::is_void_v<error_type>, std::type_identity<void>, std::vector<error_type>> errors;
 
 #if LIGHTER_ENABLE_EXCEPTIONS
     std::vector<std::exception_ptr> exceptions;
