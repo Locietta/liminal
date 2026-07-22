@@ -2,7 +2,6 @@
 
 #include <cassert>
 #include <concepts>
-#include <cstdint>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -13,30 +12,41 @@
 
 namespace lighter {
 
-template <typename T, typename E = void, typename C = void> class Outcome;
+template <typename T, typename E = void, typename C = void>
+struct Outcome;
 
-template <typename T> constexpr bool k_is_outcome_v = false;
+template <typename T>
+constexpr bool k_is_outcome_v = false;
 
-template <typename T, typename E, typename C> constexpr bool k_is_outcome_v<Outcome<T, E, C>> = true;
+template <typename T, typename E, typename C>
+constexpr bool k_is_outcome_v<Outcome<T, E, C>> = true;
 
 struct OutcomeOkTag {};
 
 inline OutcomeOkTag outcome_value() { return {}; }
 
-template <typename E> struct OutcomeError {
+template <typename E>
+struct OutcomeError {
     E value;
 };
 
-template <typename E> OutcomeError<std::decay_t<E>> outcome_error(E &&e) { return {std::forward<E>(e)}; }
+template <typename E>
+OutcomeError<std::decay_t<E>> outcome_error(E &&e) {
+    return {std::forward<E>(e)};
+}
 
-template <typename C> struct OutcomeCancel {
+template <typename C>
+struct OutcomeCancel {
     C value;
 };
 
-template <typename C> OutcomeCancel<std::decay_t<C>> outcome_cancel(C &&c) { return {std::forward<C>(c)}; }
+template <typename C>
+OutcomeCancel<std::decay_t<C>> outcome_cancel(C &&c) {
+    return {std::forward<C>(c)};
+}
 
-template <typename T, typename E, typename C> class Outcome {
-public:
+template <typename T, typename E, typename C>
+struct Outcome {
     using value_type = T;
     using error_type = E;
     using cancel_type = C;
@@ -44,7 +54,8 @@ public:
     enum class State : u8 { OK, ERR, CANCELLED };
 
 private:
-    template <typename X> using member_t = std::conditional_t<std::is_void_v<X>, std::type_identity<void>, X>;
+    template <typename X>
+    using member_t = std::conditional_t<std::is_void_v<X>, std::type_identity<void>, X>;
 
 public:
     template <typename U = T>
@@ -133,7 +144,9 @@ private:
     std::variant<member_t<T>, member_t<E>, member_t<C>> variant;
 };
 
-template <typename T> class Outcome<T, void, void> {
+template <typename T>
+struct Outcome<T, void, void> {
+private:
     using stored_type = std::conditional_t<std::is_void_v<T>, std::type_identity<void>, T>;
 
 public:

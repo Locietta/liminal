@@ -1,12 +1,12 @@
 #pragma once
 
-#include <cstddef>
 #include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
 
 #include <lighter/http/curl.h>
+#include <lighter/types.hpp>
 
 namespace lighter::http {
 
@@ -76,12 +76,12 @@ struct Proxy {
 
 struct RedirectPolicy {
     bool follow = true;
-    std::size_t max_redirects = 10;
+    usize max_redirects = 10;
     bool referer = true;
 
     static RedirectPolicy none() noexcept { return {.follow = false, .max_redirects = 0, .referer = false}; }
 
-    static RedirectPolicy limited(std::size_t max_redirects = 10) noexcept {
+    static RedirectPolicy limited(usize max_redirects = 10) noexcept {
         return {.follow = true, .max_redirects = max_redirects, .referer = true};
     }
 };

@@ -60,9 +60,7 @@ struct PromiseResult<void, E, C> {
         }
     }
 
-    void return_void() noexcept {
-        value.emplace();
-    }
+    void return_void() noexcept { value.emplace(); }
 };
 
 // ============================================================================
@@ -71,17 +69,11 @@ struct PromiseResult<void, E, C> {
 
 struct PromiseException {
 #if LIGHTER_ENABLE_EXCEPTIONS
-    bool has_exception() const noexcept {
-        return exception != nullptr;
-    }
+    bool has_exception() const noexcept { return exception != nullptr; }
 
-    std::exception_ptr get_exception() const noexcept {
-        return exception;
-    }
+    std::exception_ptr get_exception() const noexcept { return exception; }
 
-    void unhandled_exception() noexcept {
-        this->exception = std::current_exception();
-    }
+    void unhandled_exception() noexcept { this->exception = std::current_exception(); }
 
     void rethrow_if_exception() {
         if (this->exception) {
@@ -92,17 +84,11 @@ struct PromiseException {
 protected:
     std::exception_ptr exception{nullptr};
 #else
-    bool has_exception() const noexcept {
-        return false;
-    }
+    bool has_exception() const noexcept { return false; }
 
-    std::exception_ptr get_exception() const noexcept {
-        return nullptr;
-    }
+    std::exception_ptr get_exception() const noexcept { return nullptr; }
 
-    void unhandled_exception() {
-        std::abort();
-    }
+    void unhandled_exception() { std::abort(); }
 
     void rethrow_if_exception() {}
 #endif
@@ -111,9 +97,7 @@ protected:
 struct TransitionAwait {
     AsyncNode::State state = AsyncNode::PENDING;
 
-    bool await_ready() const noexcept {
-        return false;
-    }
+    bool await_ready() const noexcept { return false; }
 
     template <typename Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> handle) const noexcept {
@@ -122,9 +106,8 @@ struct TransitionAwait {
             if (promise.state == AsyncNode::FAILED) {
                 return promise.finalize();
             }
-            assert(
-                (promise.state == AsyncNode::RUNNING || promise.state == AsyncNode::CANCELLED) &&
-                "only a running or lazily-cancelled Task can finish");
+            assert((promise.state == AsyncNode::RUNNING || promise.state == AsyncNode::CANCELLED) &&
+                   "only a running or lazily-cancelled Task can finish");
             // Real errors outrank Cancellation (trio semantics): a Task that
             // fails or throws after being cancelled still reports the Error.
             // Only a normal completion of a cancelled Task finalizes as
@@ -145,14 +128,10 @@ struct TransitionAwait {
         return promise.finalize();
     }
 
-    [[noreturn]] void await_resume() const noexcept {
-        std::abort();
-    }
+    [[noreturn]] void await_resume() const noexcept { std::abort(); }
 };
 
-inline auto cancel() {
-    return TransitionAwait(AsyncNode::CANCELLED);
-}
+inline auto cancel() { return TransitionAwait(AsyncNode::CANCELLED); }
 
 /// Carrier for or_fail(); transformed by await_transform in the promise.
 template <typename Outcome>
@@ -162,9 +141,9 @@ struct OrFailAwait {
 
 /// An Outcome-like type that carries an Error channel (no cancel channel).
 template <typename Outcome>
-concept or_fail_result = k_is_outcome_v<std::remove_cvref_t<Outcome>> &&
-                         std::is_void_v<typename std::remove_cvref_t<Outcome>::cancel_type> &&
-                         (!std::is_void_v<typename std::remove_cvref_t<Outcome>::error_type>);
+concept or_fail_result =
+    k_is_outcome_v<std::remove_cvref_t<Outcome>> && std::is_void_v<typename std::remove_cvref_t<Outcome>::cancel_type> &&
+    (!std::is_void_v<typename std::remove_cvref_t<Outcome>::error_type>);
 
 /// Propagate the Error channel of a non-Task Outcome; resume with its value on success.
 ///
@@ -201,9 +180,7 @@ struct OrFailResumeAwait {
     Outcome result;
     bool finish = false;
 
-    bool await_ready() const noexcept {
-        return !finish;
-    }
+    bool await_ready() const noexcept { return !finish; }
 
     template <typename Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> handle) const noexcept {
@@ -222,7 +199,7 @@ struct OrFailResumeAwait {
 // ============================================================================
 
 template <typename T = void, typename E = void, typename C = void>
-class Task;
+struct Task;
 
 namespace detail {
 
@@ -269,14 +246,10 @@ template <typename ParentPromise, typename ParentError, typename ChildTask>
 struct OrFailTaskAwait {
     typename ChildTask::Awaiter inner;
 
-    bool await_ready() noexcept {
-        return inner.await_ready();
-    }
+    bool await_ready() noexcept { return inner.await_ready(); }
 
-    auto await_suspend(std::coroutine_handle<ParentPromise> h,
-                       std::source_location location = std::source_location::current()) noexcept {
-        inner.awaitee.h.promise().set_error_hook(
-            &propagate_fail<ParentPromise, ParentError, ChildTask>);
+    auto await_suspend(std::coroutine_handle<ParentPromise> h, std::source_location location = std::source_location::current()) noexcept {
+        inner.awaitee.h.promise().set_error_hook(&propagate_fail<ParentPromise, ParentError, ChildTask>);
         return inner.await_suspend(h, location);
     }
 
@@ -303,38 +276,28 @@ struct TaskPromiseObject : TaskFrame, PromiseResult<T, E, void>, PromiseExceptio
 
     using PromiseResult<T, E, void>::value;
 
-    auto handle() {
-        return coroutine_handle::from_promise(*this);
-    }
+    auto handle() { return coroutine_handle::from_promise(*this); }
 
-    auto initial_suspend() const noexcept {
-        return std::suspend_always();
-    }
+    auto initial_suspend() const noexcept { return std::suspend_always(); }
 
-    auto final_suspend() const noexcept {
-        return TransitionAwait(AsyncNode::FINISHED);
-    }
+    auto final_suspend() const noexcept { return TransitionAwait(AsyncNode::FINISHED); }
 
-    auto get_return_object() {
-        return TaskReturnObject<T, E>{handle()};
-    }
+    auto get_return_object() { return TaskReturnObject<T, E>{handle()}; }
 
     /// co_await fail(args...): write Error and transition to FINISHED.
     template <typename... Args>
     auto await_transform(FailAwait<Args...> &&fail) noexcept
         requires(!std::is_void_v<E>) && std::constructible_from<E, Args...>
     {
-        value.emplace(outcome_error(std::apply(
-            [](auto &&...forwarded) { return E(std::forward<decltype(forwarded)>(forwarded)...); },
-            std::move(fail.args))));
+        value.emplace(outcome_error(
+            std::apply([](auto &&...forwarded) { return E(std::forward<decltype(forwarded)>(forwarded)...); }, std::move(fail.args))));
         return TransitionAwait(AsyncNode::FINISHED);
     }
 
     /// co_await or_fail(Outcome): propagate Error or unwrap value (non-task).
     template <typename Outcome>
     auto await_transform(OrFailAwait<Outcome> &&failed) noexcept
-        requires(!std::is_void_v<E>) &&
-                or_fail_result<Outcome> && std::constructible_from<E, typename Outcome::error_type>
+        requires(!std::is_void_v<E>) && or_fail_result<Outcome> && std::constructible_from<E, typename Outcome::error_type>
     {
         if (failed.result.has_error()) {
             value.emplace(outcome_error(E(std::move(failed.result).error())));
@@ -349,8 +312,7 @@ struct TaskPromiseObject : TaskFrame, PromiseResult<T, E, void>, PromiseExceptio
         requires(!std::is_void_v<E>) && std::constructible_from<E, ChildE>
     {
         using child_task = Task<ChildT, ChildE, void>;
-        return detail::OrFailTaskAwait<TaskPromiseObject, E, child_task>{
-            std::move(wrapped.inner).operator co_await()};
+        return detail::OrFailTaskAwait<TaskPromiseObject, E, child_task>{std::move(wrapped.inner).operator co_await()};
     }
 
     /// Pass-through for all other awaitables.
@@ -359,9 +321,7 @@ struct TaskPromiseObject : TaskFrame, PromiseResult<T, E, void>, PromiseExceptio
         return std::forward<Awaitable>(awaitable);
     }
 
-    TaskPromiseObject() {
-        this->address = handle().address();
-    }
+    TaskPromiseObject() { this->address = handle().address(); }
 };
 
 template <typename T, typename E>
@@ -381,16 +341,14 @@ struct TaskReturnObject {
 };
 
 template <typename T, typename E, typename C>
-class Task {
-public:
-    friend class EventLoop;
+struct Task {
+    friend struct EventLoop;
     template <typename, typename, typename>
-    friend class Task;
+    friend struct Task;
     template <typename, typename, typename>
     friend struct detail::OrFailTaskAwait;
 
-    static_assert(std::is_void_v<C> || std::same_as<C, Cancellation>,
-                  "Task only supports void or Cancellation cancel channels");
+    static_assert(std::is_void_v<C> || std::same_as<C, Cancellation>, "Task only supports void or Cancellation cancel channels");
 
     using value_type = T;
     using error_type = E;
@@ -403,14 +361,10 @@ public:
     struct Awaiter {
         Task awaitee;
 
-        bool await_ready() noexcept {
-            return false;
-        }
+        bool await_ready() noexcept { return false; }
 
         template <typename Promise>
-        auto await_suspend(
-            std::coroutine_handle<Promise> h,
-            std::source_location location = std::source_location::current()) noexcept {
+        auto await_suspend(std::coroutine_handle<Promise> h, std::source_location location = std::source_location::current()) noexcept {
             return awaitee.h.promise().attach(h.promise(), location);
         }
 
@@ -440,8 +394,7 @@ public:
                 if constexpr (std::is_void_v<E>) {
                     assert(promise.state == AsyncNode::FINISHED);
                 } else {
-                    assert(promise.state == AsyncNode::FINISHED ||
-                           promise.state == AsyncNode::FAILED);
+                    assert(promise.state == AsyncNode::FINISHED || promise.state == AsyncNode::FAILED);
                 }
                 assert(promise.value.has_value());
 
@@ -460,9 +413,7 @@ public:
         }
     };
 
-    auto operator co_await() && noexcept {
-        return Awaiter(std::move(*this));
-    }
+    auto operator co_await() && noexcept { return Awaiter(std::move(*this)); }
 
     /// Wrap this Task so that co_await propagates errors directly to the parent
     /// without resuming the parent coroutine. On success, returns the unwrapped value.
@@ -475,7 +426,6 @@ public:
         return detail::OrFailProxy<Task>{std::move(*this)};
     }
 
-public:
     Task() = default;
 
     explicit Task(coroutine_handle h) noexcept : h(h) {
@@ -486,9 +436,7 @@ public:
 
     Task(const Task &) = delete;
 
-    Task(Task &&other) noexcept : h(other.h) {
-        other.h = nullptr;
-    }
+    Task(Task &&other) noexcept : h(other.h) { other.h = nullptr; }
 
     Task &operator=(const Task &) = delete;
 
@@ -544,13 +492,9 @@ public:
         }
     }
 
-    void release() {
-        this->h = nullptr;
-    }
+    void release() { this->h = nullptr; }
 
-    AsyncNode *operator->() {
-        return &h.promise();
-    }
+    AsyncNode *operator->() { return &h.promise(); }
 
     /// Adds Cancellation interception. Idempotent if already intercepting.
     auto catch_cancel() && {

@@ -15,7 +15,8 @@
 
 namespace lighter::http::detail {
 
-template <typename T> curl_option_hook make_curl_option(CURLoption option, T &&value) {
+template <typename T>
+curl_option_hook make_curl_option(CURLoption option, T &&value) {
     using stored_t = std::decay_t<T>;
     static_assert(std::is_copy_constructible_v<stored_t>, "native curl option values must be copy constructible");
 
@@ -82,7 +83,8 @@ struct RequestSettings {
         return std::forward<decltype(self)>(self);
     }
 
-    template <typename T> decltype(auto) curl_option(this auto &&self, CURLoption option, T &&value) {
+    template <typename T>
+    decltype(auto) curl_option(this auto &&self, CURLoption option, T &&value) {
         self.curl_options.push_back(detail::make_curl_option(option, std::forward<T>(value)));
         return std::forward<decltype(self)>(self);
     }

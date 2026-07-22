@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -10,6 +9,7 @@
 #include <lighter/http/response.h>
 #include <lighter/async/vocab/error.h>
 #include <lighter/async/vocab/outcome.h>
+#include <lighter/types.hpp>
 
 namespace lighter::http::detail {
 
@@ -28,8 +28,8 @@ struct InflightRequest : RequestSettings {
     void clear_runtime_binding() noexcept;
     Outcome<Response, Error, Cancellation> finish() noexcept;
 
-    static std::size_t on_write(char *data, std::size_t size, std::size_t count, void *userdata);
-    static std::size_t on_header(char *data, std::size_t size, std::size_t count, void *userdata);
+    static usize on_write(char *data, usize size, usize count, void *userdata);
+    static usize on_header(char *data, usize size, usize count, void *userdata);
 
     std::shared_ptr<SharedResources> shared;
     std::string method_name;
@@ -56,7 +56,8 @@ private:
     bool apply_curl_options() noexcept;
 };
 
-template <typename T> bool easy_setopt(InflightRequest &request, CURLoption option, T value) noexcept {
+template <typename T>
+bool easy_setopt(InflightRequest &request, CURLoption option, T value) noexcept {
     if (auto err = curl::setopt(request.easy.get(), option, value); !curl::ok(err)) {
         return request.fail(err);
     }

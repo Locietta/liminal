@@ -1,8 +1,6 @@
 #pragma once
 
 #include <chrono>
-#include <cstddef>
-#include <cstdint>
 #include <span>
 #include <string>
 #include <string_view>
@@ -15,7 +13,7 @@
 
 namespace lighter {
 
-class EventLoop;
+struct EventLoop;
 
 namespace fs {
 
@@ -102,8 +100,7 @@ struct CopyfileOptions {
     bool clone_force = false;
 };
 
-class DirHandle {
-public:
+struct DirHandle {
     DirHandle() = default;
     DirHandle(DirHandle &&other) noexcept;
     DirHandle &operator=(DirHandle &&other) noexcept;

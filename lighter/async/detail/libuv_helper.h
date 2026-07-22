@@ -2,8 +2,6 @@
 
 #include <cassert>
 #include <concepts>
-#include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -13,6 +11,7 @@
 #include <unordered_set>
 
 #include <uv.h>
+
 #include <lighter/types.hpp>
 #include <lighter/utils/type_list.h>
 #include <lighter/async/runtime/node.h>
@@ -40,7 +39,8 @@
 
 namespace lighter { namespace uv {
 
-template <typename T> using bare_t = std::remove_cv_t<std::remove_reference_t<T>>;
+template <typename T>
+using bare_t = std::remove_cv_t<std::remove_reference_t<T>>;
 
 template <typename T>
 concept handle_like = is_one_of<bare_t<T>, uv_handle_t, uv_stream_t, uv_tcp_t, uv_pipe_t, uv_tty_t, uv_udp_t, uv_poll_t, uv_timer_t,
@@ -52,7 +52,8 @@ concept stream_like = is_one_of<bare_t<T>, uv_stream_t, uv_tcp_t, uv_pipe_t, uv_
 template <typename T>
 concept req_like = is_one_of<bare_t<T>, uv_req_t, uv_fs_t, uv_work_t, uv_write_t, uv_udp_send_t, uv_connect_t>;
 
-template <handle_like H> ALWAYS_INLINE uv_handle_t *as_handle(H &handle) noexcept {
+template <handle_like H>
+ALWAYS_INLINE uv_handle_t *as_handle(H &handle) noexcept {
     if constexpr (std::same_as<bare_t<H>, uv_handle_t>) {
         return &handle;
     } else {
@@ -60,7 +61,8 @@ template <handle_like H> ALWAYS_INLINE uv_handle_t *as_handle(H &handle) noexcep
     }
 }
 
-template <handle_like H> ALWAYS_INLINE const uv_handle_t *as_handle(const H &handle) noexcept {
+template <handle_like H>
+ALWAYS_INLINE const uv_handle_t *as_handle(const H &handle) noexcept {
     if constexpr (std::same_as<bare_t<H>, uv_handle_t>) {
         return &handle;
     } else {
@@ -68,7 +70,8 @@ template <handle_like H> ALWAYS_INLINE const uv_handle_t *as_handle(const H &han
     }
 }
 
-template <stream_like S> ALWAYS_INLINE uv_stream_t *as_stream(S &stream) noexcept {
+template <stream_like S>
+ALWAYS_INLINE uv_stream_t *as_stream(S &stream) noexcept {
     if constexpr (std::same_as<bare_t<S>, uv_stream_t>) {
         return &stream;
     } else {
@@ -76,7 +79,8 @@ template <stream_like S> ALWAYS_INLINE uv_stream_t *as_stream(S &stream) noexcep
     }
 }
 
-template <stream_like S> ALWAYS_INLINE const uv_stream_t *as_stream(const S &stream) noexcept {
+template <stream_like S>
+ALWAYS_INLINE const uv_stream_t *as_stream(const S &stream) noexcept {
     if constexpr (std::same_as<bare_t<S>, uv_stream_t>) {
         return &stream;
     } else {
@@ -89,28 +93,51 @@ struct TtyWinsize {
     i32 height = 0;
 };
 
-template <typename StatusT> ALWAYS_INLINE Error status_to_error(StatusT status) noexcept {
+template <typename StatusT>
+ALWAYS_INLINE Error status_to_error(StatusT status) noexcept {
     if (static_cast<i64>(status) < 0) {
         return Error(static_cast<i32>(status));
     }
     return {};
 }
 
-template <handle_like H> ALWAYS_INLINE bool is_active(const H &handle) noexcept { return ::uv_is_active(as_handle(handle)) != 0; }
+template <handle_like H>
+ALWAYS_INLINE bool is_active(const H &handle) noexcept {
+    return ::uv_is_active(as_handle(handle)) != 0;
+}
 
-template <stream_like S> ALWAYS_INLINE bool is_readable(const S &stream) noexcept { return ::uv_is_readable(as_stream(stream)) != 0; }
+template <stream_like S>
+ALWAYS_INLINE bool is_readable(const S &stream) noexcept {
+    return ::uv_is_readable(as_stream(stream)) != 0;
+}
 
-template <stream_like S> ALWAYS_INLINE bool is_writable(const S &stream) noexcept { return ::uv_is_writable(as_stream(stream)) != 0; }
+template <stream_like S>
+ALWAYS_INLINE bool is_writable(const S &stream) noexcept {
+    return ::uv_is_writable(as_stream(stream)) != 0;
+}
 
-template <handle_like H> ALWAYS_INLINE bool is_closing(const H &handle) noexcept { return ::uv_is_closing(as_handle(handle)) != 0; }
+template <handle_like H>
+ALWAYS_INLINE bool is_closing(const H &handle) noexcept {
+    return ::uv_is_closing(as_handle(handle)) != 0;
+}
 
-template <handle_like H> ALWAYS_INLINE void ref(H &handle) noexcept { ::uv_ref(as_handle(handle)); }
+template <handle_like H>
+ALWAYS_INLINE void ref(H &handle) noexcept {
+    ::uv_ref(as_handle(handle));
+}
 
-template <handle_like H> ALWAYS_INLINE void unref(H &handle) noexcept { ::uv_unref(as_handle(handle)); }
+template <handle_like H>
+ALWAYS_INLINE void unref(H &handle) noexcept {
+    ::uv_unref(as_handle(handle));
+}
 
-template <handle_like H> ALWAYS_INLINE void close(H &handle, uv_close_cb cb = nullptr) noexcept { ::uv_close(as_handle(handle), cb); }
+template <handle_like H>
+ALWAYS_INLINE void close(H &handle, uv_close_cb cb = nullptr) noexcept {
+    ::uv_close(as_handle(handle), cb);
+}
 
-template <req_like R> ALWAYS_INLINE Error cancel(R &req) noexcept {
+template <req_like R>
+ALWAYS_INLINE Error cancel(R &req) noexcept {
     // Errors: UV_EINVAL (req type not cancellable), UV_EBUSY (already running/done).
     return status_to_error(::uv_cancel(reinterpret_cast<uv_req_t *>(&req)));
 }
@@ -238,28 +265,33 @@ ALWAYS_INLINE Error queue_work(uv_loop_t &loop, uv_work_t &req, uv_work_cb work_
     return status_to_error(::uv_queue_work(&loop, &req, work_cb, after_work_cb));
 }
 
-template <stream_like S> ALWAYS_INLINE Error read_start(S &stream, uv_alloc_cb alloc_cb, uv_read_cb read_cb) noexcept {
+template <stream_like S>
+ALWAYS_INLINE Error read_start(S &stream, uv_alloc_cb alloc_cb, uv_read_cb read_cb) noexcept {
     assert(alloc_cb != nullptr && read_cb != nullptr && "uv::read_start requires non-null callbacks");
     // Errors: UV_EINVAL / UV_EALREADY / UV_ENOTCONN
     return status_to_error(::uv_read_start(as_stream(stream), alloc_cb, read_cb));
 }
 
-template <stream_like S> ALWAYS_INLINE void read_stop(S &stream) noexcept {
+template <stream_like S>
+ALWAYS_INLINE void read_stop(S &stream) noexcept {
     [[maybe_unused]] i32 rc = ::uv_read_stop(as_stream(stream));
     assert(rc == 0 && "uv::read_stop failed");
 }
 
-template <stream_like S> ALWAYS_INLINE Error write(uv_write_t &req, S &stream, std::span<const uv_buf_t> bufs, uv_write_cb cb) noexcept {
+template <stream_like S>
+ALWAYS_INLINE Error write(uv_write_t &req, S &stream, std::span<const uv_buf_t> bufs, uv_write_cb cb) noexcept {
     assert(!bufs.empty() && "uv::write requires a non-empty buffer span");
     // Errors: stream state/fd/write precondition failures.
     return status_to_error(::uv_write(&req, as_stream(stream), bufs.data(), static_cast<u32>(bufs.size()), cb));
 }
 
-template <stream_like Server, stream_like Client> ALWAYS_INLINE Error accept(Server &server, Client &client) noexcept {
+template <stream_like Server, stream_like Client>
+ALWAYS_INLINE Error accept(Server &server, Client &client) noexcept {
     return status_to_error(::uv_accept(as_stream(server), as_stream(client)));
 }
 
-template <stream_like S> ALWAYS_INLINE Error listen(S &stream, i32 backlog, uv_connection_cb cb) noexcept {
+template <stream_like S>
+ALWAYS_INLINE Error listen(S &stream, i32 backlog, uv_connection_cb cb) noexcept {
     assert(cb != nullptr && "uv::listen requires non-null callback");
     return status_to_error(::uv_listen(as_stream(stream), backlog, cb));
 }
@@ -297,7 +329,8 @@ ALWAYS_INLINE Error tcp_connect(uv_connect_t &req, uv_tcp_t &handle, const socka
 
 ALWAYS_INLINE uv_handle_type guess_handle(uv_file file) noexcept { return ::uv_guess_handle(file); }
 
-template <stream_like S> ALWAYS_INLINE Result<usize> try_write(S &stream, std::span<const uv_buf_t> bufs) noexcept {
+template <stream_like S>
+ALWAYS_INLINE Result<usize> try_write(S &stream, std::span<const uv_buf_t> bufs) noexcept {
     assert(!bufs.empty() && "uv::try_write requires a non-empty buffer span");
     [[maybe_unused]] i32 rc = ::uv_try_write(as_stream(stream), bufs.data(), static_cast<u32>(bufs.size()));
     if (rc < 0) {
@@ -306,7 +339,8 @@ template <stream_like S> ALWAYS_INLINE Result<usize> try_write(S &stream, std::s
     return static_cast<usize>(rc);
 }
 
-template <stream_like S> ALWAYS_INLINE Error stream_set_blocking(S &stream, bool enabled) noexcept {
+template <stream_like S>
+ALWAYS_INLINE Error stream_set_blocking(S &stream, bool enabled) noexcept {
     return status_to_error(::uv_stream_set_blocking(as_stream(stream), enabled ? 1 : 0));
 }
 
@@ -739,8 +773,7 @@ inline Result<ResolvedAddr> resolve_addr(std::string_view host, i32 port) {
 ///
 /// Storage is thread-local because libuv handles are thread-affine and a single
 /// thread may create and tear down multiple loops sequentially.
-class LoopCloseFallback {
-public:
+struct LoopCloseFallback {
     using registry_type = std::unordered_set<const uv_handle_t *>;
 
     static void mark(const uv_handle_t *handle) { handles().insert(handle); }
@@ -754,7 +787,8 @@ private:
     }
 };
 
-template <typename Derived, typename Handle> class UniqueHandleImpl {
+template <typename Derived, typename Handle>
+struct UniqueHandleImpl {
 protected:
     UniqueHandleImpl() = default;
     ~UniqueHandleImpl() = default;
@@ -819,6 +853,7 @@ public:
     }
 };
 
-template <typename Derived, typename Handle> using handle = UniqueHandleImpl<Derived, Handle>;
+template <typename Derived, typename Handle>
+using handle = UniqueHandleImpl<Derived, Handle>;
 
 }} // namespace lighter::uv

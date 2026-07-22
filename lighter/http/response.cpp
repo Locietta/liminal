@@ -1,6 +1,5 @@
 #include "response.h"
 
-#include <cstddef>
 #include <span>
 #include <string>
 #include <string_view>
@@ -24,7 +23,7 @@ std::string message(const Error &err) {
     return "unknown http error";
 }
 
-std::span<const std::byte> Response::bytes() const noexcept { return body; }
+std::span<const byte> Response::bytes() const noexcept { return body; }
 
 std::string_view Response::text() const noexcept {
     if (body.empty()) {

@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <cassert>
 #include <coroutine>
-#include <cstddef>
-#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <limits>
@@ -16,16 +14,15 @@
 
 namespace lighter {
 
-class SyncPrimitive;
-class TaskFrame;
+struct SyncPrimitive;
+struct TaskFrame;
 
 /// Type-erased base for all coroutine-related nodes in the Task tree.
 ///
 /// This hierarchy models awaitable runtime entities only.
 /// Shared sync resources (Mutex/Event/Semaphore/cv) live outside it and are
 /// referenced by WaitNode nodes while a Task is blocked on them.
-class AsyncNode {
-public:
+struct AsyncNode {
     enum class NodeKind : u8 {
         TASK,
 
@@ -112,9 +109,9 @@ public:
     std::exception_ptr propagated_exception;
 };
 
-class TaskFrame : public AsyncNode {
+struct TaskFrame : AsyncNode {
 protected:
-    friend class AsyncNode;
+    friend struct AsyncNode;
 
     explicit TaskFrame() : AsyncNode(NodeKind::TASK) {}
 
@@ -173,10 +170,9 @@ private:
     error_hook error_hook_fn = nullptr;
 };
 
-class WaitNode : public AsyncNode {
-public:
-    friend class AsyncNode;
-    friend class SyncPrimitive;
+struct WaitNode : AsyncNode {
+    friend struct AsyncNode;
+    friend struct SyncPrimitive;
 
     explicit WaitNode(NodeKind k) : AsyncNode(k) {}
 
@@ -216,9 +212,9 @@ protected:
 /// The Outcome itself is not latched as a separate "what to deliver" value;
 /// it is derived in settle() from `decision`, `state` and the attribution
 /// indices, so the delivered Outcome and its attribution cannot diverge.
-class AggregateOp : public AsyncNode {
+struct AggregateOp : AsyncNode {
 protected:
-    friend class AsyncNode;
+    friend struct AsyncNode;
 
     explicit AggregateOp(NodeKind k) : AsyncNode(k) {}
 
@@ -392,9 +388,9 @@ protected:
     }
 };
 
-class IoOp : public AsyncNode {
+struct IoOp : AsyncNode {
 protected:
-    friend class AsyncNode;
+    friend struct AsyncNode;
 
     using on_cancel = void (*)(IoOp *self);
 

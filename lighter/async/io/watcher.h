@@ -9,10 +9,9 @@
 
 namespace lighter {
 
-class EventLoop;
+struct EventLoop;
 
-class Timer {
-public:
+struct Timer {
     Timer() noexcept;
 
     Timer(const Timer &) = delete;
@@ -40,8 +39,7 @@ private:
     UniqueHandle<Self> self;
 };
 
-class Signal {
-public:
+struct Signal {
     Signal() noexcept;
 
     Signal(const Signal &) = delete;
@@ -69,8 +67,7 @@ private:
     UniqueHandle<Self> self;
 };
 
-class Idle {
-public:
+struct Idle {
     Idle() noexcept;
 
     Idle(const Idle &) = delete;
@@ -98,8 +95,7 @@ private:
     UniqueHandle<Self> self;
 };
 
-class Prepare {
-public:
+struct Prepare {
     Prepare() noexcept;
 
     Prepare(const Prepare &) = delete;
@@ -127,8 +123,7 @@ private:
     UniqueHandle<Self> self;
 };
 
-class Check {
-public:
+struct Check {
     Check() noexcept;
 
     Check(const Check &) = delete;

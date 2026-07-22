@@ -31,8 +31,7 @@ const inline SyncPrimitive *get_resource(const AsyncNode &node) {
 }
 
 template <typename Derived>
-class AsyncVisitor {
-public:
+struct AsyncVisitor {
     void walk_node(const AsyncNode &node) {
         if (!visited_.insert(&node).second) {
             return;
@@ -42,8 +41,7 @@ public:
         switch (node.kind) {
             case NK::TASK: {
                 auto &task = static_cast<const TaskFrame &>(node);
-                if (!derived().visit_task(task))
-                    return;
+                if (!derived().visit_task(task)) return;
                 if (auto *child = task.get_child()) {
                     derived().visit_edge(&task, child);
                     walk_node(*child);
@@ -54,8 +52,7 @@ public:
             case NK::MUTEX_WAITER:
             case NK::EVENT_WAITER: {
                 auto &wn = static_cast<const WaitNode &>(node);
-                if (!derived().visit_wait_node(wn))
-                    return;
+                if (!derived().visit_wait_node(wn)) return;
                 if (auto *res = wn.get_resource()) {
                     derived().visit_edge(&wn, res);
                     walk_sync(*res);
@@ -67,8 +64,7 @@ public:
             case NK::WHEN_ANY:
             case NK::TASK_GROUP: {
                 auto &agg = static_cast<const AggregateOp &>(node);
-                if (!derived().visit_aggregate(agg))
-                    return;
+                if (!derived().visit_aggregate(agg)) return;
                 for (auto *child : agg.get_children()) {
                     if (child) {
                         derived().visit_edge(&agg, child);
@@ -90,45 +86,30 @@ public:
             return;
         }
 
-        if (!derived().visit_sync(resource))
-            return;
+        if (!derived().visit_sync(resource)) return;
         for (auto *w = resource.get_head(); w; w = w->get_next()) {
             derived().visit_edge(&resource, w);
             walk_node(*w);
         }
     }
 
-    void reset() {
-        visited_.clear();
-    }
+    void reset() { visited_.clear(); }
 
 protected:
-    bool visit_task(const TaskFrame &) {
-        return true;
-    }
+    bool visit_task(const TaskFrame &) { return true; }
 
-    bool visit_wait_node(const WaitNode &) {
-        return true;
-    }
+    bool visit_wait_node(const WaitNode &) { return true; }
 
-    bool visit_aggregate(const AggregateOp &) {
-        return true;
-    }
+    bool visit_aggregate(const AggregateOp &) { return true; }
 
-    bool visit_io(const IoOp &) {
-        return true;
-    }
+    bool visit_io(const IoOp &) { return true; }
 
-    bool visit_sync(const SyncPrimitive &) {
-        return true;
-    }
+    bool visit_sync(const SyncPrimitive &) { return true; }
 
     void visit_edge(const void *, const void *) {}
 
 private:
-    Derived &derived() {
-        return static_cast<Derived &>(*this);
-    }
+    Derived &derived() { return static_cast<Derived &>(*this); }
 
     std::set<const void *> visited_;
 };

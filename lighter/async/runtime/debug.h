@@ -4,10 +4,10 @@
 
 namespace lighter {
 
-class AsyncNode;
+struct AsyncNode;
 
 template <typename T, typename E, typename C>
-class Task;
+struct Task;
 
 std::string dump_dot(const AsyncNode &root);
 

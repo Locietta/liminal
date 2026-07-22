@@ -2,7 +2,8 @@
 
 #include <tuple>
 #include <type_traits>
-#include <lighter/scalar_types.hpp>
+
+#include <lighter/types.hpp>
 
 namespace lighter {
 

@@ -27,9 +27,7 @@ Task<void, Error> queue(Function<void()> fn, EventLoop &loop = EventLoop::curren
 /// after `fn` has already finished. Keep it cheap and idempotent, and only
 /// touch state that is safe to share with the concurrently running `fn` -
 /// the typical shape is setting an atomic flag that `fn` polls.
-Task<void, Error> queue(Function<void()> fn,
-                        Function<void()> on_cancel,
-                        EventLoop &loop = EventLoop::current());
+Task<void, Error> queue(Function<void()> fn, Function<void()> on_cancel, EventLoop &loop = EventLoop::current());
 
 /// Run work on libuv's worker pool and return either its value or an Error.
 template <typename Fn, typename R = callable_return_t<Fn>>
@@ -45,8 +43,7 @@ template <typename Fn, typename R = callable_return_t<Fn>>
     requires std::is_invocable_v<Fn> && (!std::is_void_v<R>)
 Task<R, Error> queue(Fn fn, Function<void()> on_cancel, EventLoop &loop = EventLoop::current()) {
     std::optional<R> ret;
-    co_await queue(Function<void()>([&] { ret.emplace(fn()); }), std::move(on_cancel), loop)
-        .or_fail();
+    co_await queue(Function<void()>([&] { ret.emplace(fn()); }), std::move(on_cancel), loop).or_fail();
     co_return std::move(*ret);
 }
 

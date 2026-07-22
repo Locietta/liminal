@@ -22,7 +22,8 @@ concept fs_result_populator = std::move_constructible<Populate> && requires(Popu
     { populate(req) } -> std::convertible_to<Result<FsResult>>;
 };
 
-template <typename FsResult, fs_result_populator<FsResult> Populate> struct FsOp : uv::AwaitOp<FsOp<FsResult, Populate>> {
+template <typename FsResult, fs_result_populator<FsResult> Populate>
+struct FsOp : uv::AwaitOp<FsOp<FsResult, Populate>> {
     using promise_t = Task<FsResult, Error>::promise_type;
 
     uv_fs_t req = {};
@@ -124,7 +125,8 @@ static Task<Result, Error> run_fs(Submit submit, Populate populate, [[maybe_unus
     co_return co_await op;
 }
 
-template <typename Submit> static Task<void, Error> run_void_fs(Submit submit, [[maybe_unused]] EventLoop &loop) {
+template <typename Submit>
+static Task<void, Error> run_void_fs(Submit submit, [[maybe_unused]] EventLoop &loop) {
     if (auto res = co_await run_fs<i32>(std::move(submit), [](uv_fs_t &) { return 0; }, loop); !res) {
         co_await fail(res.error());
     }
@@ -500,14 +502,16 @@ Task<std::vector<fs::Dirent>, Error> fs::readdir(fs::DirHandle &dir, EventLoop &
         loop);
 }
 
-template <typename Fn, typename Map> static auto run_sync_fs(Fn &&fn, Map &&map) {
+template <typename Fn, typename Map>
+static auto run_sync_fs(Fn &&fn, Map &&map) {
     uv_fs_t req{};
     i32 r = fn(req);
     uv::fs_req_cleanup(req);
     return map(r);
 }
 
-template <typename Fn> static Error run_sync_fs(Fn &&fn) {
+template <typename Fn>
+static Error run_sync_fs(Fn &&fn) {
     return run_sync_fs(std::forward<Fn>(fn), [](i32 r) -> Error {
         if (r < 0) {
             return uv::status_to_error(r);

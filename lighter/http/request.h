@@ -13,13 +13,6 @@
 #include <lighter/async/runtime/task.h>
 #include <lighter/async/vocab/error.h>
 
-#if __has_include(<simdjson.h>)
-#include "lighter/codec/json/json.h"
-#define LIGHTER_HTTP_HAS_CODEC_JSON 1
-#else
-#define LIGHTER_HTTP_HAS_CODEC_JSON 0
-#endif
-
 namespace lighter::http::detail {
 
 struct SharedResources {
@@ -69,19 +62,6 @@ struct Request : detail::RequestSettings {
 
     Task<Response, Error> send() &;
     Task<Response, Error> send() &&;
-
-#if LIGHTER_HTTP_HAS_CODEC_JSON
-    template <typename T> request &json(const T &value) {
-        auto encoded = codec::json::to_string(value);
-        if (!encoded) {
-            remember_error(Error{ErrorKind::JSON_ENCODE, encoded.error().to_string()});
-            return *this;
-        }
-
-        json_text(std::move(*encoded));
-        return *this;
-    }
-#endif
 
 private:
     friend struct BoundClient;

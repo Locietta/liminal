@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+
 #include <lighter/types.hpp>
 
 namespace lighter {

@@ -7,14 +7,16 @@
 #include <utility>
 
 #include <uv.h>
+
 #include <lighter/types.hpp>
 #include <lighter/utils/functional.h>
 
 namespace lighter {
 
-class AsyncNode;
+struct AsyncNode;
 
-template <typename T, typename E, typename C> class Task;
+template <typename T, typename E, typename C>
+struct Task;
 
 /// A thread-safe Relay for posting callbacks to an Event loop.
 ///
@@ -52,8 +54,7 @@ template <typename T, typename E, typename C> class Task;
 ///   - Destroying the Relay releases the loop hold. PENDING callbacks
 ///     that were already enqueued are still delivered, unless the
 ///     EventLoop itself is being destroyed (which clears the queue).
-class Relay {
-public:
+struct Relay {
     Relay() noexcept = default;
 
     Relay(const Relay &) = delete;
@@ -76,7 +77,7 @@ public:
     struct Self;
 
 private:
-    friend class EventLoop;
+    friend struct EventLoop;
 
     explicit Relay(Self *p) noexcept;
 
@@ -88,8 +89,7 @@ private:
 /// All async operations (tasks, timers, I/O) require an EventLoop.
 /// Each thread may have at most one active loop (thread-local).
 /// Use EventLoop::current() inside a running loop to get a reference.
-class EventLoop {
-public:
+struct EventLoop {
     EventLoop();
 
     ~EventLoop();
@@ -106,9 +106,8 @@ public:
     /// Internal accessor for the implementation struct.
     Self *operator->() { return self.get(); }
 
-    friend class AsyncNode;
+    friend struct AsyncNode;
 
-public:
     operator uv_loop_t &() noexcept;
 
     operator const uv_loop_t &() const noexcept;
@@ -134,7 +133,8 @@ public:
     /// Schedules a Task for execution on this Event loop.
     /// If the Task is passed by rvalue (temporary), the loop takes ownership
     /// (sets root=true). The Task will be destroyed after it completes.
-    template <typename TaskT> void schedule(TaskT &&task, std::source_location location = std::source_location::current()) {
+    template <typename TaskT>
+    void schedule(TaskT &&task, std::source_location location = std::source_location::current()) {
         auto &promise = task.h.promise();
         if constexpr (std::is_rvalue_reference_v<TaskT &&>) {
             promise.root = true;
@@ -164,7 +164,8 @@ private:
 
 /// Convenience: creates a loop, schedules all tasks, runs to completion,
 /// and returns a tuple of their values (via task::value()).
-template <typename... Tasks> auto run(Tasks &&...tasks) {
+template <typename... Tasks>
+auto run(Tasks &&...tasks) {
     EventLoop loop;
     (loop.schedule(tasks), ...);
     loop.run();

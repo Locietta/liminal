@@ -1,8 +1,9 @@
 #include "util.h"
 
 #include <cctype>
-#include <cstdint>
 #include <string>
+
+#include <lighter/types.hpp>
 
 namespace lighter::http::detail {
 
@@ -11,7 +12,7 @@ bool iequals(std::string_view lhs, std::string_view rhs) noexcept {
         return false;
     }
 
-    for (std::size_t i = 0; i < lhs.size(); ++i) {
+    for (usize i = 0; i < lhs.size(); ++i) {
         if (std::tolower(static_cast<unsigned char>(lhs[i])) != std::tolower(static_cast<unsigned char>(rhs[i]))) {
             return false;
         }
@@ -43,8 +44,8 @@ void insert_header(std::vector<Header> &headers, std::string name, std::string v
 }
 
 std::string trim_ascii(std::string_view text) {
-    std::size_t begin = 0;
-    std::size_t end = text.size();
+    usize begin = 0;
+    usize end = text.size();
     while (begin < end && std::isspace(static_cast<unsigned char>(text[begin]))) {
         ++begin;
     }
@@ -104,7 +105,7 @@ std::string base64_encode(std::string_view text) {
     std::string out;
     out.reserve(((text.size() + 2) / 3) * 4);
 
-    std::uint32_t buffer = 0;
+    u32 buffer = 0;
     int bits = 0;
     for (unsigned char ch : text) {
         buffer = (buffer << 8) | ch;

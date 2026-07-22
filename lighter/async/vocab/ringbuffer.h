@@ -1,15 +1,14 @@
 #pragma once
 
 #include <cassert>
-#include <cstddef>
 #include <memory>
 #include <utility>
+
 #include <lighter/types.hpp>
 
 namespace lighter {
 
-class RingBuffer {
-public:
+struct RingBuffer {
     /// contract: pre(cap > 0)
     explicit RingBuffer(usize cap = 64 * 1024) : storage(std::make_unique_for_overwrite<char[]>(cap)), capacity(cap) {
         assert(cap > 0 && "RingBuffer capacity must be greater than zero");

@@ -44,7 +44,8 @@ struct Signal::Self : uv::handle<Signal::Self, uv_signal_t> {
 
 namespace {
 
-template <typename SelfT, typename HandleT> struct BasicTickAwait : uv::AwaitOp<BasicTickAwait<SelfT, HandleT>> {
+template <typename SelfT, typename HandleT>
+struct BasicTickAwait : uv::AwaitOp<BasicTickAwait<SelfT, HandleT>> {
     using await_base = uv::AwaitOp<BasicTickAwait<SelfT, HandleT>>;
     using promise_t = Task<>::promise_type;
 

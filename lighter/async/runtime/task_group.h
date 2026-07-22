@@ -17,8 +17,8 @@
 
 namespace lighter {
 
-template <typename... Errors> class TaskGroup : public AggregateOp {
-public:
+template <typename... Errors>
+struct TaskGroup : AggregateOp {
     using error_type = detail::task_group_error_type_t<Errors...>;
     using result_type = std::conditional_t<std::is_void_v<error_type>, void, Outcome<void, std::vector<error_type>, void>>;
 
@@ -175,7 +175,8 @@ private:
         reclaimed = 0;
     }
 
-    template <typename T, typename E> static void extract_error(AsyncNode &child, TaskGroup &g) {
+    template <typename T, typename E>
+    static void extract_error(AsyncNode &child, TaskGroup &g) {
         if (child.propagated_exception) {
 #if LIGHTER_ENABLE_EXCEPTIONS
             g.exceptions.push_back(child.propagated_exception);

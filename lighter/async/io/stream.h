@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <span>
 #include <string>
 #include <string_view>
@@ -12,9 +11,10 @@
 
 namespace lighter {
 
-class EventLoop;
+struct EventLoop;
 
-template <typename Stream> class Acceptor;
+template <typename Stream>
+struct Acceptor;
 
 /// Stream handle classification for file descriptors.
 enum class HandleType { UNKNOWN, FILE, TTY, PIPE, TCP, UDP };
@@ -23,8 +23,7 @@ enum class HandleType { UNKNOWN, FILE, TTY, PIPE, TCP, UDP };
 HandleType guess_handle(i32 fd);
 
 /// Base Stream wrapper for PIPE, TCP, and Console handles.
-class Stream {
-public:
+struct Stream {
     Stream() noexcept;
 
     Stream(const Stream &) = delete;
@@ -82,8 +81,8 @@ protected:
     UniqueHandle<Self> self;
 };
 
-template <typename Stream> class Acceptor {
-public:
+template <typename Stream>
+struct Acceptor {
     Acceptor() noexcept;
 
     Acceptor(const Acceptor &) = delete;
@@ -106,8 +105,8 @@ public:
     Error stop();
 
 private:
-    friend class Pipe;
-    friend class Tcp;
+    friend struct Pipe;
+    friend struct Tcp;
 
     explicit Acceptor(UniqueHandle<Self> self) noexcept;
 
@@ -115,8 +114,7 @@ private:
 };
 
 /// Pipe/socket wrapper (named Pipe on Windows, Unix domain socket on Unix).
-class Pipe : public Stream {
-public:
+struct Pipe : Stream {
     Pipe() noexcept = default;
 
     using Acceptor = lighter::Acceptor<Pipe>;
@@ -147,14 +145,13 @@ public:
     explicit Pipe(UniqueHandle<Self> self) noexcept;
 
 private:
-    friend class Process;
+    friend struct Process;
 
     static Result<Pipe> create(Options opts = Options(), EventLoop &loop = EventLoop::current());
 };
 
 /// TCP socket wrapper.
-class Tcp : public Stream {
-public:
+struct Tcp : Stream {
     Tcp() noexcept = default;
 
     explicit Tcp(UniqueHandle<Self> self) noexcept;
@@ -189,8 +186,7 @@ public:
 };
 
 /// TTY/Console wrapper.
-class Console : public Stream {
-public:
+struct Console : Stream {
     Console() noexcept = default;
 
     struct Winsize {

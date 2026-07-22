@@ -54,9 +54,7 @@ void AsyncNode::resume_and_drain(std::coroutine_handle<> handle) {
     }
 }
 
-void AsyncNode::intercept_cancel() noexcept {
-    policy = static_cast<Policy>(policy | INTERCEPT_CANCEL);
-}
+void AsyncNode::intercept_cancel() noexcept { policy = static_cast<Policy>(policy | INTERCEPT_CANCEL); }
 
 std::coroutine_handle<> AggregateOp::settle_if_idle() noexcept {
     if (pending != 0 || settled || !parent) {
@@ -393,8 +391,7 @@ std::coroutine_handle<> AsyncNode::on_child_complete(AsyncNode &child) {
             const bool intercepts = self->policy & INTERCEPT_CANCEL;
             // A cancelled child is a Cancellation Event unless the child
             // intercepts its own Cancellation while the aggregate does not.
-            const bool cancelled =
-                child.state == CANCELLED && (intercepts || !(child.policy & INTERCEPT_CANCEL));
+            const bool cancelled = child.state == CANCELLED && (intercepts || !(child.policy & INTERCEPT_CANCEL));
 
             // The completing child is not counted off until below, so the
             // cancel cascades inside decide() cannot settle re-entrantly.

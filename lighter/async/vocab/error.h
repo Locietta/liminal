@@ -9,8 +9,7 @@
 
 namespace lighter {
 
-class Error {
-public:
+struct Error {
     constexpr Error() noexcept = default;
 
     constexpr Error(const Error &) noexcept = default;
@@ -134,6 +133,7 @@ struct Cancellation {
 };
 
 /// Result<T>: value-or-Error (no cancel channel). I/O functions use this.
-template <typename T> using Result = Outcome<T, Error, void>;
+template <typename T>
+using Result = Outcome<T, Error, void>;
 
 } // namespace lighter

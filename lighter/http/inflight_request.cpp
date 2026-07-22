@@ -1,7 +1,6 @@
 #include "inflight_request.h"
 
 #include <cassert>
-#include <cstddef>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -106,17 +105,17 @@ InflightRequest::InflightRequest(http::Request request) noexcept
     }
 }
 
-std::size_t InflightRequest::on_write(char *data, std::size_t size, std::size_t count, void *userdata) {
+usize InflightRequest::on_write(char *data, usize size, usize count, void *userdata) {
     auto *self = static_cast<InflightRequest *>(userdata);
     assert(self != nullptr && "curl write callback requires inflight_request");
 
     const auto bytes = size * count;
-    auto *begin = reinterpret_cast<const std::byte *>(data);
+    auto *begin = reinterpret_cast<const byte *>(data);
     self->out.body.insert(self->out.body.end(), begin, begin + bytes);
     return bytes;
 }
 
-std::size_t InflightRequest::on_header(char *data, std::size_t size, std::size_t count, void *userdata) {
+usize InflightRequest::on_header(char *data, usize size, usize count, void *userdata) {
     auto *self = static_cast<InflightRequest *>(userdata);
     assert(self != nullptr && "curl header callback requires inflight_request");
 

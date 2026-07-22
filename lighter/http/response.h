@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <optional>
 #include <span>
 #include <string>
@@ -8,6 +7,7 @@
 #include <vector>
 
 #include <lighter/http/common.h>
+#include <lighter/types.hpp>
 
 namespace lighter::http {
 
@@ -15,11 +15,11 @@ struct Response {
     int status = 0;
     std::string url;
     std::vector<Header> headers;
-    std::vector<std::byte> body;
+    std::vector<byte> body;
 
     bool ok() const noexcept { return 200 <= status && status < 300; }
 
-    std::span<const std::byte> bytes() const noexcept;
+    std::span<const byte> bytes() const noexcept;
 
     std::string_view text() const noexcept;
 

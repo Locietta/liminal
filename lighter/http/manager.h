@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <expected>
 #include <functional>
 #include <unordered_map>
@@ -8,6 +7,7 @@
 #include <lighter/http/common.h>
 #include <lighter/http/curl.h>
 #include <lighter/async/io/loop.h>
+#include <lighter/types.hpp>
 
 struct uv_handle_s;
 using uv_handle_t = uv_handle_s;
@@ -48,7 +48,7 @@ struct Manager {
 
     void drain_completed_arming(void *arming_request) noexcept;
 
-    std::size_t pending_requests() const noexcept { return active_requests; }
+    usize pending_requests() const noexcept { return active_requests; }
 
     EventLoop &loop() const noexcept { return *bound_loop; }
 
@@ -90,7 +90,7 @@ private:
     curl::MultiHandle multi;
     timer_context *timer = nullptr;
     std::unordered_map<curl_socket_t, socket_context *> sockets;
-    std::size_t active_requests = 0;
+    usize active_requests = 0;
 };
 
 } // namespace lighter::http

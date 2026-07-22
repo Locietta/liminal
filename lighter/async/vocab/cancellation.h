@@ -10,20 +10,13 @@
 
 namespace lighter {
 
-class CancellationToken {
-public:
-    class State {
-    public:
-        bool is_cancelled() const noexcept {
-            return cancelled.load(std::memory_order_acquire);
-        }
+struct CancellationToken {
+    struct State {
+        bool is_cancelled() const noexcept { return cancelled.load(std::memory_order_acquire); }
 
         void cancel() noexcept {
             bool expected = false;
-            if (!cancelled.compare_exchange_strong(expected,
-                                                   true,
-                                                   std::memory_order_acq_rel,
-                                                   std::memory_order_acquire)) {
+            if (!cancelled.compare_exchange_strong(expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
                 return;
             }
             event.set();
@@ -59,7 +52,7 @@ public:
         }
 
     private:
-        class Event event;
+        Event event;
         std::atomic<bool> cancelled{false};
     };
 
@@ -67,47 +60,34 @@ public:
     CancellationToken(const CancellationToken &) noexcept = default;
     CancellationToken &operator=(const CancellationToken &) noexcept = default;
 
-    bool cancelled() const noexcept {
-        return state->is_cancelled();
-    }
+    bool cancelled() const noexcept { return state->is_cancelled(); }
 
-    Task<> wait() const noexcept {
-        return state->wait();
-    }
+    Task<> wait() const noexcept { return state->wait(); }
 
 private:
-    friend class CancellationSource;
+    friend struct CancellationSource;
 
     explicit CancellationToken(std::shared_ptr<State> state) : state(std::move(state)) {}
 
     std::shared_ptr<State> state;
 };
 
-class CancellationSource {
-public:
-    CancellationSource() : state(std::make_shared<class CancellationToken::State>()) {}
+struct CancellationSource {
+    CancellationSource() : state(std::make_shared<CancellationToken::State>()) {}
 
     CancellationSource(const CancellationSource &) = delete;
     CancellationSource &operator=(const CancellationSource &) = delete;
 
-    ~CancellationSource() {
-        cancel();
-    }
+    ~CancellationSource() { cancel(); }
 
-    void cancel() noexcept {
-        state->cancel();
-    }
+    void cancel() noexcept { state->cancel(); }
 
-    bool cancelled() const noexcept {
-        return state->is_cancelled();
-    }
+    bool cancelled() const noexcept { return state->is_cancelled(); }
 
-    CancellationToken token() const noexcept {
-        return CancellationToken(state);
-    }
+    CancellationToken token() const noexcept { return CancellationToken(state); }
 
 private:
-    std::shared_ptr<class CancellationToken::State> state;
+    std::shared_ptr<CancellationToken::State> state;
 };
 
 /// with_token: cancel a Task when any of the given tokens fire.

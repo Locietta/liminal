@@ -36,8 +36,7 @@ concept Awaiter = requires(T &&value, await_probe_handle handle) {
 };
 
 template <typename T>
-concept awaitable =
-    requires(T &&value) { get_awaiter(std::forward<T>(value)); } && Awaiter<awaiter_t<T>>;
+concept awaitable = requires(T &&value) { get_awaiter(std::forward<T>(value)); } && Awaiter<awaiter_t<T>>;
 
 template <typename T>
 using await_result_t = decltype(std::declval<awaiter_t<T>>().await_resume());

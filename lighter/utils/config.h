@@ -73,7 +73,7 @@
 #define LIGHTER_CATCH_ALL() catch (...)
 #define LIGHTER_RETHROW() throw
 #else
-#define LIGHTER_THROW(exception_expr)                  \
+#define LIGHTER_THROW(exception_expr)              \
     do {                                           \
         static_cast<void>(sizeof(exception_expr)); \
         std::abort();                              \
@@ -84,7 +84,7 @@
 #endif
 
 // uncatchable failure, e.g. for unrecoverable errors in low-level code
-#define LIGHTER_PANIC(message)                          \
+#define LIGHTER_PANIC(message)                      \
     do {                                            \
         std::fputs("PANIC: " message "\n", stderr); \
         std::abort();                               \

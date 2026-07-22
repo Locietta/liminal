@@ -1,7 +1,6 @@
 #include "manager.h"
 
 #include <cassert>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
@@ -283,7 +282,7 @@ void Manager::update_timeout(long timeout_ms) noexcept {
         timeout_ms = 1;
     }
 
-    uv::timer_start(timer->handle, &Manager::on_uv_timeout, static_cast<std::uint64_t>(timeout_ms), 0);
+    uv::timer_start(timer->handle, &Manager::on_uv_timeout, static_cast<u64>(timeout_ms), 0);
 }
 
 void Manager::close_watchers() noexcept {

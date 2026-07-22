@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cassert>
-#include <cstddef>
 #include <source_location>
 
 #include <lighter/types.hpp>
@@ -12,8 +11,7 @@ namespace lighter {
 
 /// Shared base for synchronization resources. These are not awaitable runtime
 /// nodes; WaitNode sub-objects bridge tasks into the wait queue.
-class SyncPrimitive {
-public:
+struct SyncPrimitive {
     enum class Kind : u8 {
         MUTEX,
         EVENT,
@@ -21,7 +19,7 @@ public:
         CONDITION_VARIABLE,
     };
 
-    friend class AsyncNode;
+    friend struct AsyncNode;
 
     explicit SyncPrimitive(Kind k) : kind(k) {}
 
@@ -58,7 +56,8 @@ protected:
     /// waiter and queue its awaiting Task on the Event loop - so no waiter
     /// can be enqueued or removed re-entrantly while this loop runs: popping
     /// until the queue is empty is a stable snapshot of the callers.
-    template <typename Fn> void drain_waiters(Fn &&fn) {
+    template <typename Fn>
+    void drain_waiters(Fn &&fn) {
         while (auto *waiter = pop_waiter()) {
             fn(*waiter);
         }
@@ -70,8 +69,7 @@ private:
     WaitNode *tail = nullptr;
 };
 
-class Mutex : public SyncPrimitive {
-public:
+struct Mutex : SyncPrimitive {
     Mutex(std::source_location location = std::source_location::current()) : SyncPrimitive(SyncPrimitive::Kind::MUTEX) {
         this->location = location;
     }
@@ -132,8 +130,7 @@ private:
     bool locked = false;
 };
 
-class Semaphore : public SyncPrimitive {
-public:
+struct Semaphore : SyncPrimitive {
     explicit Semaphore(isize initial = 0, std::source_location location = std::source_location::current())
         : SyncPrimitive(SyncPrimitive::Kind::SEMAPHORE) {
         assert(initial >= 0 && "Semaphore initial count must be non-negative");
@@ -209,8 +206,7 @@ private:
     isize count = 0;
 };
 
-class Event : public SyncPrimitive {
-public:
+struct Event : SyncPrimitive {
     explicit Event(bool signaled = false, std::source_location location = std::source_location::current())
         : SyncPrimitive(SyncPrimitive::Kind::EVENT), signaled(signaled) {
         this->location = location;
@@ -269,8 +265,7 @@ private:
     bool signaled = false;
 };
 
-class ConditionVariable : public SyncPrimitive {
-public:
+struct ConditionVariable : SyncPrimitive {
     ConditionVariable(std::source_location location = std::source_location::current())
         : SyncPrimitive(SyncPrimitive::Kind::CONDITION_VARIABLE) {
         this->location = location;

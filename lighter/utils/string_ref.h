@@ -2,18 +2,19 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cstddef>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <lighter/scalar_types.hpp>
+
+#include <lighter/types.hpp>
 
 namespace lighter {
 
 /// A string_view extension with convenient string manipulation methods.
 /// Inherits from std::string_view and adds operations like split, trim,
 /// take/drop, consume, count, find_if, etc. All methods are constexpr.
-class StringRef : public std::string_view {
+struct StringRef : std::string_view {
+private:
     using base = std::string_view;
 
     constexpr static i32 compare_memory(const char *lhs, const char *rhs, usize length) {
@@ -30,13 +31,9 @@ class StringRef : public std::string_view {
         return 0;
     }
 
-    constexpr static char to_lower(char c) {
-        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-    }
+    constexpr static char to_lower(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; }
 
-    constexpr static char to_upper(char c) {
-        return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
-    }
+    constexpr static char to_upper(char c) { return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c; }
 
     constexpr static i32 ascii_strncasecmp(StringRef lhs, StringRef rhs, usize length) {
         for (usize i = 0; i < length; ++i) {
@@ -91,9 +88,7 @@ public:
     }
 
     /// Check for string equality, ignoring case.
-    [[nodiscard]] constexpr bool equals_insensitive(StringRef rhs) const {
-        return size() == rhs.size() && compare_insensitive(rhs) == 0;
-    }
+    [[nodiscard]] constexpr bool equals_insensitive(StringRef rhs) const { return size() == rhs.size() && compare_insensitive(rhs) == 0; }
 
     // --- Predicates ---
 
@@ -104,24 +99,17 @@ public:
 
     /// Check if this string ends with the given suffix, ignoring case.
     [[nodiscard]] constexpr bool ends_with_insensitive(StringRef suffix) const {
-        return size() >= suffix.size() &&
-               ascii_strncasecmp(drop_front(size() - suffix.size()), suffix, suffix.size()) == 0;
+        return size() >= suffix.size() && ascii_strncasecmp(drop_front(size() - suffix.size()), suffix, suffix.size()) == 0;
     }
 
     /// Return true if the given string is a substring of *this.
-    [[nodiscard]] constexpr bool contains(StringRef other) const {
-        return find(other) != npos;
-    }
+    [[nodiscard]] constexpr bool contains(StringRef other) const { return find(other) != npos; }
 
     /// Return true if the given character is contained in *this.
-    [[nodiscard]] constexpr bool contains(char c) const {
-        return find(c) != npos;
-    }
+    [[nodiscard]] constexpr bool contains(char c) const { return find(c) != npos; }
 
     /// Return true if the given string is a substring of *this, ignoring case.
-    [[nodiscard]] constexpr bool contains_insensitive(StringRef other) const {
-        return find_insensitive(other) != npos;
-    }
+    [[nodiscard]] constexpr bool contains_insensitive(StringRef other) const { return find_insensitive(other) != npos; }
 
     // --- Searching ---
 
@@ -152,8 +140,7 @@ public:
     }
 
     /// Search for the first occurrence of a string, ignoring case.
-    [[nodiscard]] constexpr usize find_insensitive(StringRef str,
-                                                   usize from = 0) const {
+    [[nodiscard]] constexpr usize find_insensitive(StringRef str, usize from = 0) const {
         from = std::min(from, size());
         StringRef s = drop_front(from);
         while (s.size() >= str.size()) {
@@ -349,9 +336,7 @@ public:
     // --- Trim ---
 
     /// Return string with consecutive char characters starting from the left removed.
-    [[nodiscard]] constexpr StringRef ltrim(char c) const {
-        return drop_front(std::min(size(), base::find_first_not_of(c)));
-    }
+    [[nodiscard]] constexpr StringRef ltrim(char c) const { return drop_front(std::min(size(), base::find_first_not_of(c))); }
 
     /// Return string with consecutive characters in chars starting from the left removed.
     [[nodiscard]] constexpr StringRef ltrim(StringRef chars = " \t\n\v\f\r") const {
@@ -359,9 +344,7 @@ public:
     }
 
     /// Return string with consecutive char characters starting from the right removed.
-    [[nodiscard]] constexpr StringRef rtrim(char c) const {
-        return drop_back(size() - std::min(size(), find_last_not_of(c) + 1));
-    }
+    [[nodiscard]] constexpr StringRef rtrim(char c) const { return drop_back(size() - std::min(size(), find_last_not_of(c) + 1)); }
 
     /// Return string with consecutive characters in chars starting from the right removed.
     [[nodiscard]] constexpr StringRef rtrim(StringRef chars = " \t\n\v\f\r") const {
@@ -369,14 +352,10 @@ public:
     }
 
     /// Return string with consecutive char characters from both sides removed.
-    [[nodiscard]] constexpr StringRef trim(char c) const {
-        return ltrim(c).rtrim(c);
-    }
+    [[nodiscard]] constexpr StringRef trim(char c) const { return ltrim(c).rtrim(c); }
 
     /// Return string with consecutive characters in chars from both sides removed.
-    [[nodiscard]] constexpr StringRef trim(StringRef chars = " \t\n\v\f\r") const {
-        return ltrim(chars).rtrim(chars);
-    }
+    [[nodiscard]] constexpr StringRef trim(StringRef chars = " \t\n\v\f\r") const { return ltrim(chars).rtrim(chars); }
 
     // --- Split ---
 
@@ -419,8 +398,7 @@ public:
     /// Split into substrings around occurrences of a separator.
     /// Calls callback(StringRef) for each part.
     template <typename Callback>
-    constexpr void
-    split(Callback callback, char separator, i32 max_split = -1, bool keep_empty = true) const {
+    constexpr void split(Callback callback, char separator, i32 max_split = -1, bool keep_empty = true) const {
         StringRef s = *this;
         while (max_split-- != 0) {
             usize idx = s.find(separator);
@@ -441,10 +419,7 @@ public:
     /// Calls callback(StringRef) for each part.
     /// If separator is empty, calls callback once with the entire string.
     template <typename Callback>
-    constexpr void split(Callback callback,
-                         StringRef separator,
-                         i32 max_split = -1,
-                         bool keep_empty = true) const {
+    constexpr void split(Callback callback, StringRef separator, i32 max_split = -1, bool keep_empty = true) const {
         if (separator.empty()) {
             callback(*this);
             return;
@@ -490,9 +465,7 @@ public:
     // --- Conversion ---
 
     /// Get the contents as an std::string.
-    [[nodiscard]] constexpr std::string str() const {
-        return std::string(data(), size());
-    }
+    [[nodiscard]] constexpr std::string str() const { return std::string(data(), size()); }
 };
 
 } // namespace lighter

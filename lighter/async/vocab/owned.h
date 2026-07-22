@@ -6,9 +6,7 @@ namespace lighter {
 
 template <typename T>
 struct DestroyHandle {
-    void operator()(T *ptr) const noexcept {
-        T::destroy(ptr);
-    }
+    void operator()(T *ptr) const noexcept { T::destroy(ptr); }
 };
 
 template <typename T>

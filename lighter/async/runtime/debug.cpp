@@ -42,9 +42,7 @@ static std::string_view sync_kind_name(SyncPrimitive::Kind k) {
     return "Unknown";
 }
 
-static std::string node_id(const void *node) {
-    return std::format("n{:x}", reinterpret_cast<std::uintptr_t>(node));
-}
+static std::string node_id(const void *node) { return std::format("n{:x}", reinterpret_cast<std::uintptr_t>(node)); }
 
 static std::string_view basename(const char *path) {
     if (!path || path[0] == '\0') {
@@ -62,15 +60,11 @@ static void emit_async_node(const AsyncNode *node, std::string &out) {
         label = std::format(R"({}
 {}
 {}:{})",
-                            async_kind_name(node->kind),
-                            state_name(node->state),
-                            file,
-                            node->location.line());
+                            async_kind_name(node->kind), state_name(node->state), file, node->location.line());
     } else {
         label = std::format(R"({}
 {})",
-                            async_kind_name(node->kind),
-                            state_name(node->state));
+                            async_kind_name(node->kind), state_name(node->state));
     }
 
     std::string_view shape = "box";
@@ -96,10 +90,7 @@ static void emit_async_node(const AsyncNode *node, std::string &out) {
     std::format_to(std::back_inserter(out),
                    R"(  {} [label="{}", shape={}, style=filled, fillcolor={}];
 )",
-                   node_id(node),
-                   label,
-                   shape,
-                   color);
+                   node_id(node), label, shape, color);
 }
 
 static void emit_sync_node(const SyncPrimitive *resource, std::string &out) {
@@ -108,9 +99,7 @@ static void emit_sync_node(const SyncPrimitive *resource, std::string &out) {
     if (!file.empty()) {
         label = std::format(R"({}
 {}:{})",
-                            sync_kind_name(resource->kind),
-                            file,
-                            resource->location.line());
+                            sync_kind_name(resource->kind), file, resource->location.line());
     } else {
         label = std::format("{}", sync_kind_name(resource->kind));
     }
@@ -118,9 +107,7 @@ static void emit_sync_node(const SyncPrimitive *resource, std::string &out) {
     std::format_to(std::back_inserter(out),
                    R"(  {} [label="{}", shape=ellipse, style=filled, fillcolor="{}"];
 )",
-                   node_id(resource),
-                   label,
-                   "#ADD8E6");
+                   node_id(resource), label, "#ADD8E6");
 }
 
 struct DotEmitter : AsyncVisitor<DotEmitter> {
@@ -155,8 +142,7 @@ struct DotEmitter : AsyncVisitor<DotEmitter> {
         std::format_to(std::back_inserter(out),
                        R"(  {} -> {};
 )",
-                       node_id(from),
-                       node_id(to));
+                       node_id(from), node_id(to));
     }
 };
 

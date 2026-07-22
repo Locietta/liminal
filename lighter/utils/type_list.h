@@ -1,10 +1,10 @@
 #pragma once
 
 #include <concepts>
-#include <cstddef>
 #include <type_traits>
 #include <variant>
-#include <lighter/scalar_types.hpp>
+
+#include <lighter/types.hpp>
 
 namespace lighter {
 
@@ -86,9 +86,7 @@ struct TypeListUniqueImpl<TypeList<Ts...>, TypeList<>> {
 template <typename... Ts, typename T, typename... Rest>
 struct TypeListUniqueImpl<TypeList<Ts...>, TypeList<T, Rest...>> {
 private:
-    using next = std::conditional_t<k_type_list_contains_v<TypeList<Ts...>, T>,
-                                    TypeList<Ts...>,
-                                    TypeList<Ts..., T>>;
+    using next = std::conditional_t<k_type_list_contains_v<TypeList<Ts...>, T>, TypeList<Ts...>, TypeList<Ts..., T>>;
 
 public:
     using type = typename TypeListUniqueImpl<next, TypeList<Rest...>>::type;
@@ -125,8 +123,7 @@ template <typename T, typename... Rest>
 struct TypeListIndexOf<TypeList<T, Rest...>, T> : std::integral_constant<usize, 0> {};
 
 template <typename First, typename... Rest, typename T>
-struct TypeListIndexOf<TypeList<First, Rest...>, T>
-    : std::integral_constant<usize, 1 + TypeListIndexOf<TypeList<Rest...>, T>::value> {};
+struct TypeListIndexOf<TypeList<First, Rest...>, T> : std::integral_constant<usize, 1 + TypeListIndexOf<TypeList<Rest...>, T>::value> {};
 
 template <typename List, typename T>
 constexpr inline usize k_type_list_index_of_v = TypeListIndexOf<List, T>::value;

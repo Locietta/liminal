@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cassert>
-#include <cstddef>
 #include <cstdlib>
 #include <optional>
 #include <ranges>
@@ -20,7 +19,9 @@
 
 namespace lighter {
 
-template <bool All, typename... Tasks> class WhenOp : public AggregateOp {
+template <bool All, typename... Tasks>
+struct WhenOp : AggregateOp {
+private:
     constexpr static bool k_capture_cancel = !std::is_void_v<detail::aggregated_cancel_t<detail::task_cancel_type_t<Tasks>...>>;
 
 public:
@@ -125,7 +126,9 @@ private:
     std::tuple<Tasks...> tasks;
 };
 
-template <bool All, typename Task> class WhenOp<All, detail::RangeTasks<Task>> : public AggregateOp {
+template <bool All, typename Task>
+struct WhenOp<All, detail::RangeTasks<Task>> : AggregateOp {
+private:
     constexpr static bool k_capture_cancel = !std::is_void_v<detail::task_cancel_type_t<Task>>;
 
 public:
@@ -243,7 +246,9 @@ private:
 ///
 /// Accepts any awaitable that satisfies the `awaitable` concept, including synchronous
 /// awaiters like `Semaphore::AcquireAwaiter`.
-template <typename... Tasks> class WhenAll : private WhenOp<true, Tasks...> {
+template <typename... Tasks>
+struct WhenAll : private WhenOp<true, Tasks...> {
+private:
     using WhenOp<true, Tasks...>::WhenOp;
 
 public:
@@ -273,7 +278,9 @@ public:
 ///
 /// Accepts any awaitable that satisfies the `awaitable` concept, including synchronous
 /// awaiters like `Semaphore::AcquireAwaiter`.
-template <typename... Tasks> class WhenAny : private WhenOp<false, Tasks...> {
+template <typename... Tasks>
+struct WhenAny : private WhenOp<false, Tasks...> {
+private:
     using WhenOp<false, Tasks...>::WhenOp;
 
 public:
@@ -282,24 +289,33 @@ public:
     using WhenOp<false, Tasks...>::await_resume;
 };
 
-template <> class WhenAny<> {
-public:
+template <>
+struct WhenAny<> {
     WhenAny() = delete;
 };
 
-template <detail::awaitable... Tasks> WhenAll(Tasks...) -> WhenAll<detail::normalized_task_t<Tasks>...>;
+template <detail::awaitable... Tasks>
+WhenAll(Tasks...) -> WhenAll<detail::normalized_task_t<Tasks>...>;
 
-template <detail::async_range Range> WhenAll(Range) -> WhenAll<detail::RangeTasks<detail::normalized_range_task_t<Range>>>;
+template <detail::async_range Range>
+WhenAll(Range) -> WhenAll<detail::RangeTasks<detail::normalized_range_task_t<Range>>>;
 
 template <detail::awaitable... Tasks>
     requires(sizeof...(Tasks) > 0)
 WhenAny(Tasks...) -> WhenAny<detail::normalized_task_t<Tasks>...>;
 
-template <detail::async_range Range> WhenAny(Range) -> WhenAny<detail::RangeTasks<detail::normalized_range_task_t<Range>>>;
+template <detail::async_range Range>
+WhenAny(Range) -> WhenAny<detail::RangeTasks<detail::normalized_range_task_t<Range>>>;
 
-template <detail::awaitable... Tasks> auto when_all(Tasks &&...tasks) { return WhenAll(std::forward<Tasks>(tasks)...); }
+template <detail::awaitable... Tasks>
+auto when_all(Tasks &&...tasks) {
+    return WhenAll(std::forward<Tasks>(tasks)...);
+}
 
-template <detail::async_range Range> auto when_all(Range &&range) { return WhenAll(std::forward<Range>(range)); }
+template <detail::async_range Range>
+auto when_all(Range &&range) {
+    return WhenAll(std::forward<Range>(range));
+}
 
 template <detail::awaitable... Tasks>
     requires(sizeof...(Tasks) > 0)
@@ -307,6 +323,9 @@ auto when_any(Tasks &&...tasks) {
     return WhenAny(std::forward<Tasks>(tasks)...);
 }
 
-template <detail::async_range Range> auto when_any(Range &&range) { return WhenAny(std::forward<Range>(range)); }
+template <detail::async_range Range>
+auto when_any(Range &&range) {
+    return WhenAny(std::forward<Range>(range));
+}
 
 } // namespace lighter

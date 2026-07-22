@@ -11,10 +11,9 @@
 
 namespace lighter {
 
-class EventLoop;
+struct EventLoop;
 
-class Udp {
-public:
+struct Udp {
     Udp() noexcept;
 
     Udp(const Udp &) = delete;

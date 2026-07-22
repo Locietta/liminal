@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cassert>
 #include <concepts>
-#include <cstddef>
 #include <cstring>
 #include <functional>
 #include <iterator>
@@ -15,7 +14,7 @@
 #include <type_traits>
 #include <utility>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/utils/config.h>
 
 namespace lighter::mem {
@@ -23,7 +22,7 @@ namespace lighter::mem {
 template <typename T>
 union Uninitialized {
     T value;
-    std::byte bytes[sizeof(T)];
+    byte bytes[sizeof(T)];
 
     constexpr Uninitialized() noexcept : bytes{} {}
 
@@ -60,15 +59,13 @@ constexpr inline bool k_is_memcpyable_integral_v = [] {
         using from = underlying_if_enum_t<From>;
         using to = underlying_if_enum_t<To>;
 
-        return (sizeof(from) == sizeof(to)) &&
-               (std::is_same_v<bool, from> == std::is_same_v<bool, to>) &&
-               std::is_integral_v<from> && std::is_integral_v<to>;
+        return (sizeof(from) == sizeof(to)) && (std::is_same_v<bool, from> == std::is_same_v<bool, to>) && std::is_integral_v<from> &&
+               std::is_integral_v<to>;
     }
 }();
 
 template <typename From, typename To>
-constexpr inline bool k_is_convertible_pointer_v =
-    std::is_pointer_v<From> && std::is_pointer_v<To> && std::is_convertible_v<From, To>;
+constexpr inline bool k_is_convertible_pointer_v = std::is_pointer_v<From> && std::is_pointer_v<To> && std::is_convertible_v<From, To>;
 
 template <typename QualifiedFrom, typename QualifiedTo = QualifiedFrom>
 constexpr inline bool k_is_memcpyable_v = [] {
@@ -80,10 +77,8 @@ constexpr inline bool k_is_memcpyable_v = [] {
         using from = std::remove_cvref_t<QualifiedFrom>;
         using to = std::remove_cv_t<QualifiedTo>;
 
-        return std::is_trivially_assignable_v<QualifiedTo &, QualifiedFrom> &&
-               std::is_trivially_copyable_v<to> &&
-               (std::is_same_v<from, to> || k_is_memcpyable_integral_v<from, to> ||
-                k_is_convertible_pointer_v<from, to>);
+        return std::is_trivially_assignable_v<QualifiedTo &, QualifiedFrom> && std::is_trivially_copyable_v<to> &&
+               (std::is_same_v<from, to> || k_is_memcpyable_integral_v<from, to> || k_is_convertible_pointer_v<from, to>);
     }
 }();
 
@@ -99,10 +94,8 @@ constexpr inline bool k_is_uninitialized_memcpyable_v = [] {
             using to = std::remove_cv_t<To>;
 
             if constexpr (k_is_complete_type_v<from>) {
-                return std::is_trivially_constructible_v<To, From> &&
-                       std::is_trivially_copyable_v<to> &&
-                       (std::is_same_v<from, to> || k_is_memcpyable_integral_v<from, to> ||
-                        k_is_convertible_pointer_v<from, to>);
+                return std::is_trivially_constructible_v<To, From> && std::is_trivially_copyable_v<to> &&
+                       (std::is_same_v<from, to> || k_is_memcpyable_integral_v<from, to> || k_is_convertible_pointer_v<from, to>);
             } else {
                 return false;
             }
@@ -111,22 +104,18 @@ constexpr inline bool k_is_uninitialized_memcpyable_v = [] {
 }();
 
 template <typename InputIt>
-constexpr inline bool k_is_contiguous_iterator_v =
-    std::is_pointer_v<InputIt> || std::contiguous_iterator<InputIt>;
+constexpr inline bool k_is_contiguous_iterator_v = std::is_pointer_v<InputIt> || std::contiguous_iterator<InputIt>;
 
 template <typename ValueT, typename InputIt>
 constexpr inline bool k_is_memcpyable_iterator_v =
-    k_is_memcpyable_v<decltype(*std::declval<InputIt>()), ValueT> &&
-    k_is_contiguous_iterator_v<InputIt>;
+    k_is_memcpyable_v<decltype(*std::declval<InputIt>()), ValueT> && k_is_contiguous_iterator_v<InputIt>;
 
 template <typename ValueT, typename InputIt>
-constexpr inline bool k_is_memcpyable_iterator_v<ValueT, std::move_iterator<InputIt>> =
-    k_is_memcpyable_iterator_v<ValueT, InputIt>;
+constexpr inline bool k_is_memcpyable_iterator_v<ValueT, std::move_iterator<InputIt>> = k_is_memcpyable_iterator_v<ValueT, InputIt>;
 
 template <typename ValueT, typename InputIt>
 constexpr inline bool k_is_uninitialized_memcpyable_iterator_v =
-    k_is_uninitialized_memcpyable_v<ValueT, decltype(*std::declval<InputIt>())> &&
-    k_is_contiguous_iterator_v<InputIt>;
+    k_is_uninitialized_memcpyable_v<ValueT, decltype(*std::declval<InputIt>())> && k_is_contiguous_iterator_v<InputIt>;
 
 #ifndef NDEBUG
 [[noreturn]]
@@ -155,9 +144,7 @@ template <typename T>
 constexpr inline bool k_is_trivially_relocatable_v = std::is_trivially_copyable_v<T>;
 
 template <typename T, typename... Args>
-constexpr auto construct_at_impl(T *p,
-                                 Args &&...args) noexcept(noexcept(::new (std::declval<void *>())
-                                                                       T(std::declval<Args>()...)))
+constexpr auto construct_at_impl(T *p, Args &&...args) noexcept(noexcept(::new (std::declval<void *>()) T(std::declval<Args>()...)))
     -> decltype(::new (std::declval<void *>()) T(std::declval<Args>()...)) {
     if (std::is_constant_evaluated()) {
         return std::construct_at(p, std::forward<Args>(args)...);
@@ -177,8 +164,7 @@ constexpr auto default_construct_at_impl(T *p) noexcept(noexcept(::new (std::dec
 }
 
 template <typename T, typename U>
-constexpr T *construct(T *p, U &&val) noexcept(k_is_uninitialized_memcpyable_v<T, U &&> ||
-                                               std::is_nothrow_constructible_v<T, U &&>) {
+constexpr T *construct(T *p, U &&val) noexcept(k_is_uninitialized_memcpyable_v<T, U &&> || std::is_nothrow_constructible_v<T, U &&>) {
     if constexpr (k_is_uninitialized_memcpyable_v<T, U &&>) {
         if (std::is_constant_evaluated()) {
             return construct_at_impl(p, std::forward<U>(val));
@@ -192,8 +178,7 @@ constexpr T *construct(T *p, U &&val) noexcept(k_is_uninitialized_memcpyable_v<T
 
 template <typename T, typename... Args>
     requires(sizeof...(Args) != 1)
-constexpr auto construct(T *p, Args &&...args) noexcept(noexcept(::new (std::declval<void *>())
-                                                                     T(std::declval<Args>()...)))
+constexpr auto construct(T *p, Args &&...args) noexcept(noexcept(::new (std::declval<void *>()) T(std::declval<Args>()...)))
     -> decltype(::new (std::declval<void *>()) T(std::declval<Args>()...)) {
     return construct_at_impl(p, std::forward<Args>(args)...);
 }
@@ -252,8 +237,7 @@ constexpr bool pointer_in_range(const T *ptr, std::ranges::contiguous_range auto
 }
 
 template <typename T>
-class StackTemporary {
-public:
+struct StackTemporary {
     using value_type = T;
 
     StackTemporary() = delete;
@@ -267,41 +251,26 @@ public:
         construct(storage_pointer(), std::forward<Args>(args)...);
     }
 
-    constexpr ~StackTemporary() {
-        destroy(get_pointer());
-    }
+    constexpr ~StackTemporary() { destroy(get_pointer()); }
 
-    [[nodiscard]] constexpr const value_type &get() const noexcept {
-        return *get_pointer();
-    }
+    [[nodiscard]] constexpr const value_type &get() const noexcept { return *get_pointer(); }
 
-    [[nodiscard]] constexpr value_type &&release() noexcept {
-        return std::move(*get_pointer());
-    }
+    [[nodiscard]] constexpr value_type &&release() noexcept { return std::move(*get_pointer()); }
 
 private:
-    [[nodiscard]] constexpr const value_type *storage_pointer() const noexcept {
-        return std::addressof(m_storage.value);
-    }
+    [[nodiscard]] constexpr const value_type *storage_pointer() const noexcept { return std::addressof(m_storage.value); }
 
-    [[nodiscard]] constexpr value_type *storage_pointer() noexcept {
-        return std::addressof(m_storage.value);
-    }
+    [[nodiscard]] constexpr value_type *storage_pointer() noexcept { return std::addressof(m_storage.value); }
 
-    [[nodiscard]] constexpr const value_type *get_pointer() const noexcept {
-        return std::launder(storage_pointer());
-    }
+    [[nodiscard]] constexpr const value_type *get_pointer() const noexcept { return std::launder(storage_pointer()); }
 
-    [[nodiscard]] constexpr value_type *get_pointer() noexcept {
-        return std::launder(storage_pointer());
-    }
+    [[nodiscard]] constexpr value_type *get_pointer() noexcept { return std::launder(storage_pointer()); }
 
     Uninitialized<value_type> m_storage;
 };
 
 template <typename T>
-class HeapTemporary {
-public:
+struct HeapTemporary {
     using value_type = T;
 
     HeapTemporary() = delete;
@@ -312,9 +281,7 @@ public:
 
     template <typename... Args>
     constexpr explicit HeapTemporary(Args &&...args) : m_data(allocate_storage()) {
-        LIGHTER_TRY {
-            construct(m_data, std::forward<Args>(args)...);
-        }
+        LIGHTER_TRY { construct(m_data, std::forward<Args>(args)...); }
         LIGHTER_CATCH_ALL() {
             deallocate(m_data, 1);
             LIGHTER_RETHROW();
@@ -326,32 +293,25 @@ public:
         deallocate(m_data, 1);
     }
 
-    [[nodiscard]] constexpr const value_type &get() const noexcept {
-        return *m_data;
-    }
+    [[nodiscard]] constexpr const value_type &get() const noexcept { return *m_data; }
 
-    [[nodiscard]] constexpr value_type &&release() noexcept {
-        return std::move(*m_data);
-    }
+    [[nodiscard]] constexpr value_type &&release() noexcept { return std::move(*m_data); }
 
 private:
-    [[nodiscard]] constexpr static auto allocate_storage() {
-        return allocate<value_type>(1);
-    }
+    [[nodiscard]] constexpr static auto allocate_storage() { return allocate<value_type>(1); }
 
     value_type *m_data;
 };
 
 template <typename T, typename Alloc = std::allocator<T>>
-class AllocationGuard {
-public:
+struct AllocationGuard {
     using value_type = T;
     using allocator_type = Alloc;
     using pointer = value_type *;
     using size_type = usize;
 
-    constexpr explicit AllocationGuard(size_type capacity) : m_data(allocate<value_type, allocator_type>(capacity)), m_capacity(capacity),
-                                                             m_constructed(m_data) {}
+    constexpr explicit AllocationGuard(size_type capacity)
+        : m_data(allocate<value_type, allocator_type>(capacity)), m_capacity(capacity), m_constructed(m_data) {}
 
     AllocationGuard(const AllocationGuard &) = delete;
     AllocationGuard &operator=(const AllocationGuard &) = delete;
@@ -367,13 +327,9 @@ public:
         deallocate<value_type, allocator_type>(m_data, m_capacity);
     }
 
-    constexpr void mark(pointer p) noexcept {
-        m_constructed = p;
-    }
+    constexpr void mark(pointer p) noexcept { m_constructed = p; }
 
-    [[nodiscard]] constexpr pointer data() const noexcept {
-        return m_data;
-    }
+    [[nodiscard]] constexpr pointer data() const noexcept { return m_data; }
 
     [[nodiscard]] constexpr pointer release() noexcept {
         pointer result = m_data;
@@ -459,10 +415,8 @@ template <typename T, std::ranges::input_range Range>
 constexpr T *uninitialized_copy(Range &&range, T *dest) {
     using iterator = std::ranges::iterator_t<Range>;
 
-    if constexpr (std::ranges::forward_range<Range> &&
-                  k_is_uninitialized_memcpyable_iterator_v<T, iterator>) {
-        static_assert(std::is_constructible_v<T, std::ranges::range_reference_t<Range>>,
-                      "`value_type` must be copy constructible.");
+    if constexpr (std::ranges::forward_range<Range> && k_is_uninitialized_memcpyable_iterator_v<T, iterator>) {
+        static_assert(std::is_constructible_v<T, std::ranges::range_reference_t<Range>>, "`value_type` must be copy constructible.");
         if (std::is_constant_evaluated()) {
             return default_uninitialized_copy<T>(std::forward<Range>(range), dest);
         }
@@ -489,8 +443,7 @@ constexpr T *uninitialized_relocate(Range &&range, T *dest) {
         }
         return dest + static_cast<isize>(count);
     } else {
-        return uninitialized_copy<T>(move_range(std::ranges::begin(range), std::ranges::end(range)),
-                                     dest);
+        return uninitialized_copy<T>(move_range(std::ranges::begin(range), std::ranges::end(range)), dest);
     }
 }
 

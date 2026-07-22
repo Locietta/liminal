@@ -4,7 +4,6 @@
 #include <cassert>
 #include <compare>
 #include <cstddef>
-#include <cstdint>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
@@ -14,16 +13,16 @@
 #include <type_traits>
 #include <utility>
 
-#include <lighter/scalar_types.hpp>
+#include <lighter/types.hpp>
 #include <lighter/utils/memory.h>
 
 namespace lighter {
 
 template <typename T>
-class HybridVector;
+struct HybridVector;
 
 template <typename T, u32 InlineCapacity>
-class SmallVector;
+struct SmallVector;
 
 namespace detail {
 
@@ -38,26 +37,21 @@ struct IsSmallVector<SmallVector<T, InlineCapacity>> : std::true_type {};
 
 template <typename Range, typename T>
 concept small_vector_compatible_range =
-    std::ranges::input_range<Range> &&
-    std::constructible_from<T, std::ranges::range_reference_t<Range>> &&
+    std::ranges::input_range<Range> && std::constructible_from<T, std::ranges::range_reference_t<Range>> &&
     !IsSmallVector<std::remove_cvref_t<Range>>::value;
 
 template <typename T>
-using small_vector_size_type =
-    std::conditional_t<sizeof(T) < 4 && sizeof(void *) >= 8, u64, u32>;
+using small_vector_size_type = std::conditional_t<sizeof(T) < 4 && sizeof(void *) >= 8, u64, u32>;
 
 template <typename T>
 struct DefaultBufferSize {
     constexpr static usize k_preferred_size = 64;
 
-    static_assert(
-        sizeof(T) <= 256,
-        "Default SmallVector inline storage would be too large. "
-        "Use SmallVector<T, N> with an explicit inline capacity.");
+    static_assert(sizeof(T) <= 256, "Default SmallVector inline storage would be too large. "
+                                    "Use SmallVector<T, N> with an explicit inline capacity.");
 
     constexpr static usize k_inline_bytes = k_preferred_size > sizeof(SmallVector<T, 0>) ? k_preferred_size - sizeof(SmallVector<T, 0>) : 0;
-    constexpr static usize k_value =
-        k_inline_bytes / sizeof(T) == 0 ? 1 : k_inline_bytes / sizeof(T);
+    constexpr static usize k_value = k_inline_bytes / sizeof(T) == 0 ? 1 : k_inline_bytes / sizeof(T);
 };
 
 struct SynthThreeWay {
@@ -92,7 +86,7 @@ struct SynthThreeWay {
 template <typename T, u32 InlineCapacity>
 struct InlineBuffer {
 protected:
-    alignas(T) std::byte buffer[InlineCapacity * sizeof(T)];
+    alignas(T) byte buffer[InlineCapacity * sizeof(T)];
 };
 
 #if defined(_MSC_VER)
@@ -108,11 +102,10 @@ struct alignas(T) InlineBuffer<T, 0> {};
 } // namespace detail
 
 template <typename T>
-class HybridVector {
+struct HybridVector {
     template <typename, u32>
-    friend class SmallVector;
+    friend struct SmallVector;
 
-public:
     using value_type = T;
     using size_type = usize;
     using difference_type = isize;
@@ -126,15 +119,14 @@ public:
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
     using size_storage_type = detail::small_vector_size_type<value_type>;
 
-    constexpr static bool k_takes_param_by_value =
-        std::is_trivially_copy_constructible_v<value_type> &&
-        std::is_trivially_move_constructible_v<value_type> &&
-        std::is_trivially_destructible_v<value_type> && sizeof(value_type) <= 2 * sizeof(void *);
+    constexpr static bool k_takes_param_by_value = std::is_trivially_copy_constructible_v<value_type> &&
+                                                   std::is_trivially_move_constructible_v<value_type> &&
+                                                   std::is_trivially_destructible_v<value_type> && sizeof(value_type) <= 2 * sizeof(void *);
 
 protected:
-    constexpr explicit HybridVector(size_type inline_capacity) noexcept : m_begin(std::is_constant_evaluated() ? nullptr : first_element()),
-                                                                          m_capacity(
-                                                                              static_cast<size_storage_type>(std::is_constant_evaluated() ? 0 : inline_capacity)) {}
+    constexpr explicit HybridVector(size_type inline_capacity) noexcept
+        : m_begin(std::is_constant_evaluated() ? nullptr : first_element()),
+          m_capacity(static_cast<size_storage_type>(std::is_constant_evaluated() ? 0 : inline_capacity)) {}
 
     [[nodiscard]] constexpr pointer inline_begin() noexcept {
         if (std::is_constant_evaluated()) {
@@ -162,11 +154,12 @@ protected:
     }
 
 private:
-    constexpr static usize k_header_alignment = alignof(pointer) > alignof(size_storage_type) ? alignof(pointer) : alignof(size_storage_type);
+    constexpr static usize k_header_alignment = alignof(pointer) > alignof(size_storage_type) ? alignof(pointer) :
+                                                                                                alignof(size_storage_type);
 
     struct AlignmentAndSize {
-        alignas(k_header_alignment) std::byte header[sizeof(pointer) + 2 * sizeof(size_storage_type)];
-        alignas(value_type) std::byte first_element[sizeof(value_type)];
+        alignas(k_header_alignment) byte header[sizeof(pointer) + 2 * sizeof(size_storage_type)];
+        alignas(value_type) byte first_element[sizeof(value_type)];
     };
 
     pointer m_begin;
@@ -174,9 +167,7 @@ private:
     size_storage_type m_capacity;
 
 protected:
-    [[nodiscard]] constexpr static auto pointer_range(pointer first, pointer last) noexcept {
-        return std::ranges::subrange(first, last);
-    }
+    [[nodiscard]] constexpr static auto pointer_range(pointer first, pointer last) noexcept { return std::ranges::subrange(first, last); }
 
     [[nodiscard]]
     constexpr static auto pointer_range(const_pointer first, const_pointer last) noexcept {
@@ -202,52 +193,32 @@ protected:
         return pointer_range(first, first + static_cast<difference_type>(count));
     }
 
-    [[nodiscard]] constexpr auto range_to(pointer last) noexcept {
-        return pointer_range(begin(), last);
-    }
+    [[nodiscard]] constexpr auto range_to(pointer last) noexcept { return pointer_range(begin(), last); }
 
-    [[nodiscard]] constexpr auto range_to(const_pointer last) const noexcept {
-        return pointer_range(begin(), last);
-    }
+    [[nodiscard]] constexpr auto range_to(const_pointer last) const noexcept { return pointer_range(begin(), last); }
 
 private:
     [[nodiscard]] pointer first_element() noexcept {
-        return reinterpret_cast<pointer>(reinterpret_cast<std::byte *>(this) +
-                                         offsetof(AlignmentAndSize, first_element));
+        return reinterpret_cast<pointer>(reinterpret_cast<byte *>(this) + offsetof(AlignmentAndSize, first_element));
     }
 
     [[nodiscard]] const_pointer first_element() const noexcept {
-        return reinterpret_cast<const_pointer>(reinterpret_cast<const std::byte *>(this) +
-                                               offsetof(AlignmentAndSize, first_element));
+        return reinterpret_cast<const_pointer>(reinterpret_cast<const byte *>(this) + offsetof(AlignmentAndSize, first_element));
     }
 
-    [[nodiscard]] constexpr auto elements() noexcept {
-        return pointer_range(begin(), end());
-    }
+    [[nodiscard]] constexpr auto elements() noexcept { return pointer_range(begin(), end()); }
 
-    [[nodiscard]] constexpr auto elements() const noexcept {
-        return pointer_range(begin(), end());
-    }
+    [[nodiscard]] constexpr auto elements() const noexcept { return pointer_range(begin(), end()); }
 
-    [[nodiscard]] constexpr auto prefix(size_type count) noexcept {
-        return counted_range(begin(), count);
-    }
+    [[nodiscard]] constexpr auto prefix(size_type count) noexcept { return counted_range(begin(), count); }
 
-    [[nodiscard]] constexpr auto prefix(size_type count) const noexcept {
-        return counted_range(begin(), count);
-    }
+    [[nodiscard]] constexpr auto prefix(size_type count) const noexcept { return counted_range(begin(), count); }
 
-    [[nodiscard]] constexpr auto suffix(size_type offset) noexcept {
-        return pointer_range(prefix(offset).end(), end());
-    }
+    [[nodiscard]] constexpr auto suffix(size_type offset) noexcept { return pointer_range(prefix(offset).end(), end()); }
 
-    [[nodiscard]] constexpr auto suffix(size_type offset) const noexcept {
-        return pointer_range(prefix(offset).end(), end());
-    }
+    [[nodiscard]] constexpr auto suffix(size_type offset) const noexcept { return pointer_range(prefix(offset).end(), end()); }
 
-    [[nodiscard]] constexpr static auto make_allocation_guard(size_type capacity) {
-        return mem::AllocationGuard<value_type>(capacity);
-    }
+    [[nodiscard]] constexpr static auto make_allocation_guard(size_type capacity) { return mem::AllocationGuard<value_type>(capacity); }
 
     template <typename... Args>
     [[nodiscard]] constexpr static auto make_temporary(Args &&...args) {
@@ -271,8 +242,7 @@ private:
     [[nodiscard]] constexpr bool range_references_storage(Range &&range) const noexcept {
         using reference_type = std::ranges::range_reference_t<Range>;
 
-        if constexpr (std::is_reference_v<reference_type> &&
-                      std::same_as<std::remove_cvref_t<reference_type>, value_type>) {
+        if constexpr (std::is_reference_v<reference_type> && std::same_as<std::remove_cvref_t<reference_type>, value_type>) {
             for (auto &&element : range) {
                 if (references_storage(std::addressof(element))) {
                     return true;
@@ -283,8 +253,7 @@ private:
         return false;
     }
 
-    constexpr void assert_safe_to_reference_after_resize(const_pointer ptr,
-                                                         size_type new_size) const noexcept {
+    constexpr void assert_safe_to_reference_after_resize(const_pointer ptr, size_type new_size) const noexcept {
         [[maybe_unused]] auto safe = [&]() noexcept {
             if (!references_storage(ptr)) {
                 return true;
@@ -294,10 +263,8 @@ private:
             }
             return new_size <= capacity();
         };
-        assert(
-            safe() &&
-            "Attempting to reference an element of the vector in an operation that "
-            "invalidates it");
+        assert(safe() && "Attempting to reference an element of the vector in an operation that "
+                         "invalidates it");
     }
 
     template <std::ranges::range Range>
@@ -307,8 +274,7 @@ private:
         }
 
         if constexpr (std::ranges::contiguous_range<Range> && std::ranges::sized_range<Range> &&
-                      std::same_as<std::remove_cv_t<std::ranges::range_value_t<Range>>,
-                                   value_type>) {
+                      std::same_as<std::remove_cv_t<std::ranges::range_value_t<Range>>, value_type>) {
             const auto count = static_cast<size_type>(std::ranges::size(range));
             if (count == 0) {
                 return;
@@ -316,8 +282,7 @@ private:
 
             const_pointer first = std::ranges::data(range);
             assert_safe_to_reference_after_resize(first, 0);
-            assert_safe_to_reference_after_resize(first + static_cast<difference_type>(count - 1),
-                                                  0);
+            assert_safe_to_reference_after_resize(first + static_cast<difference_type>(count - 1), 0);
         }
     }
 
@@ -328,8 +293,7 @@ private:
         }
 
         if constexpr (std::ranges::contiguous_range<Range> && std::ranges::sized_range<Range> &&
-                      std::same_as<std::remove_cv_t<std::ranges::range_value_t<Range>>,
-                                   value_type>) {
+                      std::same_as<std::remove_cv_t<std::ranges::range_value_t<Range>>, value_type>) {
             const auto count = static_cast<size_type>(std::ranges::size(range));
             if (count == 0) {
                 return;
@@ -338,8 +302,7 @@ private:
             const_pointer first = std::ranges::data(range);
             const auto new_size = checked_size(this->m_size, count);
             assert_safe_to_reference_after_resize(first, new_size);
-            assert_safe_to_reference_after_resize(first + static_cast<difference_type>(count - 1),
-                                                  new_size);
+            assert_safe_to_reference_after_resize(first + static_cast<difference_type>(count - 1), new_size);
         }
     }
 
@@ -348,8 +311,7 @@ private:
         return !less(pos, begin()) && !less(end(), pos);
     }
 
-    [[nodiscard]] constexpr bool valid_erase_range(const_iterator first,
-                                                   const_iterator last) const noexcept {
+    [[nodiscard]] constexpr bool valid_erase_range(const_iterator first, const_iterator last) const noexcept {
         std::less<const_pointer> less;
         return !less(first, begin()) && !less(last, first) && !less(end(), last);
     }
@@ -382,9 +344,7 @@ private:
         this->m_size = 0;
     }
 
-    constexpr void commit_replacement(pointer new_begin,
-                                      size_type new_size,
-                                      size_type new_capacity) noexcept {
+    constexpr void commit_replacement(pointer new_begin, size_type new_size, size_type new_capacity) noexcept {
         auto old_begin = this->m_begin;
         const auto old_size = this->m_size;
         const auto old_capacity = this->m_capacity;
@@ -455,8 +415,7 @@ private:
         this->set_size(count);
     }
 
-    [[nodiscard]] constexpr bool
-    should_steal_allocation_from(const HybridVector &other) const noexcept {
+    [[nodiscard]] constexpr bool should_steal_allocation_from(const HybridVector &other) const noexcept {
         return other.begin() != other.inline_begin();
     }
 
@@ -570,9 +529,7 @@ private:
         return insert_pos;
     }
 
-    constexpr iterator insert_fill_reallocate(const_iterator pos,
-                                              size_type count,
-                                              const_reference value) {
+    constexpr iterator insert_fill_reallocate(const_iterator pos, size_type count, const_reference value) {
         const auto index = mem::range_length(range_to(pos));
         const auto old_size = size();
         const auto new_size = checked_size(old_size, count);
@@ -590,9 +547,7 @@ private:
         return prefix(index).end();
     }
 
-    constexpr iterator insert_fill_inplace(const_iterator pos,
-                                           size_type count,
-                                           const_reference value) {
+    constexpr iterator insert_fill_inplace(const_iterator pos, size_type count, const_reference value) {
         const auto index = mem::range_length(range_to(pos));
         auto insert_pos = prefix(index).end();
 
@@ -639,9 +594,7 @@ private:
     }
 
     template <std::ranges::forward_range Range>
-    constexpr iterator insert_aliased_forward_range(const_iterator pos,
-                                                    Range &&range,
-                                                    size_type count) {
+    constexpr iterator insert_aliased_forward_range(const_iterator pos, Range &&range, size_type count) {
         auto guard = make_allocation_guard(count);
         auto *out = mem::uninitialized_copy(std::forward<Range>(range), guard.data());
         guard.mark(out);
@@ -680,8 +633,7 @@ private:
         auto *middle = mem::uninitialized_copy(tail_range, old_end);
         middle = mem::uninitialized_copy(mem::move_range(insert_pos, old_end), middle);
         this->set_size(size() + count);
-        std::ranges::copy(std::ranges::subrange(std::ranges::begin(range), first_part_end),
-                          insert_pos);
+        std::ranges::copy(std::ranges::subrange(std::ranges::begin(range), first_part_end), insert_pos);
         return insert_pos;
     }
 
@@ -810,8 +762,7 @@ protected:
             std::ranges::move(other.prefix(current_size), begin());
         }
 
-        mem::uninitialized_copy(mem::move_range(other.prefix(current_size).end(), other.end()),
-                                prefix(current_size).end());
+        mem::uninitialized_copy(mem::move_range(other.prefix(current_size).end(), other.end()), prefix(current_size).end());
         this->set_size(other_size);
         other.clear();
     }
@@ -824,81 +775,43 @@ public:
         }
     }
 
-    [[nodiscard]] constexpr iterator begin() noexcept {
-        return this->m_begin;
-    }
+    [[nodiscard]] constexpr iterator begin() noexcept { return this->m_begin; }
 
-    [[nodiscard]] constexpr const_iterator begin() const noexcept {
-        return this->m_begin;
-    }
+    [[nodiscard]] constexpr const_iterator begin() const noexcept { return this->m_begin; }
 
-    [[nodiscard]] constexpr const_iterator cbegin() const noexcept {
-        return begin();
-    }
+    [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return begin(); }
 
-    [[nodiscard]] constexpr iterator end() noexcept {
-        return prefix(size()).end();
-    }
+    [[nodiscard]] constexpr iterator end() noexcept { return prefix(size()).end(); }
 
-    [[nodiscard]] constexpr const_iterator end() const noexcept {
-        return prefix(size()).end();
-    }
+    [[nodiscard]] constexpr const_iterator end() const noexcept { return prefix(size()).end(); }
 
-    [[nodiscard]] constexpr const_iterator cend() const noexcept {
-        return end();
-    }
+    [[nodiscard]] constexpr const_iterator cend() const noexcept { return end(); }
 
-    [[nodiscard]] constexpr reverse_iterator rbegin() noexcept {
-        return reverse_iterator(end());
-    }
+    [[nodiscard]] constexpr reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
 
-    [[nodiscard]] constexpr const_reverse_iterator rbegin() const noexcept {
-        return const_reverse_iterator(end());
-    }
+    [[nodiscard]] constexpr const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
 
-    [[nodiscard]] constexpr const_reverse_iterator crbegin() const noexcept {
-        return const_reverse_iterator(end());
-    }
+    [[nodiscard]] constexpr const_reverse_iterator crbegin() const noexcept { return const_reverse_iterator(end()); }
 
-    [[nodiscard]] constexpr reverse_iterator rend() noexcept {
-        return reverse_iterator(begin());
-    }
+    [[nodiscard]] constexpr reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
 
-    [[nodiscard]] constexpr const_reverse_iterator rend() const noexcept {
-        return const_reverse_iterator(begin());
-    }
+    [[nodiscard]] constexpr const_reverse_iterator rend() const noexcept { return const_reverse_iterator(begin()); }
 
-    [[nodiscard]] constexpr const_reverse_iterator crend() const noexcept {
-        return const_reverse_iterator(begin());
-    }
+    [[nodiscard]] constexpr const_reverse_iterator crend() const noexcept { return const_reverse_iterator(begin()); }
 
-    [[nodiscard]] constexpr pointer data() noexcept {
-        return begin();
-    }
+    [[nodiscard]] constexpr pointer data() noexcept { return begin(); }
 
-    [[nodiscard]] constexpr const_pointer data() const noexcept {
-        return begin();
-    }
+    [[nodiscard]] constexpr const_pointer data() const noexcept { return begin(); }
 
-    [[nodiscard]] constexpr size_type size() const noexcept {
-        return m_size;
-    }
+    [[nodiscard]] constexpr size_type size() const noexcept { return m_size; }
 
-    [[nodiscard]] constexpr size_type size_in_bytes() const noexcept {
-        return size() * sizeof(value_type);
-    }
+    [[nodiscard]] constexpr size_type size_in_bytes() const noexcept { return size() * sizeof(value_type); }
 
-    [[nodiscard]] constexpr bool empty() const noexcept {
-        return m_size == 0;
-    }
+    [[nodiscard]] constexpr bool empty() const noexcept { return m_size == 0; }
 
-    [[nodiscard]] constexpr size_type capacity() const noexcept {
-        return m_capacity;
-    }
+    [[nodiscard]] constexpr size_type capacity() const noexcept { return m_capacity; }
 
-    [[nodiscard]] constexpr size_type capacity_in_bytes() const noexcept {
-        return capacity() * sizeof(value_type);
-    }
+    [[nodiscard]] constexpr size_type capacity_in_bytes() const noexcept { return capacity() * sizeof(value_type); }
 
     [[nodiscard]] constexpr bool inlined() const noexcept {
         if (std::is_constant_evaluated()) {
@@ -956,9 +869,7 @@ public:
         return end()[-1];
     }
 
-    constexpr void clear() noexcept {
-        destroy_elements();
-    }
+    constexpr void clear() noexcept { destroy_elements(); }
 
     constexpr void reserve(size_type new_capacity) {
         if (new_capacity > capacity()) {
@@ -966,13 +877,9 @@ public:
         }
     }
 
-    constexpr void resize(size_type count) {
-        resize_impl<false>(count);
-    }
+    constexpr void resize(size_type count) { resize_impl<false>(count); }
 
-    constexpr void resize_for_overwrite(size_type count) {
-        resize_impl<true>(count);
-    }
+    constexpr void resize_for_overwrite(size_type count) { resize_impl<true>(count); }
 
     constexpr void resize(size_type count, value_type value)
         requires(k_takes_param_by_value)
@@ -1090,13 +997,9 @@ public:
         }
     }
 
-    constexpr void append(std::initializer_list<value_type> init) {
-        append(std::ranges::subrange(init.begin(), init.end()));
-    }
+    constexpr void append(std::initializer_list<value_type> init) { append(std::ranges::subrange(init.begin(), init.end())); }
 
-    constexpr void append(const HybridVector &other) {
-        append(std::ranges::subrange(other.begin(), other.end()));
-    }
+    constexpr void append(const HybridVector &other) { append(std::ranges::subrange(other.begin(), other.end())); }
 
     constexpr void append(HybridVector &&other) {
         if (same_object(other)) {
@@ -1262,8 +1165,7 @@ public:
             this->set_size(shared);
         } else if (other.size() > size()) {
             const auto diff = other.size() - size();
-            mem::uninitialized_copy(mem::move_range(other.prefix(shared).end(), other.end()),
-                                    end());
+            mem::uninitialized_copy(mem::move_range(other.prefix(shared).end(), other.end()), end());
             this->set_size(size() + diff);
             mem::destroy_range(other.suffix(shared));
             other.set_size(shared);
@@ -1275,16 +1177,13 @@ public:
     }
 
     friend constexpr auto operator<=>(const HybridVector &lhs, const HybridVector &rhs) {
-        return std::lexicographical_compare_three_way(lhs.begin(),
-                                                      lhs.end(),
-                                                      rhs.begin(),
-                                                      rhs.end(),
-                                                      detail::SynthThreeWay{});
+        return std::lexicographical_compare_three_way(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), detail::SynthThreeWay{});
     }
 };
 
 template <typename T, u32 InlineCapacity = detail::DefaultBufferSize<T>::k_value>
-class SmallVector : public HybridVector<T>, private detail::InlineBuffer<T, InlineCapacity> {
+struct SmallVector : HybridVector<T>, private detail::InlineBuffer<T, InlineCapacity> {
+private:
     using base_type = HybridVector<T>;
     using storage_base = detail::InlineBuffer<T, InlineCapacity>;
 
@@ -1306,17 +1205,12 @@ private:
 public:
     constexpr SmallVector() noexcept : base_type(InlineCapacity) {}
 
-    constexpr explicit SmallVector(size_type count) : SmallVector() {
-        this->resize(count);
-    }
+    constexpr explicit SmallVector(size_type count) : SmallVector() { this->resize(count); }
 
-    constexpr SmallVector(size_type count, const_reference value) : SmallVector() {
-        this->assign(count, value);
-    }
+    constexpr SmallVector(size_type count, const_reference value) : SmallVector() { this->assign(count, value); }
 
     template <typename Generator>
-        requires std::invocable<Generator &> &&
-                 std::constructible_from<value_type, std::invoke_result_t<Generator &>>
+        requires std::invocable<Generator &> && std::constructible_from<value_type, std::invoke_result_t<Generator &>>
     constexpr SmallVector(size_type count, Generator generator) : SmallVector() {
         this->reserve(count);
         for (size_type i = 0; i < count; ++i) {
@@ -1329,25 +1223,18 @@ public:
         this->append(std::forward<Range>(range));
     }
 
-    constexpr SmallVector(std::initializer_list<value_type> init) : SmallVector() {
-        this->append(init);
-    }
+    constexpr SmallVector(std::initializer_list<value_type> init) : SmallVector() { this->append(init); }
 
-    constexpr SmallVector(const base_type &other) : SmallVector() {
-        this->append(std::ranges::subrange(other.begin(), other.end()));
-    }
+    constexpr SmallVector(const base_type &other) : SmallVector() { this->append(std::ranges::subrange(other.begin(), other.end())); }
 
-    constexpr SmallVector(base_type &&other) : SmallVector() {
-        this->move_from_other(std::move(other));
-    }
+    constexpr SmallVector(base_type &&other) : SmallVector() { this->move_from_other(std::move(other)); }
 
     constexpr SmallVector(const SmallVector &other) : SmallVector(static_cast<const base_type &>(other)) {}
 
     template <u32 OtherCapacity>
     constexpr SmallVector(const SmallVector<value_type, OtherCapacity> &other) : SmallVector(static_cast<const base_type &>(other)) {}
 
-    constexpr SmallVector(SmallVector &&other) noexcept(
-        std::is_nothrow_move_constructible_v<value_type>) : SmallVector() {
+    constexpr SmallVector(SmallVector &&other) noexcept(std::is_nothrow_move_constructible_v<value_type>) : SmallVector() {
         move_from_typed_small_vector(std::move(other));
     }
 
@@ -1364,8 +1251,7 @@ public:
         return *this;
     }
 
-    constexpr SmallVector &
-    operator=(base_type &&other) noexcept(std::is_nothrow_move_constructible_v<value_type>) {
+    constexpr SmallVector &operator=(base_type &&other) noexcept(std::is_nothrow_move_constructible_v<value_type>) {
         if (static_cast<const base_type *>(this) == std::addressof(other)) {
             return *this;
         }
@@ -1373,12 +1259,9 @@ public:
         return *this;
     }
 
-    constexpr SmallVector &operator=(const SmallVector &other) {
-        return *this = static_cast<const base_type &>(other);
-    }
+    constexpr SmallVector &operator=(const SmallVector &other) { return *this = static_cast<const base_type &>(other); }
 
-    constexpr SmallVector &
-    operator=(SmallVector &&other) noexcept(std::is_nothrow_move_constructible_v<value_type>) {
+    constexpr SmallVector &operator=(SmallVector &&other) noexcept(std::is_nothrow_move_constructible_v<value_type>) {
         if (this != std::addressof(other)) {
             this->move_assign_from_other(static_cast<base_type &&>(other));
             other.reset_to_small(InlineCapacity);
@@ -1400,8 +1283,7 @@ public:
 
     template <u32 OtherCapacity>
     constexpr void assign(SmallVector<value_type, OtherCapacity> &&other) {
-        if (reinterpret_cast<const void *>(this) ==
-            reinterpret_cast<const void *>(std::addressof(other))) {
+        if (reinterpret_cast<const void *>(this) == reinterpret_cast<const void *>(std::addressof(other))) {
             return;
         }
 
@@ -1412,9 +1294,7 @@ public:
     /// Construct a SmallVector by adopting a pre-allocated buffer.
     /// The buffer must have been allocated with mem::allocate<value_type>.
     /// The SmallVector takes ownership and will deallocate it on destruction.
-    [[nodiscard]] constexpr static SmallVector from_raw_parts(value_type *data,
-                                                              size_type count,
-                                                              size_type capacity) {
+    [[nodiscard]] constexpr static SmallVector from_raw_parts(value_type *data, size_type count, size_type capacity) {
         SmallVector result;
         if (data != nullptr && capacity > 0) {
             result.adopt_allocation(data, count, capacity);
@@ -1422,13 +1302,9 @@ public:
         return result;
     }
 
-    [[nodiscard]] constexpr size_type inline_capacity() const noexcept {
-        return InlineCapacity;
-    }
+    [[nodiscard]] constexpr size_type inline_capacity() const noexcept { return InlineCapacity; }
 
-    [[nodiscard]] constexpr bool inlinable() const noexcept {
-        return this->size() <= InlineCapacity;
-    }
+    [[nodiscard]] constexpr bool inlinable() const noexcept { return this->size() <= InlineCapacity; }
 
     constexpr void shrink_to_fit() {
         if (this->begin() == this->inline_begin()) {
@@ -1446,11 +1322,7 @@ public:
         if (!std::is_constant_evaluated() && this->size() <= InlineCapacity) {
             auto *new_begin = this->inline_begin();
             auto *constructed = new_begin;
-            LIGHTER_TRY {
-                constructed =
-                    mem::uninitialized_relocate(std::ranges::subrange(this->begin(), this->end()),
-                                                new_begin);
-            }
+            LIGHTER_TRY { constructed = mem::uninitialized_relocate(std::ranges::subrange(this->begin(), this->end()), new_begin); }
             LIGHTER_CATCH_ALL() {
                 mem::destroy_range(std::ranges::subrange(new_begin, constructed));
                 LIGHTER_RETHROW();
@@ -1472,8 +1344,7 @@ public:
         }
 
         auto guard = mem::AllocationGuard<value_type>(this->size());
-        auto *out = mem::uninitialized_relocate(std::ranges::subrange(this->begin(), this->end()),
-                                                guard.data());
+        auto *out = mem::uninitialized_relocate(std::ranges::subrange(this->begin(), this->end()), guard.data());
         guard.mark(out);
 
         this->commit_replacement(guard.release(), this->size(), this->size());

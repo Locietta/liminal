@@ -1,9 +1,10 @@
 #pragma once
 
 #include <cassert>
-#include <curl/curl.h>
 #include <string_view>
 #include <utility>
+
+#include <curl/curl.h>
 
 namespace lighter::curl {
 
@@ -70,22 +71,26 @@ inline void slist_free_all(curl_slist *list) noexcept {
     }
 }
 
-template <typename T> inline EasyError setopt(CURL *handle, CURLoption option, T value) noexcept {
+template <typename T>
+inline EasyError setopt(CURL *handle, CURLoption option, T value) noexcept {
     assert(handle != nullptr && "curl::setopt requires non-null easy handle");
     return static_cast<EasyError>(::curl_easy_setopt(handle, option, value));
 }
 
-template <typename T> inline EasyError getinfo(CURL *handle, CURLINFO info, T value) noexcept {
+template <typename T>
+inline EasyError getinfo(CURL *handle, CURLINFO info, T value) noexcept {
     assert(handle != nullptr && "curl::getinfo requires non-null easy handle");
     return static_cast<EasyError>(::curl_easy_getinfo(handle, info, value));
 }
 
-template <typename T> inline MultiError multi_setopt(CURLM *handle, CURLMoption option, T value) noexcept {
+template <typename T>
+inline MultiError multi_setopt(CURLM *handle, CURLMoption option, T value) noexcept {
     assert(handle != nullptr && "curl::multi_setopt requires non-null multi handle");
     return static_cast<MultiError>(::curl_multi_setopt(handle, option, value));
 }
 
-template <typename T> inline ShareError share_setopt(CURLSH *handle, CURLSHoption option, T value) noexcept {
+template <typename T>
+inline ShareError share_setopt(CURLSH *handle, CURLSHoption option, T value) noexcept {
     assert(handle != nullptr && "curl::share_setopt requires non-null share handle");
     return static_cast<ShareError>(::curl_share_setopt(handle, option, value));
 }

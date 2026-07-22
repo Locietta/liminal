@@ -2,6 +2,9 @@
 
 #if defined(__linux__)
 #include <charconv>
+#endif
+
+#if defined(__linux__)
 #include <unistd.h>
 #elif defined(__APPLE__)
 #include <libproc.h>
@@ -81,7 +84,8 @@ Result<UnameInfo> uname() {
 
 /// Helper: call a libuv string-returning Function with stack buffer,
 /// retry with heap allocation on UV_ENOBUFS.
-template <typename Fn> static Result<std::string> read_uv_string(Fn &&fn, usize initial_size) {
+template <typename Fn>
+static Result<std::string> read_uv_string(Fn &&fn, usize initial_size) {
     std::string buf(initial_size, '\0');
     usize size = buf.size();
     auto err = fn(buf.data(), size);

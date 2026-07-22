@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -13,10 +12,9 @@
 
 namespace lighter {
 
-class EventLoop;
+struct EventLoop;
 
-class Process {
-public:
+struct Process {
     Process() noexcept;
 
     Process(const Process &) = delete;
