@@ -3,6 +3,8 @@
 #include <cctype>
 #include <string>
 
+#include <glaze/base64/base64.hpp>
+
 #include <lighter/types.hpp>
 
 namespace lighter::http::detail {
@@ -99,33 +101,6 @@ std::string encode_pairs(const std::vector<QueryParam> &pairs) {
     return out;
 }
 
-std::string base64_encode(std::string_view text) {
-    constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    std::string out;
-    out.reserve(((text.size() + 2) / 3) * 4);
-
-    u32 buffer = 0;
-    int bits = 0;
-    for (unsigned char ch : text) {
-        buffer = (buffer << 8) | ch;
-        bits += 8;
-        while (bits >= 6) {
-            bits -= 6;
-            out.push_back(alphabet[(buffer >> bits) & 0x3F]);
-        }
-    }
-
-    if (bits > 0) {
-        buffer <<= (6 - bits);
-        out.push_back(alphabet[buffer & 0x3F]);
-    }
-
-    while (out.size() % 4 != 0) {
-        out.push_back('=');
-    }
-
-    return out;
-}
+std::string base64_encode(std::string_view text) { return glz::write_base64(text); }
 
 } // namespace lighter::http::detail
