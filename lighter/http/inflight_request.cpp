@@ -105,11 +105,37 @@ InflightRequest::InflightRequest(http::Request request) noexcept
     }
 }
 
+void InflightRequest::enable_streaming() {
+    if (!conduit) {
+        conduit = std::make_unique<StreamConduit>();
+        // High water + one curl burst headroom: keeps in-window appends from
+        // reallocating so handed-out chunk views stay stable in practice.
+        conduit->buffer.reserve(StreamConduit::k_high_water + 32 * 1024);
+    }
+}
+
 usize InflightRequest::on_write(char *data, usize size, usize count, void *userdata) {
     auto *self = static_cast<InflightRequest *>(userdata);
     assert(self != nullptr && "curl write callback requires inflight_request");
 
     const auto bytes = size * count;
+
+    if (self->conduit) {
+        auto &conduit = *self->conduit;
+        // body bytes mean the final headers are complete, whatever on_header
+        // concluded (belt and braces for exotic servers)
+        conduit.finalize_headers(self->out);
+        if (conduit.buffered() >= StreamConduit::k_high_water) {
+            // rejecting the chunk pauses the transfer; curl re-delivers it
+            // after curl_easy_pause(CURLPAUSE_CONT)
+            conduit.paused = true;
+            return CURL_WRITEFUNC_PAUSE;
+        }
+        conduit.buffer.append(data, bytes);
+        conduit.readable.set();
+        return bytes;
+    }
+
     auto *begin = reinterpret_cast<const byte *>(data);
     self->out.body.insert(self->out.body.end(), begin, begin + bytes);
     return bytes;
@@ -126,11 +152,28 @@ usize InflightRequest::on_header(char *data, usize size, usize count, void *user
     }
 
     if (line.empty()) {
+        // end of one header block; for streaming, decide whether it was final
+        if (self->conduit && !self->conduit->intermediate) {
+            self->conduit->finalize_headers(self->out);
+        }
         return bytes;
     }
 
     if (line.starts_with("HTTP/")) {
         self->out.headers.clear();
+        if (self->conduit) {
+            long status = 0;
+            if (auto space = line.find(' '); space != std::string_view::npos) {
+                auto rest = line.substr(space + 1);
+                for (usize i = 0; i < rest.size() && rest[i] >= '0' && rest[i] <= '9'; ++i) {
+                    status = status * 10 + (rest[i] - '0');
+                }
+            }
+            self->conduit->pending_status = status;
+            // 1xx blocks and redirects curl will follow are not the final response
+            const bool redirected = status >= 300 && status < 400 && self->redirect_policy().follow;
+            self->conduit->intermediate = (status >= 100 && status < 200) || redirected;
+        }
         return bytes;
     }
 

@@ -83,6 +83,11 @@ inline EasyError getinfo(CURL *handle, CURLINFO info, T value) noexcept {
     return static_cast<EasyError>(::curl_easy_getinfo(handle, info, value));
 }
 
+inline EasyError easy_pause(CURL *handle, int bitmask) noexcept {
+    assert(handle != nullptr && "curl::easy_pause requires non-null easy handle");
+    return static_cast<EasyError>(::curl_easy_pause(handle, bitmask));
+}
+
 template <typename T>
 inline MultiError multi_setopt(CURLM *handle, CURLMoption option, T value) noexcept {
     assert(handle != nullptr && "curl::multi_setopt requires non-null multi handle");

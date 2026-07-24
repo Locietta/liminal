@@ -27,13 +27,16 @@ namespace lighter::http {
 
 struct Request;
 struct BoundClient;
+struct StreamingResponse;
 
 } // namespace lighter::http
 
 namespace lighter::http::detail {
 
 struct InflightRequest;
+struct InflightRequestState;
 Task<Response, Error> execute_request(Request request, EventLoop &loop);
+Task<StreamingResponse, Error> execute_stream_request(Request request, EventLoop &loop);
 
 } // namespace lighter::http::detail
 
@@ -66,6 +69,11 @@ struct Request : detail::RequestSettings {
 
     Task<Response, Error> send() &;
     Task<Response, Error> send() &&;
+
+    /// Start the transfer and resolve once the final response headers are in,
+    /// leaving the body to be pulled from the StreamingResponse. Dropping the
+    /// StreamingResponse (or cancelling) aborts the transfer.
+    Task<StreamingResponse, Error> stream() &&;
 
 private:
     friend struct BoundClient;

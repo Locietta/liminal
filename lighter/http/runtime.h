@@ -6,7 +6,7 @@
 
 namespace lighter::http {
 
-struct request;
+struct Request;
 
 } // namespace lighter::http
 
@@ -18,7 +18,7 @@ using InflightRequestRef = std::shared_ptr<InflightRequestState>;
 
 curl::EasyError ensure_curl_runtime() noexcept;
 
-InflightRequestRef make_inflight_request_state(http::request request) noexcept;
+InflightRequestRef make_inflight_request_state(http::Request request) noexcept;
 
 void *inflight_request_opaque(const InflightRequestRef &request) noexcept;
 

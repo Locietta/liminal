@@ -9,41 +9,47 @@
 
 namespace lighter::http { namespace detail {
 
-struct RequestAwaiter;
-
-struct InflightRequestState : std::enable_shared_from_this<InflightRequestState> {
-    explicit InflightRequestState(http::Request req) noexcept : request(std::move(req)) {}
-
-    Manager *mgr = nullptr;
-    InflightRequest request;
-    RequestAwaiter *awaiter = nullptr;
-    bool registered = false;
-    bool completed = false;
-    bool request_released = false;
-
-    void detach_from_multi() noexcept {
-        if (!registered || !mgr || request_released || !request.easy) {
-            registered = false;
-            return;
-        }
-
-        request.clear_runtime_binding();
-        mgr->remove_request(request.easy.get());
+void InflightRequestState::detach_from_multi() noexcept {
+    if (!registered || !mgr || request_released || !request.easy) {
         registered = false;
+        return;
     }
 
-    void release_request() noexcept {
-        if (!request_released) {
-            request.clear_runtime_binding();
-            request.easy.reset();
-            request_released = true;
+    request.clear_runtime_binding();
+    mgr->remove_request(request.easy.get());
+    registered = false;
+}
+
+void InflightRequestState::release_request() noexcept {
+    if (!request_released) {
+        request.clear_runtime_binding();
+        request.easy.reset();
+        request_released = true;
+    }
+}
+
+void InflightRequestState::start_transfer() noexcept {
+    if (completed || request_released || !request.easy) {
+        return;
+    }
+
+    if (!request.bind_runtime(inflight_request_opaque(shared_from_this()))) {
+        if (request.result.kind == ErrorKind::CURL && curl::ok(request.result.curl_code)) {
+            request.result = Error::invalid_request("request runtime binding failed");
         }
+        completed = true;
+        return;
     }
 
-    void complete(Error err, bool resume) noexcept;
+    if (auto err = mgr->add_request(request.easy.get()); !curl::ok(err)) {
+        request.fail(Error::from_curl(curl::to_easy_error(err)));
+        completed = true;
+        return;
+    }
 
-    void complete(curl::EasyError code, bool resume) noexcept { complete(Error::from_curl(code), resume); }
-};
+    registered = true;
+    mgr->drive_timeout_arming(inflight_request_opaque(shared_from_this()));
+}
 
 struct RequestAwaiter : uv::AwaitOp<RequestAwaiter> {
     using promise_t = Task<Response, Error>::promise_type;
@@ -75,28 +81,7 @@ struct RequestAwaiter : uv::AwaitOp<RequestAwaiter> {
         });
     }
 
-    void start() noexcept {
-        if (state->completed || state->request_released || !state->request.easy) {
-            return;
-        }
-
-        if (!state->request.bind_runtime(inflight_request_opaque(state))) {
-            if (state->request.result.kind == ErrorKind::CURL && curl::ok(state->request.result.curl_code)) {
-                state->request.result = Error::invalid_request("request runtime binding failed");
-            }
-            state->completed = true;
-            return;
-        }
-
-        if (auto err = state->mgr->add_request(state->request.easy.get()); !curl::ok(err)) {
-            state->request.fail(Error::from_curl(curl::to_easy_error(err)));
-            state->completed = true;
-            return;
-        }
-
-        state->registered = true;
-        state->mgr->drive_timeout_arming(inflight_request_opaque(state));
-    }
+    void start() noexcept { state->start_transfer(); }
 
     bool await_ready() const noexcept { return state->completed; }
 
@@ -129,6 +114,15 @@ void InflightRequestState::complete(Error err, bool resume) noexcept {
     registered = false;
     if (!request_released) {
         request.result = std::move(err);
+    }
+
+    // Streaming consumers wait on the conduit Events rather than an IoOp;
+    // Event::set defers resumption to the loop's check phase, so signaling
+    // here is safe from any curl/uv callback context.
+    if (!request_released && request.conduit) {
+        request.conduit->body_done = true;
+        request.conduit->headers_ready.set();
+        request.conduit->readable.set();
     }
 
     auto *waiting = awaiter;

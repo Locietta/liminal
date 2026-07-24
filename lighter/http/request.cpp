@@ -3,11 +3,15 @@
 #include <format>
 #include <utility>
 
+#include <lighter/http/streaming.h>
+
 namespace lighter::http {
 
 namespace {
 
 Task<Response, Error> make_failed_response(Error err) { co_await fail(std::move(err)); }
+
+Task<StreamingResponse, Error> make_failed_stream(Error err) { co_await fail(std::move(err)); }
 
 } // namespace
 
@@ -73,6 +77,18 @@ Task<Response, Error> Request::send() && {
     }
 
     return detail::execute_request(std::move(*this), *dispatch_loop);
+}
+
+Task<StreamingResponse, Error> Request::stream() && {
+    if (staged_error) {
+        return make_failed_stream(std::move(*staged_error));
+    }
+
+    if (!dispatch_loop) {
+        return make_failed_stream(Error::invalid_request("request::stream requires a bound_client"));
+    }
+
+    return detail::execute_stream_request(std::move(*this), *dispatch_loop);
 }
 
 Task<Response, Error> Request::failed(Error err) { return make_failed_response(std::move(err)); }
