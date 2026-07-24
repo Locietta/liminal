@@ -32,7 +32,7 @@ template <typename... Ts, typename T>
 struct TypeListContains<TypeList<Ts...>, T> : std::bool_constant<(std::same_as<T, Ts> || ...)> {};
 
 template <typename List, typename T>
-constexpr inline bool k_type_list_contains_v = TypeListContains<List, T>::value;
+constexpr inline bool type_list_contains_v = TypeListContains<List, T>::value;
 
 template <typename List, template <typename> typename Predicate>
 struct TypeListFilter;
@@ -86,7 +86,7 @@ struct TypeListUniqueImpl<TypeList<Ts...>, TypeList<>> {
 template <typename... Ts, typename T, typename... Rest>
 struct TypeListUniqueImpl<TypeList<Ts...>, TypeList<T, Rest...>> {
 private:
-    using next = std::conditional_t<k_type_list_contains_v<TypeList<Ts...>, T>, TypeList<Ts...>, TypeList<Ts..., T>>;
+    using next = std::conditional_t<type_list_contains_v<TypeList<Ts...>, T>, TypeList<Ts...>, TypeList<Ts..., T>>;
 
 public:
     using type = typename TypeListUniqueImpl<next, TypeList<Rest...>>::type;
@@ -126,7 +126,7 @@ template <typename First, typename... Rest, typename T>
 struct TypeListIndexOf<TypeList<First, Rest...>, T> : std::integral_constant<usize, 1 + TypeListIndexOf<TypeList<Rest...>, T>::value> {};
 
 template <typename List, typename T>
-constexpr inline usize k_type_list_index_of_v = TypeListIndexOf<List, T>::value;
+constexpr inline usize type_list_index_of_v = TypeListIndexOf<List, T>::value;
 
 template <typename A, typename B>
 struct TypeListCat;
@@ -165,7 +165,7 @@ template <typename... Ts>
 struct TypeListSize<TypeList<Ts...>> : std::integral_constant<usize, sizeof...(Ts)> {};
 
 template <typename List>
-constexpr inline usize k_type_list_size_v = TypeListSize<List>::value;
+constexpr inline usize type_list_size_v = TypeListSize<List>::value;
 
 template <typename List>
 struct TypeListToUnion;

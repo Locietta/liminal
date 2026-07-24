@@ -13,7 +13,7 @@ namespace lighter {
 namespace {
 
 template <typename T>
-constexpr inline bool k_always_false_v = false;
+constexpr inline bool always_false_v = false;
 
 Result<u32> to_uv_pipe_flags(const Pipe::Options &opts) {
     u32 out = 0;
@@ -114,7 +114,7 @@ void on_connection(uv_stream_t *server, i32 status) {
     } else if constexpr (std::is_same_v<Stream, Tcp>) {
         err = uv::tcp_init(*server->loop, self->tcp);
     } else {
-        static_assert(k_always_false_v<Stream>, "unsupported accept Stream type");
+        static_assert(always_false_v<Stream>, "unsupported accept Stream type");
     }
 
     if (!err) {
@@ -165,7 +165,7 @@ struct ConnectAwait : uv::AwaitOp<ConnectAwait<Stream>> {
             }
             flags = uv_flags.value();
         } else {
-            static_assert(k_always_false_v<Stream>, "Pipe constructor requires Stream=Pipe");
+            static_assert(always_false_v<Stream>, "Pipe constructor requires Stream=Pipe");
         }
     }
 
@@ -179,7 +179,7 @@ struct ConnectAwait : uv::AwaitOp<ConnectAwait<Stream>> {
             }
             addr = resolved->storage;
         } else {
-            static_assert(k_always_false_v<Stream>, "Tcp constructor requires Stream=Tcp");
+            static_assert(always_false_v<Stream>, "Tcp constructor requires Stream=Tcp");
         }
     }
 
@@ -205,7 +205,7 @@ struct ConnectAwait : uv::AwaitOp<ConnectAwait<Stream>> {
             } else if constexpr (std::is_same_v<Stream, Tcp>) {
                 aw->outcome = Tcp(std::move(aw->self));
             } else {
-                static_assert(k_always_false_v<Stream>, "unsupported connect Stream type");
+                static_assert(always_false_v<Stream>, "unsupported connect Stream type");
             }
         } else {
             aw->outcome = outcome_error(Error::k_invalid_argument);
@@ -230,7 +230,7 @@ struct ConnectAwait : uv::AwaitOp<ConnectAwait<Stream>> {
         } else if constexpr (std::is_same_v<Stream, Tcp>) {
             err = uv::tcp_connect(req, self->tcp, reinterpret_cast<const sockaddr *>(&addr), on_connect);
         } else {
-            static_assert(k_always_false_v<Stream>, "unsupported connect Stream type");
+            static_assert(always_false_v<Stream>, "unsupported connect Stream type");
         }
 
         if (err) {

@@ -141,9 +141,8 @@ struct OrFailAwait {
 
 /// An Outcome-like type that carries an Error channel (no cancel channel).
 template <typename Outcome>
-concept or_fail_result =
-    k_is_outcome_v<std::remove_cvref_t<Outcome>> && std::is_void_v<typename std::remove_cvref_t<Outcome>::cancel_type> &&
-    (!std::is_void_v<typename std::remove_cvref_t<Outcome>::error_type>);
+concept or_fail_result = is_outcome_v<std::remove_cvref_t<Outcome>> && std::is_void_v<typename std::remove_cvref_t<Outcome>::cancel_type> &&
+                         (!std::is_void_v<typename std::remove_cvref_t<Outcome>::error_type>);
 
 /// Propagate the Error channel of a non-Task Outcome; resume with its value on success.
 ///

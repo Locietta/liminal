@@ -12,10 +12,10 @@ template <typename T>
 constexpr inline bool k_dependent_false = false;
 
 template <template <typename...> typename HKT, typename T>
-constexpr inline bool k_is_specialization_of = false;
+constexpr inline bool is_specialization_of = false;
 
 template <template <typename...> typename HKT, typename... Ts>
-constexpr inline bool k_is_specialization_of<HKT, HKT<Ts...>> = true;
+constexpr inline bool is_specialization_of<HKT, HKT<Ts...>> = true;
 
 template <typename T>
 concept Formattable = std::formattable<T, char>;
@@ -51,9 +51,9 @@ concept ge_comparable_with = requires(const L &lhs, const R &rhs) {
 };
 
 template <typename T>
-constexpr inline bool k_is_optional_v = k_is_specialization_of<std::optional, std::remove_cvref_t<T>>;
+constexpr inline bool is_optional_v = is_specialization_of<std::optional, std::remove_cvref_t<T>>;
 
 template <typename T>
-constexpr inline bool k_is_expected_v = k_is_specialization_of<std::expected, std::remove_cvref_t<T>>;
+constexpr inline bool is_expected_v = is_specialization_of<std::expected, std::remove_cvref_t<T>>;
 
 } // namespace lighter

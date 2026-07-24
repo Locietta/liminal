@@ -16,6 +16,7 @@
 
 #include <lighter/types.hpp>
 #include <lighter/utils/config.h>
+#include <lighter/utils/relocation.h>
 
 namespace lighter::mem {
 
@@ -38,7 +39,7 @@ template <typename T>
 struct UninitializedArray<T, 0> {};
 
 template <typename T>
-constexpr inline bool k_is_complete_type_v = requires { sizeof(T); };
+constexpr inline bool is_complete_type_v = requires { sizeof(T); };
 
 template <typename U, typename = void>
 struct UnderlyingIfEnum {
@@ -52,8 +53,8 @@ template <typename U>
 using underlying_if_enum_t = typename UnderlyingIfEnum<U>::type;
 
 template <typename From, typename To>
-constexpr inline bool k_is_memcpyable_integral_v = [] {
-    if constexpr (!k_is_complete_type_v<From>) {
+constexpr inline bool is_memcpyable_integral_v = [] {
+    if constexpr (!is_complete_type_v<From>) {
         return false;
     } else {
         using from = underlying_if_enum_t<From>;
@@ -65,25 +66,25 @@ constexpr inline bool k_is_memcpyable_integral_v = [] {
 }();
 
 template <typename From, typename To>
-constexpr inline bool k_is_convertible_pointer_v = std::is_pointer_v<From> && std::is_pointer_v<To> && std::is_convertible_v<From, To>;
+constexpr inline bool is_convertible_pointer_v = std::is_pointer_v<From> && std::is_pointer_v<To> && std::is_convertible_v<From, To>;
 
 template <typename QualifiedFrom, typename QualifiedTo = QualifiedFrom>
-constexpr inline bool k_is_memcpyable_v = [] {
+constexpr inline bool is_memcpyable_v = [] {
     static_assert(!std::is_reference_v<QualifiedTo>, "QualifiedTo must not be a reference.");
 
-    if constexpr (!k_is_complete_type_v<QualifiedFrom>) {
+    if constexpr (!is_complete_type_v<QualifiedFrom>) {
         return false;
     } else {
         using from = std::remove_cvref_t<QualifiedFrom>;
         using to = std::remove_cv_t<QualifiedTo>;
 
         return std::is_trivially_assignable_v<QualifiedTo &, QualifiedFrom> && std::is_trivially_copyable_v<to> &&
-               (std::is_same_v<from, to> || k_is_memcpyable_integral_v<from, to> || k_is_convertible_pointer_v<from, to>);
+               (std::is_same_v<from, to> || is_memcpyable_integral_v<from, to> || is_convertible_pointer_v<from, to>);
     }
 }();
 
 template <typename To, typename... Args>
-constexpr inline bool k_is_uninitialized_memcpyable_v = [] {
+constexpr inline bool is_uninitialized_memcpyable_v = [] {
     static_assert(!std::is_reference_v<To>, "To must not be a reference.");
 
     if constexpr (sizeof...(Args) != 1) {
@@ -93,9 +94,9 @@ constexpr inline bool k_is_uninitialized_memcpyable_v = [] {
             using from = std::remove_cvref_t<From>;
             using to = std::remove_cv_t<To>;
 
-            if constexpr (k_is_complete_type_v<from>) {
+            if constexpr (is_complete_type_v<from>) {
                 return std::is_trivially_constructible_v<To, From> && std::is_trivially_copyable_v<to> &&
-                       (std::is_same_v<from, to> || k_is_memcpyable_integral_v<from, to> || k_is_convertible_pointer_v<from, to>);
+                       (std::is_same_v<from, to> || is_memcpyable_integral_v<from, to> || is_convertible_pointer_v<from, to>);
             } else {
                 return false;
             }
@@ -104,18 +105,18 @@ constexpr inline bool k_is_uninitialized_memcpyable_v = [] {
 }();
 
 template <typename InputIt>
-constexpr inline bool k_is_contiguous_iterator_v = std::is_pointer_v<InputIt> || std::contiguous_iterator<InputIt>;
+constexpr inline bool is_contiguous_iterator_v = std::is_pointer_v<InputIt> || std::contiguous_iterator<InputIt>;
 
 template <typename ValueT, typename InputIt>
-constexpr inline bool k_is_memcpyable_iterator_v =
-    k_is_memcpyable_v<decltype(*std::declval<InputIt>()), ValueT> && k_is_contiguous_iterator_v<InputIt>;
+constexpr inline bool is_memcpyable_iterator_v =
+    is_memcpyable_v<decltype(*std::declval<InputIt>()), ValueT> && is_contiguous_iterator_v<InputIt>;
 
 template <typename ValueT, typename InputIt>
-constexpr inline bool k_is_memcpyable_iterator_v<ValueT, std::move_iterator<InputIt>> = k_is_memcpyable_iterator_v<ValueT, InputIt>;
+constexpr inline bool is_memcpyable_iterator_v<ValueT, std::move_iterator<InputIt>> = is_memcpyable_iterator_v<ValueT, InputIt>;
 
 template <typename ValueT, typename InputIt>
-constexpr inline bool k_is_uninitialized_memcpyable_iterator_v =
-    k_is_uninitialized_memcpyable_v<ValueT, decltype(*std::declval<InputIt>())> && k_is_contiguous_iterator_v<InputIt>;
+constexpr inline bool is_uninitialized_memcpyable_iterator_v =
+    is_uninitialized_memcpyable_v<ValueT, decltype(*std::declval<InputIt>())> && is_contiguous_iterator_v<InputIt>;
 
 #ifndef NDEBUG
 [[noreturn]]
@@ -140,9 +141,6 @@ constexpr void check_range_length_overflow([[maybe_unused]] ItDiffT len) {
 #endif
 }
 
-template <typename T>
-constexpr inline bool k_is_trivially_relocatable_v = std::is_trivially_copyable_v<T>;
-
 template <typename T, typename... Args>
 constexpr auto construct_at_impl(T *p, Args &&...args) noexcept(noexcept(::new (std::declval<void *>()) T(std::declval<Args>()...)))
     -> decltype(::new (std::declval<void *>()) T(std::declval<Args>()...)) {
@@ -164,8 +162,8 @@ constexpr auto default_construct_at_impl(T *p) noexcept(noexcept(::new (std::dec
 }
 
 template <typename T, typename U>
-constexpr T *construct(T *p, U &&val) noexcept(k_is_uninitialized_memcpyable_v<T, U &&> || std::is_nothrow_constructible_v<T, U &&>) {
-    if constexpr (k_is_uninitialized_memcpyable_v<T, U &&>) {
+constexpr T *construct(T *p, U &&val) noexcept(is_uninitialized_memcpyable_v<T, U &&> || std::is_nothrow_constructible_v<T, U &&>) {
+    if constexpr (is_uninitialized_memcpyable_v<T, U &&>) {
         if (std::is_constant_evaluated()) {
             return construct_at_impl(p, std::forward<U>(val));
         }
@@ -415,7 +413,7 @@ template <typename T, std::ranges::input_range Range>
 constexpr T *uninitialized_copy(Range &&range, T *dest) {
     using iterator = std::ranges::iterator_t<Range>;
 
-    if constexpr (std::ranges::forward_range<Range> && k_is_uninitialized_memcpyable_iterator_v<T, iterator>) {
+    if constexpr (std::ranges::forward_range<Range> && is_uninitialized_memcpyable_iterator_v<T, iterator>) {
         static_assert(std::is_constructible_v<T, std::ranges::range_reference_t<Range>>, "`value_type` must be copy constructible.");
         if (std::is_constant_evaluated()) {
             return default_uninitialized_copy<T>(std::forward<Range>(range), dest);
@@ -431,19 +429,53 @@ constexpr T *uninitialized_copy(Range &&range, T *dest) {
     }
 }
 
-template <typename T, std::ranges::forward_range Range>
+template <typename T, typename Range>
+constexpr inline bool relocates_bytewise_v = is_trivially_relocatable_v<T> && std::ranges::contiguous_range<Range> &&
+                                             std::same_as<std::remove_cv_t<std::ranges::range_value_t<Range>>, T>;
+
+/// Relocate `range` into uninitialized `dest`.
+///
+/// Caller contract: pair every uninitialized_relocate<B> with a
+/// destroy_relocated_source<B> on the SAME source range (not destroy_range),
+/// with the same AllowBytewise argument. The bytewise path transplants object
+/// representations, so running source destructors afterwards would
+/// double-free; the move fallback (and constant evaluation) leaves moved-from
+/// sources that still require destruction.
+///
+/// AllowBytewise = false forces the move fallback. Callers must pass false
+/// when a potentially-throwing operation runs between this relocation and the
+/// point where the source buffer is abandoned: unwinding destroys the source
+/// range, which is only correct for moved-from (not transplanted) objects.
+template <bool AllowBytewise = true, typename T, std::ranges::forward_range Range>
 constexpr T *uninitialized_relocate(Range &&range, T *dest) {
-    if constexpr (k_is_trivially_relocatable_v<T> && std::ranges::contiguous_range<Range> &&
-                  std::same_as<std::remove_cv_t<std::ranges::range_value_t<Range>>, T>) {
+    if constexpr (AllowBytewise && relocates_bytewise_v<T, Range>) {
         const usize count = range_length(range);
         if (count != 0 && !std::is_constant_evaluated()) {
             std::memcpy(dest, std::ranges::data(range), count * sizeof(T));
-        } else if (count != 0) {
-            uninitialized_copy<T>(std::forward<Range>(range), dest);
+            return dest + static_cast<isize>(count);
+        }
+        if (count != 0) {
+            uninitialized_copy<T>(move_range(std::ranges::begin(range), std::ranges::end(range)), dest);
         }
         return dest + static_cast<isize>(count);
     } else {
         return uninitialized_copy<T>(move_range(std::ranges::begin(range), std::ranges::end(range)), dest);
+    }
+}
+
+/// End the lifetime of a range previously consumed by uninitialized_relocate.
+/// No-op when the bytewise path was taken (destructors must NOT run on the
+/// transplanted-from bytes); destroys moved-from sources otherwise.
+template <bool AllowBytewise = true, std::ranges::forward_range Range>
+constexpr void destroy_relocated_source(Range &&range) noexcept {
+    using value_type = std::remove_cv_t<std::ranges::range_value_t<Range>>;
+    if constexpr (AllowBytewise && relocates_bytewise_v<value_type, Range>) {
+        if (std::is_constant_evaluated()) {
+            // constant evaluation used the move fallback
+            destroy_range(std::forward<Range>(range));
+        }
+    } else {
+        destroy_range(std::forward<Range>(range));
     }
 }
 

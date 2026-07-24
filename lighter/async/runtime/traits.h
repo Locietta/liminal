@@ -22,7 +22,7 @@
 namespace lighter::detail {
 
 template <typename T>
-constexpr inline bool k_is_task_v = k_is_specialization_of<Task, std::remove_cvref_t<T>>;
+constexpr inline bool is_task_v = is_specialization_of<Task, std::remove_cvref_t<T>>;
 
 template <typename T>
 using normalized_await_result_t = await_result_t<std::remove_cvref_t<T> &&>;
@@ -31,12 +31,12 @@ template <typename T, typename = void>
 struct NormalizedTask;
 
 template <typename T>
-struct NormalizedTask<T, std::enable_if_t<k_is_task_v<T>>> {
+struct NormalizedTask<T, std::enable_if_t<is_task_v<T>>> {
     using type = std::remove_cvref_t<T>;
 };
 
 template <typename T>
-struct NormalizedTask<T, std::enable_if_t<!k_is_task_v<T> && awaitable<std::remove_cvref_t<T> &&>>> {
+struct NormalizedTask<T, std::enable_if_t<!is_task_v<T> && awaitable<std::remove_cvref_t<T> &&>>> {
     using type = Task<normalized_await_result_t<T>>;
 };
 
@@ -49,7 +49,7 @@ Task<T, E, C> normalize_task(Task<T, E, C> &&t) {
 }
 
 template <typename Awaitable>
-    requires(!k_is_task_v<Awaitable>) && (!std::is_reference_v<Awaitable>) &&
+    requires(!is_task_v<Awaitable>) && (!std::is_reference_v<Awaitable>) &&
             std::constructible_from<std::remove_cvref_t<Awaitable>, Awaitable &&> && awaitable<std::remove_cvref_t<Awaitable> &&>
 auto normalize_task_impl(std::remove_cvref_t<Awaitable> value) -> Task<normalized_await_result_t<Awaitable>> {
     if constexpr (!std::is_void_v<normalized_await_result_t<Awaitable>>) {
@@ -60,7 +60,7 @@ auto normalize_task_impl(std::remove_cvref_t<Awaitable> value) -> Task<normalize
 }
 
 template <typename Awaitable>
-    requires(!k_is_task_v<Awaitable>) && (!std::is_reference_v<Awaitable>) &&
+    requires(!is_task_v<Awaitable>) && (!std::is_reference_v<Awaitable>) &&
             std::constructible_from<std::remove_cvref_t<Awaitable>, Awaitable &&> && awaitable<std::remove_cvref_t<Awaitable> &&>
 auto normalize_task(Awaitable &&input) -> Task<normalized_await_result_t<Awaitable>> {
     return normalize_task_impl<Awaitable>(std::remove_cvref_t<Awaitable>(std::forward<Awaitable>(input)));
@@ -87,10 +87,10 @@ template <typename T>
 using promote_void_cancel_t = std::conditional_t<std::is_void_v<T>, Cancellation, T>;
 
 template <typename... Ts>
-constexpr inline bool k_any_non_void_v = (!std::is_void_v<Ts> || ...);
+constexpr inline bool any_non_void_v = (!std::is_void_v<Ts> || ...);
 
 template <typename... Ts>
-using aggregated_cancel_t = std::conditional_t<k_any_non_void_v<Ts...>, aggregated_channel_t<promote_void_cancel_t<Ts>...>, void>;
+using aggregated_cancel_t = std::conditional_t<any_non_void_v<Ts...>, aggregated_channel_t<promote_void_cancel_t<Ts>...>, void>;
 
 template <typename... Ts>
 using task_group_error_type_t = typename TypeListToUnion<type_list_unique_t<TypeList<Ts...>>>::type;

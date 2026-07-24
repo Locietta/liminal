@@ -119,9 +119,9 @@ struct HybridVector {
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
     using size_storage_type = detail::small_vector_size_type<value_type>;
 
-    constexpr static bool k_takes_param_by_value = std::is_trivially_copy_constructible_v<value_type> &&
-                                                   std::is_trivially_move_constructible_v<value_type> &&
-                                                   std::is_trivially_destructible_v<value_type> && sizeof(value_type) <= 2 * sizeof(void *);
+    constexpr static bool takes_param_by_value = std::is_trivially_copy_constructible_v<value_type> &&
+                                                 std::is_trivially_move_constructible_v<value_type> &&
+                                                 std::is_trivially_destructible_v<value_type> && sizeof(value_type) <= 2 * sizeof(void *);
 
 protected:
     constexpr explicit HybridVector(size_type inline_capacity) noexcept
@@ -360,12 +360,33 @@ private:
         }
     }
 
+    /// Like commit_replacement, but for buffers whose elements were consumed
+    /// by mem::uninitialized_relocate<AllowBytewise>: bytewise-relocated
+    /// sources must NOT be destroyed (their objects live in the new buffer
+    /// now). AllowBytewise must match the relocate call.
+    template <bool AllowBytewise = true>
+    constexpr void commit_relocated(pointer new_begin, size_type new_size, size_type new_capacity) noexcept {
+        auto old_begin = this->m_begin;
+        const auto old_size = this->m_size;
+        const auto old_capacity = this->m_capacity;
+        const auto was_inline = old_begin == inline_begin();
+
+        this->m_begin = new_begin;
+        this->m_size = static_cast<decltype(this->m_size)>(new_size);
+        this->m_capacity = static_cast<decltype(this->m_capacity)>(new_capacity);
+
+        mem::destroy_relocated_source<AllowBytewise>(counted_range(old_begin, old_size));
+        if (!was_inline) {
+            mem::deallocate(old_begin, old_capacity);
+        }
+    }
+
     constexpr void grow_to(size_type min_capacity) {
         const auto new_capacity = next_capacity(min_capacity);
         auto guard = make_allocation_guard(new_capacity);
         auto *out = mem::uninitialized_relocate(elements(), guard.data());
         guard.mark(out);
-        commit_replacement(guard.release(), size(), new_capacity);
+        commit_relocated(guard.release(), size(), new_capacity);
     }
 
     constexpr void reserve_for_append(size_type count) {
@@ -469,6 +490,8 @@ private:
         bool back_constructed = false;
 
         LIGHTER_TRY {
+            // construct first so `args` may alias current elements; relocation
+            // is last, so nothing can throw between it and the commit below
             mem::construct(counted_range(new_begin, old_size).end(), std::forward<Args>(args)...);
             back_constructed = true;
             relocated_end = mem::uninitialized_relocate(elements(), new_begin);
@@ -482,7 +505,7 @@ private:
             LIGHTER_RETHROW();
         }
 
-        commit_replacement(new_begin, new_size, new_capacity);
+        commit_relocated(new_begin, new_size, new_capacity);
         return back();
     }
 
@@ -494,15 +517,19 @@ private:
         const auto new_capacity = next_capacity(new_size);
         auto guard = make_allocation_guard(new_capacity);
 
-        auto *out = mem::uninitialized_relocate(prefix(index), guard.data());
+        // bytewise relocation is only unwind-safe when the construction
+        // sandwiched between the two relocates cannot throw
+        constexpr bool k_bytewise = std::is_nothrow_constructible_v<value_type, U &&>;
+
+        auto *out = mem::uninitialized_relocate<k_bytewise>(prefix(index), guard.data());
         guard.mark(out);
         mem::construct(out, std::forward<U>(value));
         ++out;
         guard.mark(out);
-        out = mem::uninitialized_relocate(suffix(index), out);
+        out = mem::uninitialized_relocate<k_bytewise>(suffix(index), out);
         guard.mark(out);
 
-        commit_replacement(guard.release(), new_size, new_capacity);
+        commit_relocated<k_bytewise>(guard.release(), new_size, new_capacity);
         return prefix(index).end();
     }
 
@@ -536,14 +563,17 @@ private:
         const auto new_capacity = next_capacity(new_size);
         auto guard = make_allocation_guard(new_capacity);
 
-        auto *out = mem::uninitialized_relocate(prefix(index), guard.data());
+        // see reallocate_and_insert_one for the unwind-safety condition
+        constexpr bool k_bytewise = std::is_nothrow_copy_constructible_v<value_type>;
+
+        auto *out = mem::uninitialized_relocate<k_bytewise>(prefix(index), guard.data());
         guard.mark(out);
         out = mem::uninitialized_fill(counted_range(out, count), value);
         guard.mark(out);
-        out = mem::uninitialized_relocate(suffix(index), out);
+        out = mem::uninitialized_relocate<k_bytewise>(suffix(index), out);
         guard.mark(out);
 
-        commit_replacement(guard.release(), new_size, new_capacity);
+        commit_relocated<k_bytewise>(guard.release(), new_size, new_capacity);
         return prefix(index).end();
     }
 
@@ -582,14 +612,17 @@ private:
         const auto new_capacity = next_capacity(new_size);
         auto guard = make_allocation_guard(new_capacity);
 
-        auto *out = mem::uninitialized_relocate(prefix(index), guard.data());
+        // see reallocate_and_insert_one for the unwind-safety condition
+        constexpr bool k_bytewise = std::is_nothrow_constructible_v<value_type, std::ranges::range_reference_t<Range>>;
+
+        auto *out = mem::uninitialized_relocate<k_bytewise>(prefix(index), guard.data());
         guard.mark(out);
         out = mem::uninitialized_copy(std::forward<Range>(range), out);
         guard.mark(out);
-        out = mem::uninitialized_relocate(suffix(index), out);
+        out = mem::uninitialized_relocate<k_bytewise>(suffix(index), out);
         guard.mark(out);
 
-        commit_replacement(guard.release(), new_size, new_capacity);
+        commit_relocated<k_bytewise>(guard.release(), new_size, new_capacity);
         return prefix(index).end();
     }
 
@@ -882,13 +915,13 @@ public:
     constexpr void resize_for_overwrite(size_type count) { resize_impl<true>(count); }
 
     constexpr void resize(size_type count, value_type value)
-        requires(k_takes_param_by_value)
+        requires(takes_param_by_value)
     {
         resize_fill(count, value);
     }
 
     constexpr void resize(size_type count, const_reference value)
-        requires(!k_takes_param_by_value)
+        requires(!takes_param_by_value)
     {
         if (count > capacity() && references_storage(std::addressof(value))) {
             auto tmp = make_temporary(value);
@@ -905,13 +938,13 @@ public:
     }
 
     constexpr void push_back(value_type value)
-        requires(k_takes_param_by_value)
+        requires(takes_param_by_value)
     {
         emplace_back(value);
     }
 
     constexpr void push_back(const_reference value)
-        requires(!k_takes_param_by_value)
+        requires(!takes_param_by_value)
     {
         if (references_storage(std::addressof(value))) {
             auto tmp = make_temporary(value);
@@ -922,7 +955,7 @@ public:
     }
 
     constexpr void push_back(value_type &&value)
-        requires(!k_takes_param_by_value)
+        requires(!takes_param_by_value)
     {
         if (references_storage(std::addressof(value))) {
             auto tmp = make_temporary(std::move(value));
@@ -961,13 +994,13 @@ public:
     }
 
     constexpr void append(size_type count, value_type value)
-        requires(k_takes_param_by_value)
+        requires(takes_param_by_value)
     {
         append_copies(count, value);
     }
 
     constexpr void append(size_type count, const_reference value)
-        requires(!k_takes_param_by_value)
+        requires(!takes_param_by_value)
     {
         if (references_storage(std::addressof(value))) {
             auto tmp = make_temporary(value);
@@ -1010,13 +1043,13 @@ public:
     }
 
     constexpr void assign(size_type count, value_type value)
-        requires(k_takes_param_by_value)
+        requires(takes_param_by_value)
     {
         assign_copies(count, value);
     }
 
     constexpr void assign(size_type count, const_reference value)
-        requires(!k_takes_param_by_value)
+        requires(!takes_param_by_value)
     {
         if (references_storage(std::addressof(value))) {
             auto tmp = make_temporary(value);
@@ -1056,14 +1089,14 @@ public:
     }
 
     constexpr iterator insert(iterator pos, value_type value)
-        requires(k_takes_param_by_value)
+        requires(takes_param_by_value)
     {
         assert(valid_insert_position(pos));
         return insert_one_impl(pos, value);
     }
 
     constexpr iterator insert(iterator pos, const_reference value)
-        requires(!k_takes_param_by_value)
+        requires(!takes_param_by_value)
     {
         assert(valid_insert_position(pos));
         auto tmp = make_temporary(value);
@@ -1071,7 +1104,7 @@ public:
     }
 
     constexpr iterator insert(iterator pos, value_type &&value)
-        requires(!k_takes_param_by_value)
+        requires(!takes_param_by_value)
     {
         assert(valid_insert_position(pos));
         if (references_storage(std::addressof(value))) {
@@ -1082,14 +1115,14 @@ public:
     }
 
     constexpr iterator insert(iterator pos, size_type count, value_type value)
-        requires(k_takes_param_by_value)
+        requires(takes_param_by_value)
     {
         assert(valid_insert_position(pos));
         return insert_copies(pos, count, value);
     }
 
     constexpr iterator insert(iterator pos, size_type count, const_reference value)
-        requires(!k_takes_param_by_value)
+        requires(!takes_param_by_value)
     {
         assert(valid_insert_position(pos));
         auto tmp = make_temporary(value);
@@ -1334,7 +1367,7 @@ public:
 
             this->m_begin = new_begin;
             this->m_capacity = static_cast<decltype(this->m_capacity)>(InlineCapacity);
-            mem::destroy_range(base_type::counted_range(old_begin, old_size));
+            mem::destroy_relocated_source(base_type::counted_range(old_begin, old_size));
             mem::deallocate(old_begin, old_capacity);
             return;
         }
@@ -1347,7 +1380,7 @@ public:
         auto *out = mem::uninitialized_relocate(std::ranges::subrange(this->begin(), this->end()), guard.data());
         guard.mark(out);
 
-        this->commit_replacement(guard.release(), this->size(), this->size());
+        this->commit_relocated(guard.release(), this->size(), this->size());
     }
 };
 

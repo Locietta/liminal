@@ -7,6 +7,7 @@
 #include <utility>
 
 #include <lighter/types.hpp>
+#include <lighter/utils/relocation.h>
 
 namespace lighter {
 
@@ -164,8 +165,11 @@ struct Function<R(Args...)> {
     };
 
     template <typename T>
-    // Use a proper trivially-relocatable trait here once the language provides one.
-    constexpr static bool k_sbo_eligible = sizeof(T) <= k_sbo_size && alignof(T) <= k_sbo_align && std::is_trivially_copyable_v<T>;
+    // Moving a Function memcpys Storage and disarms the source's deleter -
+    // exactly a trivial relocation - so SBO admits trivially relocatable
+    // callables (e.g. lambdas capturing unique_ptr), not just trivially
+    // copyable ones.
+    constexpr static bool sbo_eligible = sizeof(T) <= k_sbo_size && alignof(T) <= k_sbo_align && mem::is_trivially_relocatable_v<T>;
 
     Function(const Function &) = delete;
 
@@ -205,7 +209,7 @@ private:
     }
 
     template <typename Class, typename MemFn, typename ClassType = std::remove_cvref_t<Class>>
-        requires k_sbo_eligible<ClassType> && is_mem_fn_of<ClassType, MemFn>
+        requires sbo_eligible<ClassType> && is_mem_fn_of<ClassType, MemFn>
     constexpr static Function make(Class &&invocable, MemFn) {
         if consteval {
             constexpr static Vtable vt = {[](Function *self, Args &...args) -> R {
@@ -227,7 +231,7 @@ private:
     }
 
     template <typename Class, typename MemFn, typename ClassType = std::remove_cvref_t<Class>>
-        requires(!k_sbo_eligible<ClassType>) && is_mem_fn_of<ClassType, MemFn>
+        requires(!sbo_eligible<ClassType>) && is_mem_fn_of<ClassType, MemFn>
     constexpr static Function make(Class &&invocable, MemFn) {
         constexpr static Vtable vt = {[](Function *self, Args &...args) -> R {
                                           return (static_cast<ClassType *>(self->storage.erased.ctx)->*MemFn::get())(
@@ -244,7 +248,7 @@ private:
             return make(static_cast<Sign *>(std::forward<Class>(invocable)));
         } else {
             using ClassType = std::remove_cvref_t<Class>;
-            if constexpr (k_sbo_eligible<ClassType>) {
+            if constexpr (sbo_eligible<ClassType>) {
                 if consteval {
                     constexpr static Vtable vt = {[](Function *self, Args &...args) -> R {
                                                       auto &fn = *static_cast<ClassType *>(self->storage.erased.ctx);
@@ -332,8 +336,11 @@ struct Function<R(Args...) const> {
     };
 
     template <typename T>
-    // Use a proper trivially-relocatable trait here once the language provides one.
-    constexpr static bool k_sbo_eligible = sizeof(T) <= k_sbo_size && alignof(T) <= k_sbo_align && std::is_trivially_copyable_v<T>;
+    // Moving a Function memcpys Storage and disarms the source's deleter -
+    // exactly a trivial relocation - so SBO admits trivially relocatable
+    // callables (e.g. lambdas capturing unique_ptr), not just trivially
+    // copyable ones.
+    constexpr static bool sbo_eligible = sizeof(T) <= k_sbo_size && alignof(T) <= k_sbo_align && mem::is_trivially_relocatable_v<T>;
 
     Function(const Function &) = delete;
 
@@ -373,7 +380,7 @@ private:
     }
 
     template <typename Class, typename MemFn, typename ClassType = std::remove_cvref_t<Class>>
-        requires k_sbo_eligible<ClassType> && is_mem_fn_of<ClassType, MemFn> &&
+        requires sbo_eligible<ClassType> && is_mem_fn_of<ClassType, MemFn> &&
                  std::is_invocable_r_v<R, decltype(MemFn::get()), const ClassType &, Args...>
     constexpr static Function make(Class &&invocable, MemFn) {
         if consteval {
@@ -396,7 +403,7 @@ private:
     }
 
     template <typename Class, typename MemFn, typename ClassType = std::remove_cvref_t<Class>>
-        requires(!k_sbo_eligible<ClassType>) && is_mem_fn_of<ClassType, MemFn> &&
+        requires(!sbo_eligible<ClassType>) && is_mem_fn_of<ClassType, MemFn> &&
                 std::is_invocable_r_v<R, decltype(MemFn::get()), const ClassType &, Args...>
     constexpr static Function make(Class &&invocable, MemFn) {
         constexpr static Vtable vt = {[](const Function *self, Args &...args) -> R {
@@ -414,7 +421,7 @@ private:
             return make(static_cast<Sign *>(std::forward<Class>(invocable)));
         } else {
             using ClassType = std::remove_cvref_t<Class>;
-            if constexpr (k_sbo_eligible<ClassType>) {
+            if constexpr (sbo_eligible<ClassType>) {
                 if consteval {
                     constexpr static Vtable vt = {[](const Function *self, Args &...args) -> R {
                                                       auto &fn = *static_cast<const ClassType *>(self->storage.erased.ctx);

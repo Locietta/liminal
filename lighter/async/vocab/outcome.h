@@ -16,10 +16,10 @@ template <typename T, typename E = void, typename C = void>
 struct Outcome;
 
 template <typename T>
-constexpr bool k_is_outcome_v = false;
+constexpr bool is_outcome_v = false;
 
 template <typename T, typename E, typename C>
-constexpr bool k_is_outcome_v<Outcome<T, E, C>> = true;
+constexpr bool is_outcome_v<Outcome<T, E, C>> = true;
 
 struct OutcomeOkTag {};
 
@@ -60,7 +60,7 @@ private:
 public:
     template <typename U = T>
         requires(!std::is_void_v<T>) && std::constructible_from<T, U &&> &&
-                (!k_is_outcome_v<std::decay_t<U>> || std::same_as<std::decay_t<U>, T>)
+                (!is_outcome_v<std::decay_t<U>> || std::same_as<std::decay_t<U>, T>)
     Outcome(U &&value) : variant(std::in_place_index<0>, T(std::forward<U>(value))) {}
 
     Outcome()
@@ -156,7 +156,7 @@ public:
 
     template <typename U = T>
         requires(!std::is_void_v<T>) && std::constructible_from<T, U &&> &&
-                (!k_is_outcome_v<std::decay_t<U>> || std::same_as<std::decay_t<U>, T>)
+                (!is_outcome_v<std::decay_t<U>> || std::same_as<std::decay_t<U>, T>)
     Outcome(U &&value) : data(T(std::forward<U>(value))) {}
 
     Outcome()

@@ -9,14 +9,14 @@ namespace lighter {
 
 /// Check if T is a Function pointer type
 template <typename T>
-constexpr inline bool k_is_function_pointer_v = std::is_function_v<std::remove_pointer_t<T>>;
+constexpr inline bool is_function_pointer_v = std::is_function_v<std::remove_pointer_t<T>>;
 
 /// Check if T is a functor type(has a unique operator())
 template <typename T, typename U = void>
-constexpr bool k_is_functor_v = false;
+constexpr bool is_functor_v = false;
 
 template <typename T>
-constexpr inline bool k_is_functor_v<T, std::void_t<decltype(&T::operator())>> = true;
+constexpr inline bool is_functor_v<T, std::void_t<decltype(&T::operator())>> = true;
 
 template <typename T, typename Tuple>
 struct TuplePushFront;
@@ -89,13 +89,13 @@ struct CallableTraits<T, std::enable_if_t<std::is_member_function_pointer_v<T>>>
 };
 
 template <typename T>
-struct CallableTraits<T, std::enable_if_t<k_is_function_pointer_v<T>>> {
+struct CallableTraits<T, std::enable_if_t<is_function_pointer_v<T>>> {
     using args_type = function_args_t<std::remove_pointer_t<T>>;
     using return_type = function_return_t<std::remove_pointer_t<T>>;
 };
 
 template <typename T>
-struct CallableTraits<T, std::enable_if_t<k_is_functor_v<T>>> {
+struct CallableTraits<T, std::enable_if_t<is_functor_v<T>>> {
     using args_type = function_args_t<member_type_t<decltype(&T::operator())>>;
     using return_type = function_return_t<member_type_t<decltype(&T::operator())>>;
 };
@@ -107,6 +107,6 @@ template <typename Callable>
 using callable_return_t = typename CallableTraits<Callable>::return_type;
 
 template <typename Callable>
-constexpr usize k_callable_args_count_v = std::tuple_size_v<callable_args_t<Callable>>;
+constexpr usize callable_args_count_v = std::tuple_size_v<callable_args_t<Callable>>;
 
 } // namespace lighter

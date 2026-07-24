@@ -22,14 +22,14 @@ namespace lighter {
 template <bool All, typename... Tasks>
 struct WhenOp : AggregateOp {
 private:
-    constexpr static bool k_capture_cancel = !std::is_void_v<detail::aggregated_cancel_t<detail::task_cancel_type_t<Tasks>...>>;
+    constexpr static bool capture_cancel = !std::is_void_v<detail::aggregated_cancel_t<detail::task_cancel_type_t<Tasks>...>>;
 
 public:
     using error_type = detail::aggregated_channel_t<detail::task_error_type_t<Tasks>...>;
     using cancel_type = detail::aggregated_cancel_t<detail::task_cancel_type_t<Tasks>...>;
 
-    using success_type = std::conditional_t<All, std::tuple<detail::task_success_t<Tasks, k_capture_cancel>...>,
-                                            std::variant<detail::task_success_t<Tasks, k_capture_cancel>...>>;
+    using success_type = std::conditional_t<All, std::tuple<detail::task_success_t<Tasks, capture_cancel>...>,
+                                            std::variant<detail::task_success_t<Tasks, capture_cancel>...>>;
 
     using result_type = detail::aggregate_result_t<success_type, error_type, cancel_type>;
 
@@ -113,12 +113,12 @@ private:
     auto collect_success() -> success_type {
         if constexpr (All) {
             return [this]<usize... I>(std::index_sequence<I...>) {
-                return success_type(detail::take_success_result<k_capture_cancel>(std::get<I>(tasks))...);
+                return success_type(detail::take_success_result<capture_cancel>(std::get<I>(tasks))...);
             }(std::index_sequence_for<Tasks...>{});
         } else {
             assert(winner != AggregateOp::k_npos && "WhenAny winner not set");
             return detail::tuple_visit_at_return<success_type>(winner, tasks, [&](auto I, auto &task) -> success_type {
-                return success_type(std::in_place_index<I.value>, detail::take_success_result<k_capture_cancel>(task));
+                return success_type(std::in_place_index<I.value>, detail::take_success_result<capture_cancel>(task));
             });
         }
     }
@@ -129,14 +129,14 @@ private:
 template <bool All, typename Task>
 struct WhenOp<All, detail::RangeTasks<Task>> : AggregateOp {
 private:
-    constexpr static bool k_capture_cancel = !std::is_void_v<detail::task_cancel_type_t<Task>>;
+    constexpr static bool capture_cancel = !std::is_void_v<detail::task_cancel_type_t<Task>>;
 
 public:
     using error_type = detail::task_error_type_t<Task>;
     using cancel_type = detail::task_cancel_type_t<Task>;
 
-    using success_type = std::conditional_t<All, SmallVector<detail::task_success_t<Task, k_capture_cancel>>,
-                                            std::pair<usize, detail::task_success_t<Task, k_capture_cancel>>>;
+    using success_type = std::conditional_t<All, SmallVector<detail::task_success_t<Task, capture_cancel>>,
+                                            std::pair<usize, detail::task_success_t<Task, capture_cancel>>>;
 
     using result_type = detail::aggregate_result_t<success_type, error_type, cancel_type>;
 
@@ -215,12 +215,12 @@ private:
             success_type results;
             results.reserve(tasks.size());
             for (auto &task : tasks) {
-                results.emplace_back(detail::take_success_result<k_capture_cancel>(task));
+                results.emplace_back(detail::take_success_result<capture_cancel>(task));
             }
             return results;
         } else {
             assert(winner != AggregateOp::k_npos && "WhenAny winner not set");
-            return success_type{winner, detail::take_success_result<k_capture_cancel>(tasks[winner])};
+            return success_type{winner, detail::take_success_result<capture_cancel>(tasks[winner])};
         }
     }
 
