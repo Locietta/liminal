@@ -28,6 +28,7 @@ enum struct ErrorKind {
     CURL,
     INVALID_REQUEST,
     JSON_ENCODE,
+    JSON_DECODE,
 };
 
 struct Error {
@@ -50,6 +51,8 @@ struct Error {
     static Error invalid_request(std::string detail) { return {.kind = ErrorKind::INVALID_REQUEST, .detail = std::move(detail)}; }
 
     static Error json_encode(std::string detail) { return {.kind = ErrorKind::JSON_ENCODE, .detail = std::move(detail)}; }
+
+    static Error json_decode(std::string detail) { return {.kind = ErrorKind::JSON_DECODE, .detail = std::move(detail)}; }
 
     std::string message() const;
 };

@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 
+#include <lighter/async/vocab/outcome.h>
 #include <lighter/http/common.h>
 #include <lighter/types.hpp>
 
@@ -24,6 +25,10 @@ struct Response {
     std::string_view text() const noexcept;
 
     std::string text_copy() const;
+
+    /// Decode the response body as JSON. Defined in <lighter/http/json.h>.
+    template <typename T>
+    Outcome<T, Error, void> json() const;
 
     std::optional<std::string_view> header_value(std::string_view name) const noexcept;
 };

@@ -60,6 +60,10 @@ struct Request : detail::RequestSettings {
     Request &form(std::vector<QueryParam> fields);
     Request &body(std::string body);
 
+    /// Encode `value` as the JSON request body. Defined in <lighter/http/json.h>.
+    template <typename T>
+    Request &json(const T &value);
+
     Task<Response, Error> send() &;
     Task<Response, Error> send() &&;
 

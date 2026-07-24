@@ -19,6 +19,7 @@ std::string message(const Error &err) {
             return std::string(curl::message(err.curl_code));
         case ErrorKind::INVALID_REQUEST: return err.detail.empty() ? std::string("invalid http request") : err.detail;
         case ErrorKind::JSON_ENCODE: return err.detail.empty() ? std::string("json encode failed") : err.detail;
+        case ErrorKind::JSON_DECODE: return err.detail.empty() ? std::string("json decode failed") : err.detail;
     }
     return "unknown http error";
 }

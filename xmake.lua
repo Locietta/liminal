@@ -5,6 +5,9 @@ add_rules("mode.release", "mode.debug", "mode.releasedbg")
 
 set_languages("cxxlatest")
 
+-- GCC does not enable P2996 static reflection from -std=c++26 alone.
+add_cxxflags("-freflection", {tools = {"gcc", "gxx"}, force = true})
+
 if is_os("windows") then
     local msys2_root = os.getenv("MSYS2")
     if not msys2_root then
