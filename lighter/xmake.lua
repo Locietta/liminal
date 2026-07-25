@@ -5,7 +5,7 @@ add_requires("glaze")
 
 target("lighter")
     set_kind("static")
-    add_files("async/**/*.cpp", "http/*.cpp", "utils/*.cpp")
+    add_files("async/**/*.cpp", "encoding/*.cpp", "http/*.cpp", "utils/*.cpp")
     add_packages("libuv", "fmt")
     add_packages("libcurl", {public = true})
     -- codec/json is header-only over glaze, so consumers need its headers too
