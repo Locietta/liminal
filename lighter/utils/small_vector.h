@@ -15,6 +15,7 @@
 
 #include <lighter/types.hpp>
 #include <lighter/utils/memory.h>
+#include <lighter/utils/type_traits.h>
 
 namespace lighter {
 
@@ -26,19 +27,15 @@ struct SmallVector;
 
 namespace detail {
 
+// specializes() sees through the mixed type/NTTP head of SmallVector<T, N>,
+// which the pattern-match style is_specialization_of cannot express.
 template <typename T>
-struct IsSmallVector : std::false_type {};
-
-template <typename T>
-struct IsSmallVector<HybridVector<T>> : std::true_type {};
-
-template <typename T, u32 InlineCapacity>
-struct IsSmallVector<SmallVector<T, InlineCapacity>> : std::true_type {};
+constexpr inline bool is_small_vector_v = specializes(^^T, ^^HybridVector) || specializes(^^T, ^^SmallVector);
 
 template <typename Range, typename T>
 concept small_vector_compatible_range =
     std::ranges::input_range<Range> && std::constructible_from<T, std::ranges::range_reference_t<Range>> &&
-    !IsSmallVector<std::remove_cvref_t<Range>>::value;
+    !is_small_vector_v<std::remove_cvref_t<Range>>;
 
 template <typename T>
 using small_vector_size_type = std::conditional_t<sizeof(T) < 4 && sizeof(void *) >= 8, u64, u32>;

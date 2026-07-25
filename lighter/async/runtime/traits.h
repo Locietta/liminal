@@ -1,18 +1,22 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <concepts>
 #include <cstdlib>
+#include <initializer_list>
+#include <meta>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
+#include <vector>
 
 #include <lighter/types.hpp>
 #include <lighter/utils/config.h>
-#include <lighter/utils/type_list.h>
 #include <lighter/utils/type_traits.h>
 #include <lighter/async/runtime/node.h>
 #include <lighter/async/runtime/task.h>
@@ -77,11 +81,33 @@ using task_error_type_t = typename TaskT::error_type;
 template <typename TaskT>
 using task_cancel_type_t = typename TaskT::cancel_type;
 
-template <typename T>
-struct KeepNonVoid : std::bool_constant<!std::is_void_v<T>> {};
+/// Aggregate per-task channel types into one: drop voids, deduplicate
+/// (keeping first-seen order), then void / T / std::variant<Ts...> for
+/// zero / one / many distinct survivors.
+consteval std::meta::info aggregated_channel(std::initializer_list<std::meta::info> types) {
+    // (^^void) needs parens wherever && follows: `^^void &&` lexes as
+    // a reflection of the type void&&. dealias() first - reflections of alias
+    // paths (Task::error_type etc.) do not compare equal to their targets.
+    std::vector<std::meta::info> kept;
+    for (auto raw : types) {
+        auto type = std::meta::dealias(raw);
+        if (type == (^^void) || std::ranges::find(kept, type) != kept.end()) {
+            continue;
+        }
+        kept.push_back(type);
+    }
+
+    if (kept.empty()) {
+        return ^^void;
+    }
+    if (kept.size() == 1) {
+        return kept.front();
+    }
+    return std::meta::substitute(^^std::variant, kept);
+}
 
 template <typename... Ts>
-using aggregated_channel_t = typename TypeListToUnion<type_list_unique_t<type_list_filter_t<TypeList<Ts...>, KeepNonVoid>>>::type;
+using aggregated_channel_t = [:aggregated_channel({^^Ts...}):];
 
 template <typename T>
 using promote_void_cancel_t = std::conditional_t<std::is_void_v<T>, Cancellation, T>;
@@ -92,8 +118,17 @@ constexpr inline bool any_non_void_v = (!std::is_void_v<Ts> || ...);
 template <typename... Ts>
 using aggregated_cancel_t = std::conditional_t<any_non_void_v<Ts...>, aggregated_channel_t<promote_void_cancel_t<Ts>...>, void>;
 
+// voids already dropped by the caller (task groups have homogeneous channels)
 template <typename... Ts>
-using task_group_error_type_t = typename TypeListToUnion<type_list_unique_t<TypeList<Ts...>>>::type;
+using task_group_error_type_t = aggregated_channel_t<Ts...>;
+
+// pin the aggregation semantics the async result types depend on
+static_assert(std::is_void_v<aggregated_channel_t<>>);
+static_assert(std::is_void_v<aggregated_channel_t<void, void>>);
+static_assert(std::same_as<aggregated_channel_t<int>, int>);
+static_assert(std::same_as<aggregated_channel_t<void, int, void>, int>);
+static_assert(std::same_as<aggregated_channel_t<int, int>, int>);
+static_assert(std::same_as<aggregated_channel_t<int, void, float, int>, std::variant<int, float>>);
 
 template <typename Task>
 using task_result_t = decltype(std::declval<Task &>().result());

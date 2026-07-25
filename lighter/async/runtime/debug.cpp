@@ -5,42 +5,9 @@
 #include <string_view>
 
 #include <lighter/async/runtime/walk.h>
+#include <lighter/utils/enum.h>
 
 namespace lighter {
-
-static std::string_view async_kind_name(AsyncNode::NodeKind k) {
-    switch (k) {
-        case AsyncNode::NodeKind::TASK: return "Task";
-        case AsyncNode::NodeKind::MUTEX_WAITER: return "MutexWaiter";
-        case AsyncNode::NodeKind::EVENT_WAITER: return "EventWaiter";
-        case AsyncNode::NodeKind::WHEN_ALL: return "WhenAll";
-        case AsyncNode::NodeKind::WHEN_ANY: return "WhenAny";
-        case AsyncNode::NodeKind::TASK_GROUP: return "TaskGroup";
-        case AsyncNode::NodeKind::SYSTEM_IO: return "SystemIO";
-    }
-    return "Unknown";
-}
-
-static std::string_view state_name(AsyncNode::State s) {
-    switch (s) {
-        case AsyncNode::PENDING: return "PENDING";
-        case AsyncNode::RUNNING: return "RUNNING";
-        case AsyncNode::CANCELLED: return "CANCELLED";
-        case AsyncNode::FINISHED: return "FINISHED";
-        case AsyncNode::FAILED: return "FAILED";
-    }
-    return "Unknown";
-}
-
-static std::string_view sync_kind_name(SyncPrimitive::Kind k) {
-    switch (k) {
-        case SyncPrimitive::Kind::MUTEX: return "Mutex";
-        case SyncPrimitive::Kind::EVENT: return "Event";
-        case SyncPrimitive::Kind::SEMAPHORE: return "Semaphore";
-        case SyncPrimitive::Kind::CONDITION_VARIABLE: return "ConditionVariable";
-    }
-    return "Unknown";
-}
 
 static std::string node_id(const void *node) { return std::format("n{:x}", reinterpret_cast<std::uintptr_t>(node)); }
 
@@ -60,11 +27,11 @@ static void emit_async_node(const AsyncNode *node, std::string &out) {
         label = std::format(R"({}
 {}
 {}:{})",
-                            async_kind_name(node->kind), state_name(node->state), file, node->location.line());
+                            enum_name(node->kind), enum_name(node->state), file, node->location.line());
     } else {
         label = std::format(R"({}
 {})",
-                            async_kind_name(node->kind), state_name(node->state));
+                            enum_name(node->kind), enum_name(node->state));
     }
 
     std::string_view shape = "box";
@@ -99,9 +66,9 @@ static void emit_sync_node(const SyncPrimitive *resource, std::string &out) {
     if (!file.empty()) {
         label = std::format(R"({}
 {}:{})",
-                            sync_kind_name(resource->kind), file, resource->location.line());
+                            enum_name(resource->kind), file, resource->location.line());
     } else {
-        label = std::format("{}", sync_kind_name(resource->kind));
+        label = std::format("{}", enum_name(resource->kind));
     }
 
     std::format_to(std::back_inserter(out),
