@@ -20,6 +20,7 @@ if is_os("windows") then
 
     -- Force GCC until static reflection is available on the native Windows toolchains.
     set_toolchains("mingw", {mingw = ucrt64_root})
+    set_config("mingw", ucrt64_root)  -- for those who use git bash on windows...
 
     add_defines("_CRT_SECURE_NO_WARNINGS")
     add_defines("WIN32_LEAN_AND_MEAN", "UNICODE", "_UNICODE", "NOMINMAX", "_WINDOWS")
