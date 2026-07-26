@@ -40,6 +40,14 @@ option("__pixi_package_manager")
     end)
 option_end()
 
+option("__msys2_package_manager")
+    set_showmenu(false)
+    on_check(function (option)
+        import("package.manager.msys2.register")()
+        option:enable(true)
+    end)
+option_end()
+
 includes("xmake/rules/*.lua")
 
 add_includedirs(".")
