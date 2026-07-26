@@ -1,0 +1,6 @@
+target("test-transcode")
+    set_kind("binary")
+    set_group("test")
+    add_files("main.cpp")
+    add_deps("lighter")
+    add_tests("default")
