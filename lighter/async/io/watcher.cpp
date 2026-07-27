@@ -67,6 +67,26 @@ struct SignalSlot : uv::handle<SignalSlot, uv_signal_t> {
 struct SignalSet::Self : uv::QueuedDelivery<Result<SignalKind>> {
     std::vector<UniqueHandle<SignalSlot>> slots;
 
+    /// Merely watching for a signal is not work: the handles stay unreferenced
+    /// so a program with nothing left to do can exit instead of parking forever
+    /// on a Ctrl+C that may never come.
+    ///
+    /// An active wait() IS work, though. While one is suspended the handles are
+    /// referenced, or uv_run would return with the waiter still parked and the
+    /// signal never observed - a program whose only job is to await Ctrl+C would
+    /// exit immediately.
+    void ref_slots() noexcept {
+        for (auto &slot : slots) {
+            uv::ref(slot->handle);
+        }
+    }
+
+    void unref_slots() noexcept {
+        for (auto &slot : slots) {
+            uv::unref(slot->handle);
+        }
+    }
+
     static void destroy(Self *self) noexcept { delete self; }
 };
 
@@ -220,6 +240,7 @@ struct SignalSetAwait : uv::AwaitOp<SignalSetAwait> {
         await_base::complete_cancel(op, [](auto &aw) {
             if (aw.self) {
                 aw.self->disarm();
+                aw.self->unref_slots();
             }
         });
     }
@@ -240,12 +261,15 @@ struct SignalSetAwait : uv::AwaitOp<SignalSetAwait> {
             return waiting;
         }
         self->arm(*this, result);
+        // This wait is now real work; keep the loop alive for it.
+        self->ref_slots();
         return this->attach(waiting.promise(), loc);
     }
 
     Result<SignalKind> await_resume() noexcept {
         if (self) {
             self->disarm();
+            self->unref_slots();
         }
         return std::move(result);
     }
@@ -430,10 +454,16 @@ Result<SignalSet> SignalSet::create(std::span<const SignalKind> kinds, EventLoop
     auto self = UniqueHandle<Self>(new Self());
 
     for (auto kind : kinds) {
-        const i32 signum = signal_number(kind);
-        if (signum < 0) {
+        // Reject on supportedness, not just on the numeric mapping: TERM has a
+        // perfectly good CRT number on Windows, yet libuv can never deliver it,
+        // so accepting it would hand back a watcher that hangs forever instead
+        // of the documented error. Callers that want a best-effort set should
+        // filter with signal_supported() first - InterruptSource does.
+        if (!signal_supported(kind)) {
             return outcome_error(Error::k_invalid_argument);
         }
+
+        const i32 signum = signal_number(kind);
 
         // Watching the same signal twice would deliver it twice.
         const bool duplicate = std::ranges::any_of(self->slots, [kind](const auto &slot) { return slot->kind == kind; });

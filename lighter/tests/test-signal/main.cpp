@@ -3,8 +3,14 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 #include <lighter/async/async.h>
 #include <lighter/types.hpp>
@@ -55,6 +61,21 @@ void check_empty_set_rejected() {
     EventLoop loop;
     auto empty = SignalSet::create({}, loop);
     require(!empty.has_value(), "an empty SignalSet must be rejected");
+}
+
+/// A signal this platform cannot deliver must be rejected outright rather than
+/// producing a watcher that never fires - waiting on one would hang forever.
+/// On Windows TERM is the case that matters: it has a CRT signal number, so
+/// checking only the numeric mapping would wrongly accept it.
+void check_undeliverable_kind_rejected() {
+    EventLoop loop;
+
+    for (auto kind : {SignalKind::INT, SignalKind::TERM, SignalKind::HUP, SignalKind::QUIT, SignalKind::BREAK, SignalKind::WINCH}) {
+        auto set = SignalSet::create({kind}, loop);
+        const bool accepted = set.has_value();
+        require(accepted == signal_supported(kind),
+                std::string("SignalSet::create disagreed with signal_supported for ") + std::string(enum_name(kind)));
+    }
 }
 
 // Signal delivery cannot be exercised on Windows: libuv synthesizes its signals
@@ -166,6 +187,33 @@ Task<void, Error> rejects_overlapping_next(bool &first_ok, bool &second_rejected
     co_await WhenAll(first(*interrupts, first_ok), second(*interrupts, second_rejected), raiser());
 }
 
+/// A pending wait must keep the event loop alive on its own.
+///
+/// The watchers are deliberately unreferenced while merely installed, so a
+/// program with nothing left to do can exit rather than parking on a Ctrl+C
+/// that may never come. But an active wait IS work: if it does not re-reference
+/// them, uv_run returns with the waiter still suspended and the signal is never
+/// seen - a program whose only job is to await Ctrl+C would exit instantly.
+///
+/// The other cases here cannot catch that, because each pairs its wait with a
+/// referenced raiser timer that holds the loop open.
+Task<void, Error> wait_keeps_loop_alive(bool &resumed) {
+    auto set = SignalSet::create({SignalKind::INT}, EventLoop::current());
+    require(set.has_value(), "SignalSet::create failed");
+
+    // Deliver the signal from outside the loop's own work: a detached thread
+    // means nothing referenced is pending here, so only the wait itself can
+    // keep the loop running. kill() rather than raise(), which would target
+    // only the calling thread.
+    std::thread([] {
+        std::this_thread::sleep_for(20ms);
+        ::kill(::getpid(), SIGINT);
+    }).detach();
+
+    auto kind = co_await set->wait().catch_cancel();
+    resumed = kind.has_value() && *kind == SignalKind::INT;
+}
+
 #endif // !_WIN32
 
 /// Runs one Task to completion on its own loop.
@@ -184,6 +232,7 @@ void run_isolated(Fn &&make_task) {
 i32 run_all() {
     check_signal_table();
     check_empty_set_rejected();
+    check_undeliverable_kind_rejected();
 
 #ifndef _WIN32
     auto got = SignalKind::QUIT;
@@ -195,12 +244,14 @@ i32 run_all() {
     bool still_live = false;
     bool first_ok = false;
     bool second_rejected = false;
+    bool kept_alive = false;
 
     run_isolated([&] { return reports_which_signal(got); });
     run_isolated([&] { return queues_while_idle(drained); });
     run_isolated([&] { return interrupt_cancels_work(cancelled, finished, count); });
     run_isolated([&] { return observes_without_cancelling(seen, still_live); });
     run_isolated([&] { return rejects_overlapping_next(first_ok, second_rejected); });
+    run_isolated([&] { return wait_keeps_loop_alive(kept_alive); });
 
     require(got == SignalKind::TERM, "SignalSet must report TERM, got " + std::string(enum_name(got)));
     require(drained.size() == 2, "both queued signals must be drained");
@@ -212,6 +263,7 @@ i32 run_all() {
     require(still_live, "a non-fatal signal must not cancel the token");
     require(first_ok, "the first next() must still receive its signal");
     require(second_rejected, "an overlapping next() must fail rather than hang");
+    require(kept_alive, "a pending wait must keep the loop alive by itself");
 #endif
 
     return 0;

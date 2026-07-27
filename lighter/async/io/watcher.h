@@ -137,7 +137,9 @@ struct SignalSet {
     Self *operator->() noexcept;
 
     /// Starts watching every signal in `kinds`. Fails with k_invalid_argument
-    /// if `kinds` is empty or names a signal this platform does not have.
+    /// if `kinds` is empty or names a signal this platform cannot deliver -
+    /// see signal_supported(), which is stricter than "has a signal number":
+    /// TERM has one on Windows but no console event can ever raise it.
     /// Duplicates are ignored.
     static Result<SignalSet> create(std::span<const SignalKind> kinds, EventLoop &loop = EventLoop::current());
 
