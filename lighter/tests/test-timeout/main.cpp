@@ -98,6 +98,30 @@ Task<void, Error> negative_budget(bool &ok) {
     ok = result.has_error() && result.error() == Error::k_connection_timed_out;
 }
 
+/// The deadline is absolute, so the budget must be measured when the wrapper
+/// starts running - not when it was constructed.
+///
+/// Tasks are lazy. Building the wrapper and awaiting it later used to bank the
+/// full remaining budget from construction time, letting the work run well past
+/// the deadline the caller actually asked for. Here the deadline expires while
+/// the wrapper is still sitting unstarted, so it must time out immediately.
+Task<void, Error> deadline_measured_at_start(bool &ok) {
+    bool inner_finished = false;
+    auto guarded = with_deadline(slow(inner_finished), std::chrono::steady_clock::now() + 20ms);
+
+    // Let the deadline pass before the wrapper ever runs.
+    co_await sleep(50ms);
+
+    // Timed, not just checked for the error: sampling at construction still
+    // ends in a timeout, only ~20ms too late. Elapsed time is what separates
+    // "honoured the absolute deadline" from "restarted the clock on resume".
+    const auto start = std::chrono::steady_clock::now();
+    auto result = co_await std::move(guarded);
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+
+    ok = result.has_error() && result.error() == Error::k_connection_timed_out && waited < 10ms;
+}
+
 /// A void-valued Task round-trips through with_timeout().
 Task<void, Error> void_value(bool &ok) {
     auto body = []() -> Task<void, Error> { co_await sleep(1ms); };
@@ -116,6 +140,7 @@ i32 run_all() {
     bool zero_ok = false;
     bool deadline_ok = false;
     bool negative_ok = false;
+    bool lazy_deadline_ok = false;
     bool void_ok = false;
 
     loop.schedule(value_wins(value_ok));
@@ -125,6 +150,7 @@ i32 run_all() {
     loop.schedule(zero_budget(zero_ok));
     loop.schedule(past_deadline(deadline_ok));
     loop.schedule(negative_budget(negative_ok));
+    loop.schedule(deadline_measured_at_start(lazy_deadline_ok));
     loop.schedule(void_value(void_ok));
     loop.run();
 
@@ -136,6 +162,7 @@ i32 run_all() {
     require(zero_ok, "a zero budget must time out");
     require(deadline_ok, "a deadline in the past must time out");
     require(negative_ok, "a negative budget must time out rather than hang");
+    require(lazy_deadline_ok, "a deadline must be measured when the wrapper starts, not when it is built");
     require(void_ok, "a void-valued Task must round-trip through with_timeout");
 
     return 0;

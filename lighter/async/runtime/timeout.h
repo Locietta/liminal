@@ -91,15 +91,36 @@ Task<T, Error, Cancellation> with_timeout(Task<T, E, C> task, std::chrono::milli
 ///
 /// A deadline already in the past yields a zero budget, which still lets the
 /// Task run until its first suspension point before the Timer can fire.
+///
+/// The remaining budget is measured when this Task starts, not when it is
+/// constructed. Tasks are lazy, so a caller that builds the wrapper and
+/// schedules it later would otherwise get a budget that started counting at
+/// construction time and run well past the absolute deadline it asked for.
 template <typename T, typename E, typename C>
     requires(std::is_void_v<E> || std::constructible_from<Error, E>)
 Task<T, Error, Cancellation> with_deadline(Task<T, E, C> task, std::chrono::steady_clock::time_point deadline,
                                            EventLoop &loop = EventLoop::current()) {
+    // Sampled here, inside the coroutine body, so it runs on first resume
+    // rather than at construction.
     const auto now = std::chrono::steady_clock::now();
     const auto budget =
         deadline > now ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now) : std::chrono::milliseconds{0};
 
-    return with_timeout(std::move(task), budget, loop);
+    auto result = co_await with_timeout(std::move(task), budget, loop);
+
+    if (result.has_error()) {
+        co_await fail(std::move(result).error());
+    }
+
+    if (result.has_value()) {
+        if constexpr (!std::is_void_v<T>) {
+            co_return std::move(*result);
+        } else {
+            co_return;
+        }
+    }
+
+    co_await cancel();
 }
 
 } // namespace lighter
