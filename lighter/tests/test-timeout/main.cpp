@@ -89,6 +89,15 @@ Task<void, Error> past_deadline(bool &ok) {
     ok = result.has_error() && result.error() == Error::k_connection_timed_out;
 }
 
+/// A negative budget - what a caller gets from subtracting an already-passed
+/// deadline - must time out promptly. Unclamped it would abort on Timer::start's
+/// assertion in debug, or cast to a huge u64 and hang in release.
+Task<void, Error> negative_budget(bool &ok) {
+    bool inner_finished = false;
+    auto result = co_await with_timeout(slow(inner_finished), -5s);
+    ok = result.has_error() && result.error() == Error::k_connection_timed_out;
+}
+
 /// A void-valued Task round-trips through with_timeout().
 Task<void, Error> void_value(bool &ok) {
     auto body = []() -> Task<void, Error> { co_await sleep(1ms); };
@@ -106,6 +115,7 @@ i32 run_all() {
     bool cancel_ok = false;
     bool zero_ok = false;
     bool deadline_ok = false;
+    bool negative_ok = false;
     bool void_ok = false;
 
     loop.schedule(value_wins(value_ok));
@@ -114,6 +124,7 @@ i32 run_all() {
     loop.schedule(outer_cancel_wins(cancel_ok));
     loop.schedule(zero_budget(zero_ok));
     loop.schedule(past_deadline(deadline_ok));
+    loop.schedule(negative_budget(negative_ok));
     loop.schedule(void_value(void_ok));
     loop.run();
 
@@ -124,6 +135,7 @@ i32 run_all() {
     require(cancel_ok, "an outer token must cancel rather than time out");
     require(zero_ok, "a zero budget must time out");
     require(deadline_ok, "a deadline in the past must time out");
+    require(negative_ok, "a negative budget must time out rather than hang");
     require(void_ok, "a void-valued Task must round-trip through with_timeout");
 
     return 0;

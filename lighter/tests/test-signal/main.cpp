@@ -133,6 +133,39 @@ Task<void, Error> observes_without_cancelling(SignalKind &seen, bool &still_live
     still_live = !interrupts->interrupted();
 }
 
+/// A second concurrent next() must be rejected, not silently parked.
+///
+/// The backing Event wakes every waiter but only one can take the queued
+/// signal, so without an explicit guard the loser would loop back to waiting
+/// and hang until some later, unrelated signal arrived.
+Task<void, Error> rejects_overlapping_next(bool &first_ok, bool &second_rejected) {
+    auto interrupts = InterruptSource::create({SignalKind::TERM}, {SignalKind::WINCH}, EventLoop::current());
+    require(interrupts.has_value(), "InterruptSource::create failed");
+
+    auto raiser = []() -> Task<void, Error> {
+        co_await sleep(10ms);
+        std::raise(SIGWINCH);
+    };
+
+    // The second next() is expected to FAIL, and an un-caught sibling error
+    // under WhenAll cancels the whole group - so each branch swallows its own
+    // outcome into a flag and reports success to the aggregate.
+    auto first = [](InterruptSource &source, bool &ok) -> Task<void, Error> {
+        auto result = co_await source.next().catch_cancel();
+        ok = result.has_value() && *result == SignalKind::WINCH;
+    };
+
+    auto second = [](InterruptSource &source, bool &rejected) -> Task<void, Error> {
+        // Race the first next() while it is genuinely parked: after it has
+        // claimed the reader slot, but before the signal arrives to release it.
+        co_await sleep(2ms);
+        auto result = co_await source.next().catch_cancel();
+        rejected = result.has_error() && result.error() == Error::k_connection_already_in_progress;
+    };
+
+    co_await WhenAll(first(*interrupts, first_ok), second(*interrupts, second_rejected), raiser());
+}
+
 #endif // !_WIN32
 
 /// Runs one Task to completion on its own loop.
@@ -160,11 +193,14 @@ i32 run_all() {
     i32 count = 0;
     auto seen = SignalKind::INT;
     bool still_live = false;
+    bool first_ok = false;
+    bool second_rejected = false;
 
     run_isolated([&] { return reports_which_signal(got); });
     run_isolated([&] { return queues_while_idle(drained); });
     run_isolated([&] { return interrupt_cancels_work(cancelled, finished, count); });
     run_isolated([&] { return observes_without_cancelling(seen, still_live); });
+    run_isolated([&] { return rejects_overlapping_next(first_ok, second_rejected); });
 
     require(got == SignalKind::TERM, "SignalSet must report TERM, got " + std::string(enum_name(got)));
     require(drained.size() == 2, "both queued signals must be drained");
@@ -174,6 +210,8 @@ i32 run_all() {
     require(count == 1, "one fatal signal must count once, got " + std::to_string(count));
     require(seen == SignalKind::WINCH, "next() must surface a non-fatal signal");
     require(still_live, "a non-fatal signal must not cancel the token");
+    require(first_ok, "the first next() must still receive its signal");
+    require(second_rejected, "an overlapping next() must fail rather than hang");
 #endif
 
     return 0;

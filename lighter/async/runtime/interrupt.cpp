@@ -26,6 +26,11 @@ struct InterruptSource::Self {
     std::deque<SignalKind> observed;
     Event ready;
 
+    /// Guards `observed` against a second concurrent next(). Event wakes every
+    /// waiter, but only one can take the queued signal, so without this the
+    /// losers would silently loop instead of getting the documented error.
+    bool reading = false;
+
     /// Kept alive for as long as this object, so that destroying the source
     /// tears the pump down instead of leaving it parked on a SignalSet that is
     /// about to disappear.
@@ -158,8 +163,30 @@ Task<SignalKind, Error> InterruptSource::next() {
         co_await fail(Error::k_invalid_argument);
     }
 
-    while (self->observed.empty()) {
-        co_await self->ready.wait();
+    // Take a queued signal without blocking. Checked before the single-consumer
+    // guard, mirroring SignalSet::wait(): a backlog can be drained by any
+    // number of sequential callers, and only actually parking is exclusive.
+    if (self->observed.empty()) {
+        // Single-consumer while suspended: Event wakes every waiter, but only
+        // one can take the signal, so a second sleeper would loop back and hang
+        // until some later, unrelated signal arrived. Report that instead.
+        if (self->reading) {
+            co_await fail(Error::k_connection_already_in_progress);
+        }
+
+        self->reading = true;
+
+        while (self->observed.empty()) {
+            auto woken = co_await self->ready.wait().catch_cancel();
+            if (woken.is_cancelled()) {
+                // Release the slot before unwinding, or the source is deaf to
+                // every later next() call.
+                self->reading = false;
+                co_await cancel();
+            }
+        }
+
+        self->reading = false;
     }
 
     auto kind = self->observed.front();

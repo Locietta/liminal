@@ -43,6 +43,15 @@ constexpr inline usize k_timeout_timer_index = 1;
 template <typename T, typename E, typename C>
     requires(std::is_void_v<E> || std::constructible_from<Error, E>)
 Task<T, Error, Cancellation> with_timeout(Task<T, E, C> task, std::chrono::milliseconds budget, EventLoop &loop = EventLoop::current()) {
+    // A caller that derives a budget by subtraction can hand us a negative one
+    // once the deadline has passed. Timer::start asserts non-negative and
+    // otherwise casts to u64, which would turn "already expired" into an
+    // effectively infinite wait - clamp instead, so an expired budget times out
+    // promptly rather than hanging.
+    if (budget < std::chrono::milliseconds{0}) {
+        budget = std::chrono::milliseconds{0};
+    }
+
     // The wrapped Task is wrapped with catch_cancel() so that its Cancellation
     // surfaces on the aggregate's cancel channel instead of silently cancelling
     // this frame - we need to tell "the Task cancelled" apart from "the Timer
