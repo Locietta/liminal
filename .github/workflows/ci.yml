@@ -58,9 +58,6 @@ jobs:
   windows:
     name: Windows (ucrt64)
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
     steps:
       # xmake/ is a submodule holding the pinned package recipes, the custom
       # package managers and the build rules; without it xmake cannot configure.
@@ -68,30 +65,36 @@ jobs:
         with:
           submodules: true
 
+      # MSYS2 is the toolchain and library provider only - the steps below
+      # deliberately do NOT run in an msys2 shell. Running xmake from inside one
+      # makes it detect the `msys` platform, which takes a different code path
+      # from the `windows` platform developers build locally; the msys2::
+      # package manager then fails to resolve libiconv. Native xmake plus an
+      # MSYS2 toolchain is the combination the root xmake.lua is written for.
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: UCRT64
           update: true
           install: >-
             mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-xmake
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-libuv
             mingw-w64-ucrt-x86_64-fmt
             mingw-w64-ucrt-x86_64-curl
             mingw-w64-ucrt-x86_64-libiconv
-            git
+
+      - uses: xmake-io/github-action-setup-xmake@v1
 
       # The root xmake.lua resolves the toolchain from %MSYS2%, refusing to
-      # configure without it.
+      # configure without it, and the msys2:: package manager locates pacman
+      # under the same root.
       - name: Export MSYS2 root
-        run: echo "MSYS2=$(cygpath -w /)" >> "$GITHUB_ENV"
+        run: echo "MSYS2=${{ steps.msys2.outputs.msys2-location }}" >> $env:GITHUB_ENV
 
       - name: Cache xmake packages
         uses: actions/cache@main
         with:
-          path: ~/.xmake/packages
+          path: ~/AppData/Local/.xmake/packages
           key: xmake-windows-${{ hashFiles('xmake/packages/**/xmake.lua') }}
           restore-keys: xmake-windows-
 
@@ -99,7 +102,7 @@ jobs:
         run: xmake f -y
 
       - name: Build
-        run: xmake -j$(nproc)
+        run: xmake
 
       - name: Test
         run: xmake test
