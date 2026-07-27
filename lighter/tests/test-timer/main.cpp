@@ -23,7 +23,7 @@ void require(bool condition, std::string message) {
 Task<void, Error> single_shot(std::vector<std::string> &log) {
     auto timer = Timer::create();
     timer.start(5ms);
-    co_await timer.wait();
+    co_await timer.wait().or_fail();
     log.push_back("fired");
 }
 
@@ -34,7 +34,7 @@ Task<void, Error> repeating(i32 &ticks) {
     auto timer = Timer::create();
     timer.start(1ms, 1ms);
     for (i32 i = 0; i < 5; ++i) {
-        co_await timer.wait();
+        co_await timer.wait().or_fail();
         ticks += 1;
     }
     timer.stop();
@@ -77,6 +77,32 @@ Task<void, Error> cancel_pending_wait(bool &resumed, bool &observed_cancel) {
     observed_cancel = result.is_cancelled();
 }
 
+/// A second concurrent wait must be reported, not silently satisfied.
+///
+/// This used to be assert(false) followed by co_return, so with NDEBUG the
+/// second waiter resumed immediately - indistinguishable from the Timer having
+/// fired, and a silently wrong result in exactly the builds that ship.
+Task<void, Error> rejects_second_waiter(bool &first_ok, bool &second_rejected) {
+    auto timer = Timer::create();
+    timer.start(20ms);
+
+    auto second = [](Timer &timer, bool &rejected) -> Task<void, Error> {
+        // Let the first wait claim the slot before racing it.
+        co_await sleep(2ms);
+        auto result = co_await timer.wait().catch_cancel();
+        rejected = result.has_error() && result.error() == Error::k_connection_already_in_progress;
+    };
+
+    auto first = [](Timer &timer, bool &ok) -> Task<void, Error> {
+        auto result = co_await timer.wait().catch_cancel();
+        ok = result.has_value();
+    };
+
+    // Each branch swallows its own outcome: the second is expected to fail, and
+    // an un-caught sibling error under WhenAll would cancel the group.
+    co_await WhenAll(first(timer, first_ok), second(timer, second_rejected));
+}
+
 /// yield() resumes on a later loop iteration, strictly after callbacks that
 /// were already queued when it suspended.
 Task<void, Error> yields_after_pending_work(std::vector<std::string> &log) {
@@ -86,7 +112,7 @@ Task<void, Error> yields_after_pending_work(std::vector<std::string> &log) {
     co_await yield();
     log.push_back("yield");
 
-    co_await timer.wait();
+    co_await timer.wait().or_fail();
     log.push_back("timer");
 }
 
@@ -99,12 +125,15 @@ i32 run_all() {
     bool resumed = false;
     bool observed_cancel = false;
     std::vector<std::string> yield_log;
+    bool first_ok = false;
+    bool second_rejected = false;
 
     loop.schedule(single_shot(single_log));
     loop.schedule(repeating(ticks));
     loop.schedule(sleeps_at_least(20ms, measured));
     loop.schedule(cancel_pending_wait(resumed, observed_cancel));
     loop.schedule(yields_after_pending_work(yield_log));
+    loop.schedule(rejects_second_waiter(first_ok, second_rejected));
     loop.run();
 
     require(single_log.size() == 1 && single_log[0] == "fired", "single-shot Timer must fire exactly once");
@@ -114,6 +143,8 @@ i32 run_all() {
     require(!resumed, "a cancelled sleep must not resume its coroutine body");
     require(observed_cancel, "cancelling a pending Timer wait must surface as Cancellation");
     require(yield_log.size() == 2, "yield test must record both steps");
+    require(first_ok, "the first waiter must still receive its tick");
+    require(second_rejected, "a second concurrent wait must be reported, not silently satisfied");
 
     return 0;
 }

@@ -29,11 +29,19 @@ struct Timer {
 
     static Timer create(EventLoop &loop = EventLoop::current());
 
+    /// Both durations must be non-negative; a negative one is a caller bug and
+    /// panics rather than being cast into an effectively infinite wait.
     void start(std::chrono::milliseconds timeout, std::chrono::milliseconds repeat = {});
 
     void stop();
 
-    Task<> wait();
+    /// Waits for the next tick, consuming one already counted if the Timer
+    /// fired while nobody was waiting.
+    ///
+    /// Single-consumer: a second concurrent wait fails with
+    /// k_connection_already_in_progress rather than resuming as if the Timer
+    /// had fired.
+    Task<void, Error> wait();
 
 private:
     explicit Timer(UniqueHandle<Self> self) noexcept;
@@ -208,7 +216,9 @@ struct Idle {
 
     void stop();
 
-    Task<> wait();
+    /// Single-consumer: a second concurrent wait fails with
+    /// k_connection_already_in_progress rather than resuming spuriously.
+    Task<void, Error> wait();
 
 private:
     explicit Idle(UniqueHandle<Self> self) noexcept;
@@ -236,7 +246,9 @@ struct Prepare {
 
     void stop();
 
-    Task<> wait();
+    /// Single-consumer: a second concurrent wait fails with
+    /// k_connection_already_in_progress rather than resuming spuriously.
+    Task<void, Error> wait();
 
 private:
     explicit Prepare(UniqueHandle<Self> self) noexcept;
@@ -264,7 +276,9 @@ struct Check {
 
     void stop();
 
-    Task<> wait();
+    /// Single-consumer: a second concurrent wait fails with
+    /// k_connection_already_in_progress rather than resuming spuriously.
+    Task<void, Error> wait();
 
 private:
     explicit Check(UniqueHandle<Self> self) noexcept;

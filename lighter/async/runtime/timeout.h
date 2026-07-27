@@ -40,15 +40,23 @@ constexpr inline usize k_timeout_timer_index = 1;
 /// Structured completion still holds - WhenAny does not settle until both the
 /// Task and the Timer have reached a terminal state - so the Task is never left
 /// running past the point where this Task resumes its caller.
+///
+/// For an absolute deadline, subtract at the point the work starts:
+///
+///   co_await with_timeout(step(), deadline - std::chrono::steady_clock::now());
+///
+/// Doing it there rather than through a wrapper keeps the budget honest. Tasks
+/// are lazy, so a deadline converted when the wrapper is *built* would start
+/// counting from then and overshoot if the wrapper is scheduled later.
 template <typename T, typename E, typename C>
     requires(std::is_void_v<E> || std::constructible_from<Error, E>)
 Task<T, Error, Cancellation> with_timeout(Task<T, E, C> task, std::chrono::milliseconds budget, EventLoop &loop = EventLoop::current()) {
     // A caller that derives a budget by subtraction can hand us a negative one
-    // once the deadline has passed. Timer::start asserts non-negative and
-    // otherwise casts to u64, which would turn "already expired" into an
-    // effectively infinite wait - clamp instead, so an expired budget times out
-    // promptly rather than hanging.
-    if (budget < std::chrono::milliseconds{0}) {
+    // once the deadline has passed - the normal way to express a deadline, per
+    // the note above. Timer::start rejects negative durations, and an unchecked
+    // cast to u64 would turn "already expired" into an effectively infinite
+    // wait, so clamp and let it time out promptly.
+    if (budget < std::chrono::milliseconds{0}) [[unlikely]] {
         budget = std::chrono::milliseconds{0};
     }
 
@@ -82,42 +90,6 @@ Task<T, Error, Cancellation> with_timeout(Task<T, E, C> task, std::chrono::milli
         }
 
         co_await fail(Error::k_connection_timed_out);
-    }
-
-    co_await cancel();
-}
-
-/// with_timeout() against an absolute steady-clock deadline.
-///
-/// A deadline already in the past yields a zero budget, which still lets the
-/// Task run until its first suspension point before the Timer can fire.
-///
-/// The remaining budget is measured when this Task starts, not when it is
-/// constructed. Tasks are lazy, so a caller that builds the wrapper and
-/// schedules it later would otherwise get a budget that started counting at
-/// construction time and run well past the absolute deadline it asked for.
-template <typename T, typename E, typename C>
-    requires(std::is_void_v<E> || std::constructible_from<Error, E>)
-Task<T, Error, Cancellation> with_deadline(Task<T, E, C> task, std::chrono::steady_clock::time_point deadline,
-                                           EventLoop &loop = EventLoop::current()) {
-    // Sampled here, inside the coroutine body, so it runs on first resume
-    // rather than at construction.
-    const auto now = std::chrono::steady_clock::now();
-    const auto budget =
-        deadline > now ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now) : std::chrono::milliseconds{0};
-
-    auto result = co_await with_timeout(std::move(task), budget, loop);
-
-    if (result.has_error()) {
-        co_await fail(std::move(result).error());
-    }
-
-    if (result.has_value()) {
-        if constexpr (!std::is_void_v<T>) {
-            co_return std::move(*result);
-        } else {
-            co_return;
-        }
     }
 
     co_await cancel();
