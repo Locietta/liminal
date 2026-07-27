@@ -1,6 +1,7 @@
 #include "interrupt.h"
 
 #include <algorithm>
+#include <cassert>
 #include <deque>
 #include <utility>
 #include <vector>
@@ -144,7 +145,13 @@ Result<InterruptSource> InterruptSource::create(std::initializer_list<SignalKind
                   loop);
 }
 
-CancellationToken InterruptSource::token() const noexcept { return self->source.token(); }
+CancellationToken InterruptSource::token() const noexcept {
+    // Unlike the other accessors this cannot degrade gracefully:
+    // CancellationToken has no default state to hand back, so a moved-from
+    // source is a caller bug rather than a runtime condition.
+    assert(self && "InterruptSource::token() on a moved-from source");
+    return self->source.token();
+}
 
 Task<SignalKind, Error> InterruptSource::next() {
     if (!self) {
