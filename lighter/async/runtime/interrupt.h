@@ -38,9 +38,9 @@ namespace lighter {
 ///
 ///   if (interrupts.interrupt_count() >= 2) std::exit(130);
 ///
-/// Platform note: on Windows only Ctrl+C, Ctrl+Break and console-close are ever
-/// delivered - see SignalKind. TERM and WINCH are silently absent there, and
-/// Task Manager's "End task" cannot be observed by any means.
+/// Platform note: on Windows the deliverable set is Ctrl+C, Ctrl+Break,
+/// console-close and an emulated resize - see SignalKind. TERM is silently
+/// absent there, and Task Manager's "End task" cannot be observed by any means.
 struct InterruptSource {
     InterruptSource() noexcept;
 

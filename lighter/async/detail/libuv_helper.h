@@ -106,6 +106,13 @@ ALWAYS_INLINE bool is_active(const H &handle) noexcept {
     return ::uv_is_active(as_handle(handle)) != 0;
 }
 
+/// Whether the handle is referenced, i.e. currently counts as work that keeps
+/// uv_run() from returning.
+template <handle_like H>
+ALWAYS_INLINE bool has_ref(const H &handle) noexcept {
+    return ::uv_has_ref(as_handle(handle)) != 0;
+}
+
 template <stream_like S>
 ALWAYS_INLINE bool is_readable(const S &stream) noexcept {
     return ::uv_is_readable(as_stream(stream)) != 0;

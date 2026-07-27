@@ -75,13 +75,28 @@ struct SignalSet::Self : uv::QueuedDelivery<Result<SignalKind>> {
     /// referenced, or uv_run would return with the waiter still parked and the
     /// signal never observed - a program whose only job is to await Ctrl+C would
     /// exit immediately.
+    ///
+    /// Counted, because a libuv handle reference is a boolean rather than a
+    /// counter: with two holders overlapping, the second uv_ref would be a
+    /// no-op and the first release would unreference the handles out from under
+    /// the holder still suspended. Only the 0->1 and 1->0 transitions touch
+    /// libuv.
+    usize holds = 0;
+
     void ref_slots() noexcept {
+        if (holds++ > 0) {
+            return;
+        }
         for (auto &slot : slots) {
             uv::ref(slot->handle);
         }
     }
 
     void unref_slots() noexcept {
+        assert(holds > 0 && "unbalanced release of a SignalSet loop hold");
+        if (holds == 0 || --holds > 0) {
+            return;
+        }
         for (auto &slot : slots) {
             uv::unref(slot->handle);
         }
@@ -547,6 +562,12 @@ void SignalSet::release_loop() noexcept {
     if (self) {
         self->unref_slots();
     }
+}
+
+bool SignalSet::holding_loop() const noexcept {
+    // Reports libuv's own view rather than the counter, so a test can catch a
+    // counter that has drifted out of step with the handles it guards.
+    return self && !self->slots.empty() && uv::has_ref(self->slots.front()->handle);
 }
 
 Error SignalSet::stop() {

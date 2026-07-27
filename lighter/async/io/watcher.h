@@ -103,9 +103,12 @@ enum struct SignalKind : i32 {
 /// signal. A -1 kind can never be watched; SignalSet::create rejects it.
 i32 signal_number(SignalKind kind) noexcept;
 
-/// True if this platform can actually deliver `kind`. False means a watcher
-/// would be created successfully and then never fire, so callers should not
-/// rely on it (e.g. WINCH on Windows).
+/// True if this platform can actually deliver `kind`.
+///
+/// Stricter than "has a signal number": TERM has a perfectly good one on
+/// Windows, yet nothing there can ever raise it, so a watcher would be created
+/// successfully and then never fire. Use this to filter an ideal set down to
+/// what the platform honours - InterruptSource does exactly that.
 bool signal_supported(SignalKind kind) noexcept;
 
 /// Watches several signals at once and reports which one arrived.
@@ -166,9 +169,15 @@ struct SignalSet {
     /// something other than wait() - a queue fed by a background wait, say -
     /// is not left suspended by a loop that decided it had nothing to do.
     ///
-    /// Balanced calls; release exactly once per hold.
+    /// Balanced calls; release exactly once per hold. Holds nest: a libuv
+    /// handle reference is a boolean rather than a counter, so these are
+    /// counted and only the outermost pair touches libuv.
     void hold_loop() noexcept;
     void release_loop() noexcept;
+
+    /// True while at least one hold is outstanding, i.e. this set is currently
+    /// keeping the Event loop alive. Exposed for tests.
+    bool holding_loop() const noexcept;
 
     /// Stops every watcher. Queued signals stay readable through wait().
     Error stop();

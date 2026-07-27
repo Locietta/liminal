@@ -217,6 +217,35 @@ Task<void, Error> wait_keeps_loop_alive(bool &resumed) {
 
 #endif // !_WIN32
 
+/// Overlapping loop holds must nest.
+///
+/// A libuv handle reference is a boolean, not a counter, so a naive
+/// implementation lets the first release unreference the handles while a second
+/// holder is still relying on them - and the loop exits with that holder
+/// suspended. Here the outer hold must survive the inner one's release and keep
+/// the loop alive long enough for the timer to fire.
+void check_loop_holds_nest() {
+    EventLoop loop;
+
+    auto set = SignalSet::create({SignalKind::INT}, loop);
+    require(set.has_value(), "SignalSet::create failed");
+
+    // Asserted against libuv's own reference state rather than by timing the
+    // loop: anything else in the loop (a timer, a Relay) would keep it alive on
+    // its own and mask the defect entirely.
+    require(!set->holding_loop(), "a fresh SignalSet must not hold the loop");
+
+    set->hold_loop();
+    require(set->holding_loop(), "hold_loop must reference the handles");
+
+    set->hold_loop();
+    set->release_loop(); // inner release must NOT drop the outer hold
+    require(set->holding_loop(), "an outer hold must survive an inner release");
+
+    set->release_loop();
+    require(!set->holding_loop(), "the outermost release must drop the reference");
+}
+
 /// A retained InterruptSource must not stop the program from exiting.
 ///
 /// This is the shape the header documents: hold a source for the whole run,
@@ -264,6 +293,7 @@ i32 run_all() {
     check_signal_table();
     check_empty_set_rejected();
     check_undeliverable_kind_rejected();
+    check_loop_holds_nest();
     check_source_does_not_block_shutdown();
 
 #ifndef _WIN32
