@@ -91,6 +91,12 @@ jobs:
       - name: Export MSYS2 root
         run: echo "MSYS2=${{ steps.msys2.outputs.msys2-location }}" >> $env:GITHUB_ENV
 
+      # The test binaries link against the ucrt64 gcc runtime and libuv/fmt/curl
+      # DLLs. Nothing puts that directory on PATH for a native (non-msys2) shell,
+      # so without this the executables fail to start at all.
+      - name: Add ucrt64 to PATH
+        run: echo "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" >> $env:GITHUB_PATH
+
       - name: Cache xmake packages
         uses: actions/cache@main
         with:
