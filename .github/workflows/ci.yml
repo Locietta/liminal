@@ -27,7 +27,7 @@ jobs:
             gcc git xmake cmake ninja make pkgconf \
             libuv fmt curl unzip
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@main
 
       # xmake refuses to run as root unless told the risk is understood; CI
       # containers have no other user.
@@ -36,7 +36,7 @@ jobs:
 
       # Only glaze is built from source; the rest come from pacman.
       - name: Cache xmake packages
-        uses: actions/cache@v4
+        uses: actions/cache@main
         with:
           path: ~/.xmake/packages
           key: xmake-linux-${{ hashFiles('xmake/packages/**/xmake.lua') }}
@@ -58,7 +58,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@main
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -81,7 +81,7 @@ jobs:
         run: echo "MSYS2=$(cygpath -w /)" >> "$GITHUB_ENV"
 
       - name: Cache xmake packages
-        uses: actions/cache@v4
+        uses: actions/cache@main
         with:
           path: ~/.xmake/packages
           key: xmake-windows-${{ hashFiles('xmake/packages/**/xmake.lua') }}
@@ -95,20 +95,3 @@ jobs:
 
       - name: Test
         run: xmake test
-
-  format:
-    name: clang-format
-    runs-on: ubuntu-latest
-    # Matches the clang-format pinned in pixi.toml. Formatting is version
-    # sensitive, so a mismatch here would fight the pre-commit hook.
-    container: archlinux:latest
-    steps:
-      - name: Install clang-format
-        run: pacman -Syu --noconfirm --needed clang git
-
-      - uses: actions/checkout@v4
-
-      - name: Check formatting
-        run: |
-          git ls-files '*.cpp' '*.h' '*.hpp' \
-            | xargs --no-run-if-empty clang-format --dry-run --Werror

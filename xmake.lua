@@ -25,16 +25,16 @@ if is_os("windows") then
     add_defines("_CRT_SECURE_NO_WARNINGS")
     add_defines("WIN32_LEAN_AND_MEAN", "UNICODE", "_UNICODE", "NOMINMAX", "_WINDOWS")
     -- set_policy("build.optimization.lto", true)
-end
 
--- Linux builds with the default gcc toolchain.
---
--- We used to switch to clang here because gcc had an ICE on
--- std::source_location::current() inside coroutines. That is no longer the
--- trade-off: the ICE does not reproduce on gcc 16.1.1, while upstream clang
--- (checked at 22.1.8) still rejects -freflection and cannot parse the
--- `template for` in lighter/utils/enum.h. Until clang ships P2996, gcc is the
--- only toolchain that can build this project on Linux.
+    option("__msys2_package_manager")
+        set_showmenu(false)
+        on_check(function (option)
+            import("package.manager.msys2.register")()
+            option:enable(true)
+        end)
+    option_end()
+
+end
 
 add_repositories("loia-pinned xmake", {rootdir = os.scriptdir()})
 add_moduledirs("xmake/modules")
@@ -43,14 +43,6 @@ option("__pixi_package_manager")
     set_showmenu(false)
     on_check(function (option)
         import("package.manager.pixi.register")()
-        option:enable(true)
-    end)
-option_end()
-
-option("__msys2_package_manager")
-    set_showmenu(false)
-    on_check(function (option)
-        import("package.manager.msys2.register")()
         option:enable(true)
     end)
 option_end()
