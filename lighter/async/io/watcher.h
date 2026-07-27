@@ -87,8 +87,9 @@ private:
 ///           regardless of what the handler does.
 ///   QUIT  - Ctrl+\ on POSIX. Never fires on Windows.
 ///   BREAK - Ctrl+Break. Windows only.
-///   WINCH - terminal was resized. POSIX only; on Windows, poll the console
-///           size instead (see Console::get_winsize).
+///   WINCH - terminal was resized. Emulated on Windows, where libuv documents
+///           delivery as not always timely, and detects a readable terminal's
+///           resize only while that handle is in raw mode and being read.
 enum struct SignalKind : i32 {
     INT,
     TERM,
@@ -146,7 +147,28 @@ struct SignalSet {
     static Result<SignalSet> create(std::initializer_list<SignalKind> kinds, EventLoop &loop = EventLoop::current());
 
     /// Resolves with the signal that fired, draining any already queued.
+    ///
+    /// A pending wait keeps the Event loop alive: awaiting a signal is the
+    /// program's work for as long as it lasts, so the loop must not exit and
+    /// leave the waiter suspended forever.
     Task<SignalKind, Error> wait();
+
+    /// wait() that does NOT keep the Event loop alive.
+    ///
+    /// For a supervisor that watches signals for the whole life of the process
+    /// but should never be the reason it stays up - the loop stays free to exit
+    /// once the real work is done, abandoning this wait. InterruptSource's pump
+    /// is the motivating case; prefer wait() for anything a caller is actively
+    /// blocking on.
+    Task<SignalKind, Error> wait_background();
+
+    /// Holds the Event loop open until released, so a caller blocked on
+    /// something other than wait() - a queue fed by a background wait, say -
+    /// is not left suspended by a loop that decided it had nothing to do.
+    ///
+    /// Balanced calls; release exactly once per hold.
+    void hold_loop() noexcept;
+    void release_loop() noexcept;
 
     /// Stops every watcher. Queued signals stay readable through wait().
     Error stop();

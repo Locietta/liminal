@@ -228,10 +228,12 @@ struct SignalSetAwait : uv::AwaitOp<SignalSetAwait> {
 
     // Set state owning the shared delivery queue.
     SignalSet::Self *self;
+    // Whether this wait should hold the Event loop open while suspended.
+    bool keep_alive = true;
     // Result slot filled by deliver() before this operation completes.
     Result<SignalKind> result{outcome_error(Error::k_operation_aborted)};
 
-    explicit SignalSetAwait(SignalSet::Self *set) : self(set) {}
+    explicit SignalSetAwait(SignalSet::Self *set, bool keep_alive = true) : self(set), keep_alive(keep_alive) {}
 
     static void on_cancel(IoOp *op) {
         // Unlike the single-signal awaiter, cancelling one wait does NOT stop
@@ -240,7 +242,9 @@ struct SignalSetAwait : uv::AwaitOp<SignalSetAwait> {
         await_base::complete_cancel(op, [](auto &aw) {
             if (aw.self) {
                 aw.self->disarm();
-                aw.self->unref_slots();
+                if (aw.keep_alive) {
+                    aw.self->unref_slots();
+                }
             }
         });
     }
@@ -261,15 +265,21 @@ struct SignalSetAwait : uv::AwaitOp<SignalSetAwait> {
             return waiting;
         }
         self->arm(*this, result);
-        // This wait is now real work; keep the loop alive for it.
-        self->ref_slots();
+        // A caller's wait is real work, so hold the loop open for it. A
+        // background wait deliberately does not, or a perpetual supervisor
+        // would keep the process up forever.
+        if (keep_alive) {
+            self->ref_slots();
+        }
         return this->attach(waiting.promise(), loc);
     }
 
     Result<SignalKind> await_resume() noexcept {
         if (self) {
             self->disarm();
-            self->unref_slots();
+            if (keep_alive) {
+                self->unref_slots();
+            }
         }
         return std::move(result);
     }
@@ -421,6 +431,8 @@ i32 signal_number(SignalKind kind) noexcept {
             return -1;
 #endif
         case SignalKind::WINCH:
+            // uv/win.h defines SIGWINCH (28) where the CRT does not, so this
+            // resolves on both platforms once <uv.h> is in scope.
 #ifdef SIGWINCH
             return SIGWINCH;
 #else
@@ -437,10 +449,13 @@ bool signal_supported(SignalKind kind) noexcept {
     }
 
 #ifdef _WIN32
-    // Windows has no signals; libuv fabricates these from console control
-    // events. Only Ctrl+C, Ctrl+Break and window-close have an event behind
-    // them - the rest would install a watcher that can never fire.
-    return kind == SignalKind::INT || kind == SignalKind::BREAK || kind == SignalKind::HUP;
+    // Windows has no signals; libuv fabricates these. INT/BREAK/HUP come from
+    // console control events, and WINCH is emulated from console resize
+    // detection (which libuv documents as not always timely, and which only
+    // notices readable-tty changes while the handle is in raw mode and being
+    // read). Everything else - TERM included - would install a watcher that can
+    // never fire.
+    return kind == SignalKind::INT || kind == SignalKind::BREAK || kind == SignalKind::HUP || kind == SignalKind::WINCH;
 #else
     return kind != SignalKind::BREAK;
 #endif
@@ -498,7 +513,9 @@ Result<SignalSet> SignalSet::create(std::initializer_list<SignalKind> kinds, Eve
     return create(std::span<const SignalKind>(kinds.begin(), kinds.size()), loop);
 }
 
-Task<SignalKind, Error> SignalSet::wait() {
+namespace {
+
+Task<SignalKind, Error> wait_impl(SignalSet::Self *self, bool keep_alive) {
     if (!self) {
         co_await fail(Error::k_invalid_argument);
     }
@@ -511,7 +528,25 @@ Task<SignalKind, Error> SignalSet::wait() {
         co_await fail(Error::k_connection_already_in_progress);
     }
 
-    co_return co_await or_fail(co_await SignalSetAwait{self.get()});
+    co_return co_await or_fail(co_await SignalSetAwait{self, keep_alive});
+}
+
+} // namespace
+
+Task<SignalKind, Error> SignalSet::wait() { return wait_impl(self.get(), true); }
+
+Task<SignalKind, Error> SignalSet::wait_background() { return wait_impl(self.get(), false); }
+
+void SignalSet::hold_loop() noexcept {
+    if (self) {
+        self->ref_slots();
+    }
+}
+
+void SignalSet::release_loop() noexcept {
+    if (self) {
+        self->unref_slots();
+    }
 }
 
 Error SignalSet::stop() {

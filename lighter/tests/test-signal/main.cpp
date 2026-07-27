@@ -45,8 +45,9 @@ void check_signal_table() {
 
 #ifdef _WIN32
     require(!signal_supported(SignalKind::TERM), "Windows cannot deliver SIGTERM");
-    require(!signal_supported(SignalKind::WINCH), "Windows cannot deliver SIGWINCH");
     require(signal_supported(SignalKind::BREAK), "Ctrl+Break must be supported on Windows");
+    // libuv emulates SIGWINCH on Windows from console resize detection.
+    require(signal_supported(SignalKind::WINCH), "Windows delivers an emulated SIGWINCH");
 #else
     require(signal_supported(SignalKind::TERM), "POSIX must deliver SIGTERM");
     require(signal_supported(SignalKind::WINCH), "POSIX must deliver SIGWINCH");
@@ -216,6 +217,36 @@ Task<void, Error> wait_keeps_loop_alive(bool &resumed) {
 
 #endif // !_WIN32
 
+/// A retained InterruptSource must not stop the program from exiting.
+///
+/// This is the shape the header documents: hold a source for the whole run,
+/// schedule some work, let the work finish. The pump waits forever by design,
+/// so if its wait held the loop open, run() would never return and the source
+/// could not be destroyed to cancel it - a shutdown deadlock.
+///
+/// Runs on every platform: it needs no signal to be delivered, only the loop to
+/// come back.
+void check_source_does_not_block_shutdown() {
+    EventLoop loop;
+
+    auto interrupts = InterruptSource::create(loop);
+    require(interrupts.has_value(), "InterruptSource::create failed");
+
+    bool ran = false;
+    auto work = [](bool &ran) -> Task<void, Error> {
+        co_await sleep(5ms);
+        ran = true;
+    };
+
+    loop.schedule(work(ran));
+
+    // If this hangs the test times out rather than failing, which is the only
+    // way a deadlock can present itself.
+    loop.run();
+
+    require(ran, "scheduled work must run");
+}
+
 /// Runs one Task to completion on its own loop.
 ///
 /// Each signal case gets a private loop and runs to completion before the next
@@ -233,6 +264,7 @@ i32 run_all() {
     check_signal_table();
     check_empty_set_rejected();
     check_undeliverable_kind_rejected();
+    check_source_does_not_block_shutdown();
 
 #ifndef _WIN32
     auto got = SignalKind::QUIT;

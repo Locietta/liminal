@@ -78,7 +78,10 @@ std::vector<SignalKind> supported_only(std::span<const SignalKind> kinds) {
 /// Runs for the lifetime of the source. It is cancelled by Self::destroy.
 Task<void, Error, Cancellation> run_pump(InterruptSource::Self *self) {
     while (true) {
-        auto signalled = co_await self->signals.wait().catch_cancel();
+        // Background wait: this pump runs for the whole life of the source, so
+        // if it held the loop open the process could never shut down normally -
+        // run() would sit here forever waiting for a signal that may never come.
+        auto signalled = co_await self->signals.wait_background().catch_cancel();
         if (!signalled.has_value()) {
             // Cancelled (teardown) or the set failed - either way, stop.
             co_return;
@@ -176,16 +179,24 @@ Task<SignalKind, Error> InterruptSource::next() {
 
         self->reading = true;
 
+        // The caller is blocking on this, so it is the program's work: hold the
+        // loop open for it. The pump's own wait is deliberately background and
+        // would not keep us up, and an Event carries no uv reference of its
+        // own, so without this the loop could exit with the caller parked here.
+        self->signals.hold_loop();
+
         while (self->observed.empty()) {
             auto woken = co_await self->ready.wait().catch_cancel();
             if (woken.is_cancelled()) {
                 // Release the slot before unwinding, or the source is deaf to
                 // every later next() call.
+                self->signals.release_loop();
                 self->reading = false;
                 co_await cancel();
             }
         }
 
+        self->signals.release_loop();
         self->reading = false;
     }
 
