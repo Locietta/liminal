@@ -27,7 +27,11 @@ jobs:
             gcc git xmake cmake ninja make pkgconf \
             libuv fmt curl unzip
 
+      # xmake/ is a submodule holding the pinned package recipes, the custom
+      # package managers and the build rules; without it xmake cannot configure.
       - uses: actions/checkout@main
+        with:
+          submodules: true
 
       # xmake refuses to run as root unless told the risk is understood; CI
       # containers have no other user.
@@ -58,7 +62,11 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
+      # xmake/ is a submodule holding the pinned package recipes, the custom
+      # package managers and the build rules; without it xmake cannot configure.
       - uses: actions/checkout@main
+        with:
+          submodules: true
 
       - uses: msys2/setup-msys2@v2
         with:
