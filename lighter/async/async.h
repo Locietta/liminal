@@ -14,6 +14,7 @@
 #include <lighter/async/runtime/sync.h>
 #include <lighter/async/runtime/task.h>
 #include <lighter/async/runtime/task_group.h>
+#include <lighter/async/runtime/timeout.h>
 #include <lighter/async/runtime/traits.h>
 #include <lighter/async/runtime/walk.h>
 #include <lighter/async/runtime/when.h>
