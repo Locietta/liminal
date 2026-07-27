@@ -1,6 +1,8 @@
 #pragma once
 
 #include <chrono>
+#include <initializer_list>
+#include <span>
 
 #include <lighter/types.hpp>
 #include <lighter/async/runtime/task.h>
@@ -63,6 +65,92 @@ struct Signal {
 
 private:
     explicit Signal(UniqueHandle<Self> self) noexcept;
+
+    UniqueHandle<Self> self;
+};
+
+/// Signals a console application can meaningfully observe, named so that call
+/// sites do not have to spell raw signal numbers.
+///
+/// Platform support is uneven, and libuv only papers over part of it. On
+/// Windows there are no real signals: libuv synthesizes these from console
+/// control events, so a watcher for an unsupported signal is created happily
+/// and then simply never fires.
+///
+///   INT   - Ctrl+C. Everywhere. Not delivered while the tty is in raw mode,
+///           where the keypress is read as ordinary input instead.
+///   TERM  - polite termination request. POSIX only; on Windows nothing
+///           generates it, and Task Manager's "End task" calls
+///           TerminateProcess, which no process can observe or refuse.
+///   HUP   - terminal hangup on POSIX; the console window being closed on
+///           Windows. On Windows the process is killed a few seconds later
+///           regardless of what the handler does.
+///   QUIT  - Ctrl+\ on POSIX. Never fires on Windows.
+///   BREAK - Ctrl+Break. Windows only.
+///   WINCH - terminal was resized. POSIX only; on Windows, poll the console
+///           size instead (see Console::get_winsize).
+enum struct SignalKind : i32 {
+    INT,
+    TERM,
+    HUP,
+    QUIT,
+    BREAK,
+    WINCH,
+};
+
+/// Platform signal number for `kind`, or -1 where the platform has no such
+/// signal. A -1 kind can never be watched; SignalSet::create rejects it.
+i32 signal_number(SignalKind kind) noexcept;
+
+/// True if this platform can actually deliver `kind`. False means a watcher
+/// would be created successfully and then never fire, so callers should not
+/// rely on it (e.g. WINCH on Windows).
+bool signal_supported(SignalKind kind) noexcept;
+
+/// Watches several signals at once and reports which one arrived.
+///
+/// The single-signal `Signal` above cannot say what it observed - its callback
+/// discards the signal number - so watching three signals means three objects
+/// and three concurrent waits. SignalSet owns one uv_signal_t per signal and
+/// funnels them into one queue.
+///
+/// Signals that arrive while nobody is waiting are queued, not dropped or
+/// coalesced, so a burst is drained in arrival order by successive wait()
+/// calls. This matters for the interactive case: a second Ctrl+C arriving while
+/// the first is still being handled must remain visible.
+///
+/// Single-consumer: overlapping wait() calls fail with
+/// k_connection_already_in_progress. Cancelling a pending wait() leaves the
+/// watchers armed, so the set can be waited on again.
+struct SignalSet {
+    SignalSet() noexcept;
+
+    SignalSet(const SignalSet &) = delete;
+    SignalSet &operator=(const SignalSet &) = delete;
+
+    SignalSet(SignalSet &&other) noexcept;
+    SignalSet &operator=(SignalSet &&other) noexcept;
+
+    ~SignalSet();
+
+    struct Self;
+    Self *operator->() noexcept;
+
+    /// Starts watching every signal in `kinds`. Fails with k_invalid_argument
+    /// if `kinds` is empty or names a signal this platform does not have.
+    /// Duplicates are ignored.
+    static Result<SignalSet> create(std::span<const SignalKind> kinds, EventLoop &loop = EventLoop::current());
+
+    static Result<SignalSet> create(std::initializer_list<SignalKind> kinds, EventLoop &loop = EventLoop::current());
+
+    /// Resolves with the signal that fired, draining any already queued.
+    Task<SignalKind, Error> wait();
+
+    /// Stops every watcher. Queued signals stay readable through wait().
+    Error stop();
+
+private:
+    explicit SignalSet(UniqueHandle<Self> self) noexcept;
 
     UniqueHandle<Self> self;
 };

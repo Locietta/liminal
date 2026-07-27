@@ -1,8 +1,12 @@
 #include "watcher.h"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <csignal>
+#include <memory>
 #include <type_traits>
+#include <vector>
 
 #include <lighter/types.hpp>
 #include <lighter/async/io/awaiter.h>
@@ -40,6 +44,30 @@ struct Signal::Self : uv::handle<Signal::Self, uv_signal_t> {
     IoOp *waiter = nullptr;
     Error *active = nullptr;
     i32 pending = 0;
+};
+
+/// One libuv watcher inside a SignalSet.
+///
+/// Each uv_signal_t needs its own stable address and its own handle->data, but
+/// they all deliver into the set's single queue - so `data` points at this
+/// Slot, which names both the owning set and which signal fired.
+///
+/// Slots are heap-allocated individually (rather than living in a vector) so
+/// that the handle addresses stay put; uv_close() runs asynchronously and reads
+/// handle->data long after the owner has moved on.
+struct SignalSlot : uv::handle<SignalSlot, uv_signal_t> {
+    uv_signal_t handle{};
+    SignalSet::Self *owner = nullptr;
+    SignalKind kind = SignalKind::INT;
+};
+
+/// Unlike the other wrappers, this owns no libuv handle of its own - the slots
+/// do - so it is a plain heap object. Destroying it drops the slots, and each
+/// slot's UniqueHandle defers its own delete until uv_close completes.
+struct SignalSet::Self : uv::QueuedDelivery<Result<SignalKind>> {
+    std::vector<UniqueHandle<SignalSlot>> slots;
+
+    static void destroy(Self *self) noexcept { delete self; }
 };
 
 namespace {
@@ -174,6 +202,55 @@ struct SignalAwait : uv::AwaitOp<SignalAwait> {
     }
 };
 
+struct SignalSetAwait : uv::AwaitOp<SignalSetAwait> {
+    using await_base = uv::AwaitOp<SignalSetAwait>;
+    using promise_t = Task<SignalKind, Error>::promise_type;
+
+    // Set state owning the shared delivery queue.
+    SignalSet::Self *self;
+    // Result slot filled by deliver() before this operation completes.
+    Result<SignalKind> result{outcome_error(Error::k_operation_aborted)};
+
+    explicit SignalSetAwait(SignalSet::Self *set) : self(set) {}
+
+    static void on_cancel(IoOp *op) {
+        // Unlike the single-signal awaiter, cancelling one wait does NOT stop
+        // the watchers: the set outlives any individual wait, and a cancelled
+        // turn should not silently deafen the process to Ctrl+C.
+        await_base::complete_cancel(op, [](auto &aw) {
+            if (aw.self) {
+                aw.self->disarm();
+            }
+        });
+    }
+
+    static void on_fire(uv_signal_t *handle) {
+        auto *slot = static_cast<SignalSlot *>(handle->data);
+        assert(slot != nullptr && "on_fire requires slot state in handle->data");
+        assert(slot->owner != nullptr && "signal slot outlived its set");
+
+        slot->owner->deliver(Result<SignalKind>(slot->kind));
+    }
+
+    bool await_ready() const noexcept { return false; }
+
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting,
+                                          std::source_location loc = std::source_location::current()) noexcept {
+        if (!self) {
+            return waiting;
+        }
+        self->arm(*this, result);
+        return this->attach(waiting.promise(), loc);
+    }
+
+    Result<SignalKind> await_resume() noexcept {
+        if (self) {
+            self->disarm();
+        }
+        return std::move(result);
+    }
+};
+
 } // namespace
 
 #define LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(WatcherType)                               \
@@ -186,6 +263,7 @@ struct SignalAwait : uv::AwaitOp<SignalAwait> {
 
 LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(Timer)
 LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(Signal)
+LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(SignalSet)
 LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(Idle)
 LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(Prepare)
 LIGHTER_DEFINE_WATCHER_SPECIAL_MEMBERS(Check)
@@ -290,6 +368,134 @@ Task<void, Error> Signal::wait() {
     if (auto err = co_await SignalAwait{self.get()}) {
         co_await fail(std::move(err));
     }
+}
+
+i32 signal_number(SignalKind kind) noexcept {
+    switch (kind) {
+        case SignalKind::INT: return SIGINT;
+        case SignalKind::TERM: return SIGTERM;
+
+        // SIGHUP/SIGQUIT/SIGWINCH are absent from the MSVC/MinGW <csignal>, but
+        // libuv synthesizes SIGHUP from CTRL_CLOSE_EVENT and accepts the POSIX
+        // numbers, so spell them out rather than dropping the kind entirely.
+        case SignalKind::HUP:
+#ifdef SIGHUP
+            return SIGHUP;
+#else
+            return 1;
+#endif
+        case SignalKind::QUIT:
+#ifdef SIGQUIT
+            return SIGQUIT;
+#else
+            return -1;
+#endif
+        case SignalKind::BREAK:
+#ifdef SIGBREAK
+            return SIGBREAK;
+#else
+            return -1;
+#endif
+        case SignalKind::WINCH:
+#ifdef SIGWINCH
+            return SIGWINCH;
+#else
+            return -1;
+#endif
+    }
+
+    return -1;
+}
+
+bool signal_supported(SignalKind kind) noexcept {
+    if (signal_number(kind) < 0) {
+        return false;
+    }
+
+#ifdef _WIN32
+    // Windows has no signals; libuv fabricates these from console control
+    // events. Only Ctrl+C, Ctrl+Break and window-close have an event behind
+    // them - the rest would install a watcher that can never fire.
+    return kind == SignalKind::INT || kind == SignalKind::BREAK || kind == SignalKind::HUP;
+#else
+    return kind != SignalKind::BREAK;
+#endif
+}
+
+Result<SignalSet> SignalSet::create(std::span<const SignalKind> kinds, EventLoop &loop) {
+    if (kinds.empty()) {
+        return outcome_error(Error::k_invalid_argument);
+    }
+
+    auto self = UniqueHandle<Self>(new Self());
+
+    for (auto kind : kinds) {
+        const i32 signum = signal_number(kind);
+        if (signum < 0) {
+            return outcome_error(Error::k_invalid_argument);
+        }
+
+        // Watching the same signal twice would deliver it twice.
+        const bool duplicate = std::ranges::any_of(self->slots, [kind](const auto &slot) { return slot->kind == kind; });
+        if (duplicate) {
+            continue;
+        }
+
+        auto slot = SignalSlot::make();
+        slot->owner = self.get();
+        slot->kind = kind;
+
+        if (auto err = uv::signal_init(loop, slot->handle)) {
+            return outcome_error(err);
+        }
+
+        if (auto err = uv::signal_start(slot->handle, [](uv_signal_t *h, i32) { SignalSetAwait::on_fire(h); }, signum)) {
+            return outcome_error(err);
+        }
+
+        // Watching for a signal is not itself work: an unreferenced handle lets
+        // the loop exit once the real tasks are done, instead of parking
+        // forever on a Ctrl+C that may never come.
+        uv::unref(slot->handle);
+
+        self->slots.push_back(std::move(slot));
+    }
+
+    return SignalSet(std::move(self));
+}
+
+Result<SignalSet> SignalSet::create(std::initializer_list<SignalKind> kinds, EventLoop &loop) {
+    return create(std::span<const SignalKind>(kinds.begin(), kinds.size()), loop);
+}
+
+Task<SignalKind, Error> SignalSet::wait() {
+    if (!self) {
+        co_await fail(Error::k_invalid_argument);
+    }
+
+    if (self->has_pending()) {
+        co_return co_await or_fail(self->take_pending());
+    }
+
+    if (self->has_waiter()) {
+        co_await fail(Error::k_connection_already_in_progress);
+    }
+
+    co_return co_await or_fail(co_await SignalSetAwait{self.get()});
+}
+
+Error SignalSet::stop() {
+    if (!self) {
+        return Error::k_invalid_argument;
+    }
+
+    for (auto &slot : self->slots) {
+        if (auto err = uv::signal_stop(slot->handle)) {
+            return err;
+        }
+    }
+
+    return {};
 }
 
 #define LIGHTER_DEFINE_TICK_WATCHER_METHODS(WatcherType, HandleType, AwaiterType, INIT_FN, START_FN, STOP_FN, NameLiteral) \
