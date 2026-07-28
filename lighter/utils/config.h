@@ -82,10 +82,3 @@
 #define LIGHTER_CATCH_ALL() else
 #define LIGHTER_RETHROW() std::abort()
 #endif
-
-// uncatchable failure, e.g. for unrecoverable errors in low-level code
-#define LIGHTER_PANIC(message)                      \
-    do {                                            \
-        std::fputs("PANIC: " message "\n", stderr); \
-        std::abort();                               \
-    } while (false)

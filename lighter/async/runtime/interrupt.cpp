@@ -6,11 +6,11 @@
 #include <vector>
 
 #include <lighter/types.hpp>
-#include <lighter/utils/config.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/sync.h>
 #include <lighter/async/vocab/cancellation.h>
+#include <lighter/utils/panic.h>
 
 namespace lighter {
 
@@ -162,7 +162,7 @@ CancellationToken InterruptSource::token() const noexcept {
     // source is a caller bug. Panics in every build - under NDEBUG an assert
     // would vanish and leave a null dereference in its place.
     if (!self) {
-        LIGHTER_PANIC("InterruptSource::token() on a moved-from source");
+        panic("InterruptSource::token() on a moved-from source");
     }
     return self->source.token();
 }

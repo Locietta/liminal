@@ -14,6 +14,11 @@ target("lighter")
     set_kind("static")
     add_files("async/**/*.cpp", "encoding/*.cpp", "http/*.cpp", "utils/*.cpp")
     add_packages("libuv", "fmt")
+    on_config(function (target)
+        if target:has_tool("cxx", "gcc") or target:has_tool("cxx", "gxx") then
+            target:add("syslinks", "stdc++exp", {public = true})
+        end
+    end)
     if is_os("windows") then
         add_packages("libiconv")
     end
