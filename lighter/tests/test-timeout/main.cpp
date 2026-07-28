@@ -101,6 +101,13 @@ Task<void, Error> void_value(bool &ok) {
     ok = result.has_value();
 }
 
+/// A steady-clock deadline subtraction keeps its native duration type.
+Task<void, Error> native_clock_duration(bool &ok) {
+    const auto deadline = std::chrono::steady_clock::now() + 1s;
+    auto result = co_await with_timeout(quick(17), deadline - std::chrono::steady_clock::now());
+    ok = result.has_value() && *result == 17;
+}
+
 i32 run_all() {
     EventLoop loop;
 
@@ -112,6 +119,7 @@ i32 run_all() {
     bool zero_ok = false;
     bool negative_ok = false;
     bool void_ok = false;
+    bool native_duration_ok = false;
 
     loop.schedule(value_wins(value_ok));
     loop.schedule(timeout_wins(timeout_ok, inner_finished));
@@ -120,6 +128,7 @@ i32 run_all() {
     loop.schedule(zero_budget(zero_ok));
     loop.schedule(negative_budget(negative_ok));
     loop.schedule(void_value(void_ok));
+    loop.schedule(native_clock_duration(native_duration_ok));
     loop.run();
 
     require(value_ok, "a Task that beats its budget must forward its value");
@@ -130,6 +139,7 @@ i32 run_all() {
     require(zero_ok, "a zero budget must time out");
     require(negative_ok, "a negative budget must time out rather than hang");
     require(void_ok, "a void-valued Task must round-trip through with_timeout");
+    require(native_duration_ok, "with_timeout must accept a steady_clock::duration");
 
     return 0;
 }

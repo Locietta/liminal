@@ -48,23 +48,20 @@ constexpr inline usize k_timeout_timer_index = 1;
 /// Doing it there rather than through a wrapper keeps the budget honest. Tasks
 /// are lazy, so a deadline converted when the wrapper is *built* would start
 /// counting from then and overshoot if the wrapper is scheduled later.
-template <typename T, typename E, typename C>
+template <typename T, typename E, typename C, typename Rep, typename Period>
     requires(std::is_void_v<E> || std::constructible_from<Error, E>)
-Task<T, Error, Cancellation> with_timeout(Task<T, E, C> task, std::chrono::milliseconds budget, EventLoop &loop = EventLoop::current()) {
-    // A caller that derives a budget by subtraction can hand us a negative one
-    // once the deadline has passed - the normal way to express a deadline, per
-    // the note above. Timer::start rejects negative durations, and an unchecked
-    // cast to u64 would turn "already expired" into an effectively infinite
-    // wait, so clamp and let it time out promptly.
-    if (budget < std::chrono::milliseconds{0}) [[unlikely]] {
-        budget = std::chrono::milliseconds{0};
-    }
+Task<T, Error, Cancellation> with_timeout(Task<T, E, C> task, std::chrono::duration<Rep, Period> budget,
+                                          EventLoop &loop = EventLoop::current()) {
+    // libuv timers have millisecond resolution. Round positive fractional
+    // milliseconds up so the timeout never expires earlier than requested.
+    const auto timeout =
+        budget <= decltype(budget)::zero() ? std::chrono::milliseconds{0} : std::chrono::ceil<std::chrono::milliseconds>(budget);
 
     // The wrapped Task is wrapped with catch_cancel() so that its Cancellation
     // surfaces on the aggregate's cancel channel instead of silently cancelling
     // this frame - we need to tell "the Task cancelled" apart from "the Timer
     // won" to pick the right outcome below.
-    auto race = co_await WhenAny(std::move(task).catch_cancel(), sleep(budget, loop));
+    auto race = co_await WhenAny(std::move(task).catch_cancel(), sleep(timeout, loop));
 
     if constexpr (!std::is_void_v<E>) {
         if (race.has_error()) {
