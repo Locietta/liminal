@@ -187,9 +187,6 @@ struct SignalSet {
     /// keeping the Event loop alive. Exposed for tests.
     bool holding_loop() const noexcept;
 
-    /// Stops every watcher. Queued signals stay readable through wait().
-    Error stop();
-
 private:
     explicit SignalSet(UniqueHandle<Self> self) noexcept;
 

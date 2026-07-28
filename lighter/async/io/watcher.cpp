@@ -584,20 +584,6 @@ bool SignalSet::holding_loop() const noexcept {
     return self && !self->slots.empty() && uv::has_ref(self->slots.front()->handle);
 }
 
-Error SignalSet::stop() {
-    if (!self) {
-        return Error::k_invalid_argument;
-    }
-
-    for (auto &slot : self->slots) {
-        if (auto err = uv::signal_stop(slot->handle)) {
-            return err;
-        }
-    }
-
-    return {};
-}
-
 #define LIGHTER_DEFINE_TICK_WATCHER_METHODS(WatcherType, HandleType, AwaiterType, INIT_FN, START_FN, STOP_FN) \
     WatcherType WatcherType::create(EventLoop &loop) {                                                        \
         auto self = Self::make();                                                                             \
