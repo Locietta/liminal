@@ -1,6 +1,8 @@
 #pragma once
 
 #include <chrono>
+#include <initializer_list>
+#include <span>
 
 #include <lighter/types.hpp>
 #include <lighter/async/runtime/task.h>
@@ -27,11 +29,19 @@ struct Timer {
 
     static Timer create(EventLoop &loop = EventLoop::current());
 
+    /// Both durations must be non-negative; a negative one is a caller bug and
+    /// panics rather than being cast into an effectively infinite wait.
     void start(std::chrono::milliseconds timeout, std::chrono::milliseconds repeat = {});
 
     void stop();
 
-    Task<> wait();
+    /// Waits for the next tick, consuming one already counted if the Timer
+    /// fired while nobody was waiting.
+    ///
+    /// Single-consumer: a second concurrent wait fails with
+    /// k_connection_already_in_progress rather than resuming as if the Timer
+    /// had fired.
+    Task<void, Error> wait();
 
 private:
     explicit Timer(UniqueHandle<Self> self) noexcept;
@@ -67,6 +77,122 @@ private:
     UniqueHandle<Self> self;
 };
 
+/// Signals a console application can meaningfully observe, named so that call
+/// sites do not have to spell raw signal numbers.
+///
+/// Platform support is uneven, and libuv only papers over part of it. On
+/// Windows there are no real signals: libuv synthesizes these from console
+/// control events, so a watcher for an unsupported signal is created happily
+/// and then simply never fires.
+///
+///   INT   - Ctrl+C. Everywhere. Not delivered while the tty is in raw mode,
+///           where the keypress is read as ordinary input instead.
+///   TERM  - polite termination request. POSIX only; on Windows nothing
+///           generates it, and Task Manager's "End task" calls
+///           TerminateProcess, which no process can observe or refuse.
+///   HUP   - terminal hangup on POSIX; the console window being closed on
+///           Windows. On Windows the process is killed a few seconds later
+///           regardless of what the handler does.
+///   QUIT  - Ctrl+\ on POSIX. Never fires on Windows.
+///   BREAK - Ctrl+Break. Windows only.
+///   WINCH - terminal was resized. Emulated on Windows, where libuv documents
+///           delivery as not always timely, and detects a readable terminal's
+///           resize only while that handle is in raw mode and being read.
+enum struct SignalKind : i32 {
+    INT,
+    TERM,
+    HUP,
+    QUIT,
+    BREAK,
+    WINCH,
+};
+
+/// Platform signal number for `kind`, or -1 where the platform has no such
+/// signal. A -1 kind can never be watched; SignalSet::create rejects it.
+i32 signal_number(SignalKind kind) noexcept;
+
+/// True if this platform can actually deliver `kind`.
+///
+/// Stricter than "has a signal number": TERM has a perfectly good one on
+/// Windows, yet nothing there can ever raise it, so a watcher would be created
+/// successfully and then never fire. Use this to filter an ideal set down to
+/// what the platform honours - InterruptSource does exactly that.
+bool signal_supported(SignalKind kind) noexcept;
+
+/// Watches several signals at once and reports which one arrived.
+///
+/// The single-signal `Signal` above cannot say what it observed - its callback
+/// discards the signal number - so watching three signals means three objects
+/// and three concurrent waits. SignalSet owns one uv_signal_t per signal and
+/// funnels them into one queue.
+///
+/// Signals that arrive while nobody is waiting are queued, not dropped or
+/// coalesced, so a burst is drained in arrival order by successive wait()
+/// calls. This matters for the interactive case: a second Ctrl+C arriving while
+/// the first is still being handled must remain visible.
+///
+/// Single-consumer: overlapping wait() calls fail with
+/// k_connection_already_in_progress. Cancelling a pending wait() leaves the
+/// watchers armed, so the set can be waited on again.
+struct SignalSet {
+    SignalSet() noexcept;
+
+    SignalSet(const SignalSet &) = delete;
+    SignalSet &operator=(const SignalSet &) = delete;
+
+    SignalSet(SignalSet &&other) noexcept;
+    SignalSet &operator=(SignalSet &&other) noexcept;
+
+    ~SignalSet();
+
+    struct Self;
+    Self *operator->() noexcept;
+
+    /// Starts watching every signal in `kinds`. Fails with k_invalid_argument
+    /// if `kinds` is empty or names a signal this platform cannot deliver -
+    /// see signal_supported(), which is stricter than "has a signal number":
+    /// TERM has one on Windows but no console event can ever raise it.
+    /// Duplicates are ignored.
+    static Result<SignalSet> create(std::span<const SignalKind> kinds, EventLoop &loop = EventLoop::current());
+
+    static Result<SignalSet> create(std::initializer_list<SignalKind> kinds, EventLoop &loop = EventLoop::current());
+
+    /// Resolves with the signal that fired, draining any already queued.
+    ///
+    /// A pending wait keeps the Event loop alive: awaiting a signal is the
+    /// program's work for as long as it lasts, so the loop must not exit and
+    /// leave the waiter suspended forever.
+    Task<SignalKind, Error> wait();
+
+    /// wait() that does NOT keep the Event loop alive.
+    ///
+    /// For a supervisor that watches signals for the whole life of the process
+    /// but should never be the reason it stays up - the loop stays free to exit
+    /// once the real work is done, abandoning this wait. InterruptSource's pump
+    /// is the motivating case; prefer wait() for anything a caller is actively
+    /// blocking on.
+    Task<SignalKind, Error> wait_background();
+
+    /// Holds the Event loop open until released, so a caller blocked on
+    /// something other than wait() - a queue fed by a background wait, say -
+    /// is not left suspended by a loop that decided it had nothing to do.
+    ///
+    /// Balanced calls; release exactly once per hold. Holds nest: a libuv
+    /// handle reference is a boolean rather than a counter, so these are
+    /// counted and only the outermost pair touches libuv.
+    void hold_loop() noexcept;
+    void release_loop() noexcept;
+
+    /// True while at least one hold is outstanding, i.e. this set is currently
+    /// keeping the Event loop alive. Exposed for tests.
+    bool holding_loop() const noexcept;
+
+private:
+    explicit SignalSet(UniqueHandle<Self> self) noexcept;
+
+    UniqueHandle<Self> self;
+};
+
 struct Idle {
     Idle() noexcept;
 
@@ -87,7 +213,9 @@ struct Idle {
 
     void stop();
 
-    Task<> wait();
+    /// Single-consumer: a second concurrent wait fails with
+    /// k_connection_already_in_progress rather than resuming spuriously.
+    Task<void, Error> wait();
 
 private:
     explicit Idle(UniqueHandle<Self> self) noexcept;
@@ -115,7 +243,9 @@ struct Prepare {
 
     void stop();
 
-    Task<> wait();
+    /// Single-consumer: a second concurrent wait fails with
+    /// k_connection_already_in_progress rather than resuming spuriously.
+    Task<void, Error> wait();
 
 private:
     explicit Prepare(UniqueHandle<Self> self) noexcept;
@@ -143,7 +273,9 @@ struct Check {
 
     void stop();
 
-    Task<> wait();
+    /// Single-consumer: a second concurrent wait fails with
+    /// k_connection_already_in_progress rather than resuming spuriously.
+    Task<void, Error> wait();
 
 private:
     explicit Check(UniqueHandle<Self> self) noexcept;

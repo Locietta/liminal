@@ -1,0 +1,169 @@
+#include <chrono>
+#include <cstdio>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+#include <lighter/async/async.h>
+#include <lighter/types.hpp>
+
+namespace {
+
+using namespace lighter;
+using namespace std::chrono_literals;
+
+void require(bool condition, std::string message) {
+    if (!condition) {
+        throw std::runtime_error(std::move(message));
+    }
+}
+
+/// Finishes well inside any budget used below.
+Task<i32, Error> quick(i32 value) {
+    co_await sleep(1ms);
+    co_return value;
+}
+
+Task<i32, Error> immediate(i32 value) { co_return value; }
+
+/// Runs far longer than any budget used below. `finished` stays false unless
+/// the Task was allowed to run to completion, which is how the tests detect a
+/// Task that outlived its timeout.
+Task<i32, Error> slow(bool &finished) {
+    co_await sleep(2s);
+    finished = true;
+    co_return 7;
+}
+
+Task<i32, Error> fails_fast() {
+    co_await sleep(1ms);
+    co_await fail(Error::k_permission_denied);
+    co_return 0;
+}
+
+/// The wrapped Task beats the budget: its value is forwarded untouched.
+Task<void, Error> value_wins(bool &ok) {
+    auto result = co_await with_timeout(quick(42), 1s);
+    ok = result.has_value() && *result == 42;
+}
+
+/// The budget expires first: the result is a timeout Error and the wrapped Task
+/// must have been cancelled rather than left running.
+Task<void, Error> timeout_wins(bool &ok, bool &inner_finished) {
+    auto result = co_await with_timeout(slow(inner_finished), 10ms);
+    ok = result.has_error() && result.error() == Error::k_connection_timed_out;
+}
+
+/// A structured Error outranks the timeout and is forwarded as-is.
+Task<void, Error> error_beats_timeout(bool &ok) {
+    auto result = co_await with_timeout(fails_fast(), 1s);
+    ok = result.has_error() && result.error() == Error::k_permission_denied;
+}
+
+/// An outer token cancelling the race must cancel, not time out: the two must
+/// stay distinguishable at the call site.
+Task<void, Error> outer_cancel_wins(bool &ok) {
+    CancellationSource source;
+
+    auto canceller = [](CancellationSource &source) -> Task<void, Error> {
+        co_await sleep(5ms);
+        source.cancel();
+    };
+
+    bool inner_finished = false;
+    auto guarded = with_token(with_timeout(slow(inner_finished), 5s), source.token());
+    auto result = co_await WhenAll(std::move(guarded), canceller(source));
+
+    ok = result.is_cancelled();
+}
+
+/// A zero budget times out work once it suspends.
+Task<void, Error> zero_budget(bool &ok) {
+    bool inner_finished = false;
+    auto result = co_await with_timeout(slow(inner_finished), 0ms);
+    ok = result.has_error() && result.error() == Error::k_connection_timed_out;
+}
+
+/// A zero-delay libuv Timer cannot fire until the next loop iteration, so work
+/// that completes in its initial turn wins.
+Task<void, Error> zero_budget_allows_immediate(bool &ok) {
+    auto result = co_await with_timeout(immediate(23), 0ms);
+    ok = result.has_value() && *result == 23;
+}
+
+/// A negative budget must time out promptly rather than hang.
+///
+/// This is what a caller gets from `deadline - now()` once the deadline has
+/// passed - the idiom that replaced with_deadline() - so the clamp matters more
+/// now, not less. Unclamped it would trip Timer::start's non-negative check, or
+/// cast to a huge u64 and wait effectively forever.
+Task<void, Error> negative_budget(bool &ok) {
+    bool inner_finished = false;
+    auto result = co_await with_timeout(slow(inner_finished), -5s);
+    ok = result.has_error() && result.error() == Error::k_connection_timed_out;
+}
+
+/// A void-valued Task round-trips through with_timeout().
+Task<void, Error> void_value(bool &ok) {
+    auto body = []() -> Task<void, Error> { co_await sleep(1ms); };
+    auto result = co_await with_timeout(body(), 1s);
+    ok = result.has_value();
+}
+
+/// A steady-clock deadline subtraction keeps its native duration type.
+Task<void, Error> native_clock_duration(bool &ok) {
+    const auto deadline = std::chrono::steady_clock::now() + 1s;
+    auto result = co_await with_timeout(quick(17), deadline - std::chrono::steady_clock::now());
+    ok = result.has_value() && *result == 17;
+}
+
+i32 run_all() {
+    EventLoop loop;
+
+    bool value_ok = false;
+    bool timeout_ok = false;
+    bool inner_finished = false;
+    bool error_ok = false;
+    bool cancel_ok = false;
+    bool zero_ok = false;
+    bool zero_immediate_ok = false;
+    bool negative_ok = false;
+    bool void_ok = false;
+    bool native_duration_ok = false;
+
+    loop.schedule(value_wins(value_ok));
+    loop.schedule(timeout_wins(timeout_ok, inner_finished));
+    loop.schedule(error_beats_timeout(error_ok));
+    loop.schedule(outer_cancel_wins(cancel_ok));
+    loop.schedule(zero_budget(zero_ok));
+    loop.schedule(zero_budget_allows_immediate(zero_immediate_ok));
+    loop.schedule(negative_budget(negative_ok));
+    loop.schedule(void_value(void_ok));
+    loop.schedule(native_clock_duration(native_duration_ok));
+    loop.run();
+
+    require(value_ok, "a Task that beats its budget must forward its value");
+    require(timeout_ok, "an expired budget must fail with k_connection_timed_out");
+    require(!inner_finished, "a timed-out Task must be cancelled, not left running");
+    require(error_ok, "a structured Error must outrank the timeout");
+    require(cancel_ok, "an outer token must cancel rather than time out");
+    require(zero_ok, "a zero budget must time out suspended work");
+    require(zero_immediate_ok, "a zero budget must allow work that completes without suspending");
+    require(negative_ok, "a negative budget must time out rather than hang");
+    require(void_ok, "a void-valued Task must round-trip through with_timeout");
+    require(native_duration_ok, "with_timeout must accept a steady_clock::duration");
+
+    return 0;
+}
+
+} // namespace
+
+int main() {
+    try {
+        return run_all();
+    } catch (const std::exception &e) {
+        std::fputs(e.what(), stderr);
+        std::fputc('\n', stderr);
+        return 1;
+    }
+}

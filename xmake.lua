@@ -25,9 +25,15 @@ if is_os("windows") then
     add_defines("_CRT_SECURE_NO_WARNINGS")
     add_defines("WIN32_LEAN_AND_MEAN", "UNICODE", "_UNICODE", "NOMINMAX", "_WINDOWS")
     -- set_policy("build.optimization.lto", true)
--- elseif is_os("linux") then
---     -- gcc has an ICE on std::source_location::current() when used in coroutines, so we use clang instead
---     set_toolchains("clang")
+
+    option("__msys2_package_manager")
+        set_showmenu(false)
+        on_check(function (option)
+            import("package.manager.msys2.register")()
+            option:enable(true)
+        end)
+    option_end()
+
 end
 
 add_repositories("loia-pinned xmake", {rootdir = os.scriptdir()})
@@ -37,14 +43,6 @@ option("__pixi_package_manager")
     set_showmenu(false)
     on_check(function (option)
         import("package.manager.pixi.register")()
-        option:enable(true)
-    end)
-option_end()
-
-option("__msys2_package_manager")
-    set_showmenu(false)
-    on_check(function (option)
-        import("package.manager.msys2.register")()
         option:enable(true)
     end)
 option_end()

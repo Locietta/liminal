@@ -158,6 +158,19 @@ void EventLoop::schedule(AsyncNode &frame, std::source_location loc) {
     loop->tasks.push_back(&frame);
 }
 
+void EventLoop::start(AsyncNode &frame, std::source_location loc) {
+    assert(self && "start: no Event loop in this thread");
+    assert(frame.state == AsyncNode::PENDING && "start requires a pending Task");
+
+    frame.state = AsyncNode::RUNNING;
+    frame.location = loc;
+
+    auto *previous = current_loop;
+    current_loop = this;
+    frame.resume();
+    current_loop = previous;
+}
+
 static void drain_deferred_queue(EventLoop::Self *self) {
     while (!self->deferred.empty()) {
         auto batch = std::move(self->deferred);

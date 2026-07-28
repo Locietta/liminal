@@ -10,10 +10,12 @@
 #include <lighter/async/io/udp.h>
 #include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/debug.h>
+#include <lighter/async/runtime/interrupt.h>
 #include <lighter/async/runtime/node.h>
 #include <lighter/async/runtime/sync.h>
 #include <lighter/async/runtime/task.h>
 #include <lighter/async/runtime/task_group.h>
+#include <lighter/async/runtime/timeout.h>
 #include <lighter/async/runtime/traits.h>
 #include <lighter/async/runtime/walk.h>
 #include <lighter/async/runtime/when.h>
