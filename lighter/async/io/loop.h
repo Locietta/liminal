@@ -14,6 +14,7 @@
 namespace lighter {
 
 struct AsyncNode;
+struct InterruptSource;
 
 template <typename T, typename E, typename C>
 struct Task;
@@ -107,6 +108,7 @@ struct EventLoop {
     Self *operator->() { return self.get(); }
 
     friend struct AsyncNode;
+    friend struct InterruptSource;
 
     operator uv_loop_t &() noexcept;
 
@@ -157,6 +159,10 @@ struct EventLoop {
     void drain_deferred();
 
 private:
+    /// Starts a lifetime-bound background Task immediately so its owner can
+    /// cancel it before run().
+    void start(AsyncNode &frame, std::source_location location = std::source_location::current());
+
     void schedule(AsyncNode &frame, std::source_location location);
 
     std::unique_ptr<Self> self;

@@ -276,6 +276,26 @@ void check_source_does_not_block_shutdown() {
     require(ran, "scheduled work must run");
 }
 
+/// A source may be destroyed before EventLoop::run().
+void check_source_can_die_before_run() {
+    EventLoop loop;
+
+    {
+        auto interrupts = InterruptSource::create(loop);
+        require(interrupts.has_value(), "InterruptSource::create failed");
+    }
+
+    bool ran = false;
+    auto work = [](bool &ran) -> Task<void, Error> {
+        ran = true;
+        co_return;
+    };
+    loop.schedule(work(ran));
+    loop.run();
+
+    require(ran, "the loop must remain usable after an unstarted InterruptSource is destroyed");
+}
+
 /// Runs one Task to completion on its own loop.
 ///
 /// Each signal case gets a private loop and runs to completion before the next
@@ -295,6 +315,7 @@ i32 run_all() {
     check_undeliverable_kind_rejected();
     check_loop_holds_nest();
     check_source_does_not_block_shutdown();
+    check_source_can_die_before_run();
 
 #ifndef _WIN32
     auto got = SignalKind::QUIT;

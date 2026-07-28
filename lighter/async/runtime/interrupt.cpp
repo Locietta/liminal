@@ -139,10 +139,11 @@ Result<InterruptSource> InterruptSource::create(std::span<const SignalKind> fata
     self->signals = std::move(*signals);
     self->fatal = std::move(fatal_kinds);
 
-    // Start the pump only once Self sits at its final address: run_pump holds a
-    // raw pointer to it and the Task is stored back into the same object.
+    // Start the pump only once Self sits at its final address. Starting it
+    // eagerly also ensures destruction can cancel a suspended Task instead of
+    // destroying a frame still queued inside EventLoop.
     self->pump = run_pump(self.get());
-    loop.schedule(self->pump);
+    loop.start(*self->pump.operator->());
 
     return InterruptSource(std::move(self));
 }
