@@ -188,6 +188,25 @@ Task<void, Error> rejects_overlapping_next(bool &first_ok, bool &second_rejected
     co_await WhenAll(first(*interrupts, first_ok), second(*interrupts, second_rejected), raiser());
 }
 
+/// Repeated pending notifications of one kind are coalesced, while fatal
+/// deliveries still count individually for escalation.
+Task<void, Error> coalesces_pending_kinds(bool &ordered, i32 &fatal_count) {
+    auto interrupts = InterruptSource::create({SignalKind::TERM}, {SignalKind::WINCH}, EventLoop::current());
+    require(interrupts.has_value(), "InterruptSource::create failed");
+
+    std::raise(SIGTERM);
+    co_await sleep(5ms);
+    std::raise(SIGTERM);
+    co_await sleep(5ms);
+    std::raise(SIGWINCH);
+    co_await sleep(5ms);
+
+    const auto first = co_await interrupts->next().or_fail();
+    const auto second = co_await interrupts->next().or_fail();
+    ordered = first == SignalKind::TERM && second == SignalKind::WINCH;
+    fatal_count = interrupts->interrupt_count();
+}
+
 /// A pending wait must keep the event loop alive on its own.
 ///
 /// The watchers are deliberately unreferenced while merely installed, so a
@@ -328,6 +347,8 @@ i32 run_all() {
     bool first_ok = false;
     bool second_rejected = false;
     bool kept_alive = false;
+    bool coalesced_ordered = false;
+    i32 coalesced_fatal_count = 0;
 
     run_isolated([&] { return reports_which_signal(got); });
     run_isolated([&] { return queues_while_idle(drained); });
@@ -335,6 +356,7 @@ i32 run_all() {
     run_isolated([&] { return observes_without_cancelling(seen, still_live); });
     run_isolated([&] { return rejects_overlapping_next(first_ok, second_rejected); });
     run_isolated([&] { return wait_keeps_loop_alive(kept_alive); });
+    run_isolated([&] { return coalesces_pending_kinds(coalesced_ordered, coalesced_fatal_count); });
 
     require(got == SignalKind::TERM, "SignalSet must report TERM, got " + std::string(enum_name(got)));
     require(drained.size() == 2, "both queued signals must be drained");
@@ -347,6 +369,8 @@ i32 run_all() {
     require(first_ok, "the first next() must still receive its signal");
     require(second_rejected, "an overlapping next() must fail rather than hang");
     require(kept_alive, "a pending wait must keep the loop alive by itself");
+    require(coalesced_ordered, "duplicate pending signal kinds must be coalesced without reordering distinct kinds");
+    require(coalesced_fatal_count == 2, "coalescing notifications must not lose fatal interrupt counts");
 #endif
 
     return 0;

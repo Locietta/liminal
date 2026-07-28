@@ -24,6 +24,8 @@ Task<i32, Error> quick(i32 value) {
     co_return value;
 }
 
+Task<i32, Error> immediate(i32 value) { co_return value; }
+
 /// Runs far longer than any budget used below. `finished` stays false unless
 /// the Task was allowed to run to completion, which is how the tests detect a
 /// Task that outlived its timeout.
@@ -75,11 +77,18 @@ Task<void, Error> outer_cancel_wins(bool &ok) {
     ok = result.is_cancelled();
 }
 
-/// A zero budget still fails with a timeout rather than hanging.
+/// A zero budget times out work once it suspends.
 Task<void, Error> zero_budget(bool &ok) {
     bool inner_finished = false;
     auto result = co_await with_timeout(slow(inner_finished), 0ms);
     ok = result.has_error() && result.error() == Error::k_connection_timed_out;
+}
+
+/// A zero-delay libuv Timer cannot fire until the next loop iteration, so work
+/// that completes in its initial turn wins.
+Task<void, Error> zero_budget_allows_immediate(bool &ok) {
+    auto result = co_await with_timeout(immediate(23), 0ms);
+    ok = result.has_value() && *result == 23;
 }
 
 /// A negative budget must time out promptly rather than hang.
@@ -117,6 +126,7 @@ i32 run_all() {
     bool error_ok = false;
     bool cancel_ok = false;
     bool zero_ok = false;
+    bool zero_immediate_ok = false;
     bool negative_ok = false;
     bool void_ok = false;
     bool native_duration_ok = false;
@@ -126,6 +136,7 @@ i32 run_all() {
     loop.schedule(error_beats_timeout(error_ok));
     loop.schedule(outer_cancel_wins(cancel_ok));
     loop.schedule(zero_budget(zero_ok));
+    loop.schedule(zero_budget_allows_immediate(zero_immediate_ok));
     loop.schedule(negative_budget(negative_ok));
     loop.schedule(void_value(void_ok));
     loop.schedule(native_clock_duration(native_duration_ok));
@@ -136,7 +147,8 @@ i32 run_all() {
     require(!inner_finished, "a timed-out Task must be cancelled, not left running");
     require(error_ok, "a structured Error must outrank the timeout");
     require(cancel_ok, "an outer token must cancel rather than time out");
-    require(zero_ok, "a zero budget must time out");
+    require(zero_ok, "a zero budget must time out suspended work");
+    require(zero_immediate_ok, "a zero budget must allow work that completes without suspending");
     require(negative_ok, "a negative budget must time out rather than hang");
     require(void_ok, "a void-valued Task must round-trip through with_timeout");
     require(native_duration_ok, "with_timeout must accept a steady_clock::duration");

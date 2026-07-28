@@ -95,8 +95,10 @@ Task<void, Error, Cancellation> run_pump(InterruptSource::Self *self) {
             self->source.cancel();
         }
 
-        self->observed.push_back(kind);
-        self->ready.set();
+        if (std::ranges::find(self->observed, kind) == self->observed.end()) {
+            self->observed.push_back(kind);
+            self->ready.set();
+        }
     }
 }
 

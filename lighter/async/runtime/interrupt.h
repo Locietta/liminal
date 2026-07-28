@@ -24,7 +24,8 @@ namespace lighter {
 ///
 /// Typical use:
 ///
-///   auto interrupts = InterruptSource::create().value();
+///   EventLoop loop;
+///   auto interrupts = InterruptSource::create(loop).value();
 ///   loop.schedule(with_token(run_agent_turn(), interrupts.token()));
 ///
 /// Cancellation is sticky: once a fatal signal has arrived the token stays
@@ -76,9 +77,14 @@ struct InterruptSource {
 
     /// Resolves with the next signal of any kind, fatal ones included.
     ///
-    /// Signals are queued, so a caller that only wants resize events can loop
-    /// on this without missing them. Single-consumer: overlapping calls fail
-    /// with k_connection_already_in_progress.
+    /// At most one pending notification is retained per signal kind; repeated
+    /// deliveries of the same kind are coalesced until it is consumed. Fatal
+    /// deliveries are still counted individually by interrupt_count().
+    ///
+    /// The InterruptSource must outlive every Task returned by next(). In the
+    /// usual setup it lives for the loop's whole run, with EventLoop outliving
+    /// the source. Single-consumer: overlapping calls fail with
+    /// k_connection_already_in_progress.
     Task<SignalKind, Error> next();
 
     /// Number of fatal signals delivered so far. A value of 2 or more means the

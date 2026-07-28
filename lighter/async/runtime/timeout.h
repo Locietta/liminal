@@ -41,6 +41,10 @@ constexpr inline usize k_timeout_timer_index = 1;
 /// Task and the Timer have reached a terminal state - so the Task is never left
 /// running past the point where this Task resumes its caller.
 ///
+/// A zero budget is cooperative: the Task gets its first turn before libuv can
+/// dispatch the zero-delay Timer. Work that completes without suspending wins;
+/// once it suspends, the Timer is eligible on the next loop iteration.
+///
 /// For an absolute deadline, subtract at the point the work starts:
 ///
 ///   co_await with_timeout(step(), deadline - std::chrono::steady_clock::now());
