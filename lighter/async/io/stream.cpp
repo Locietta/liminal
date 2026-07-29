@@ -1,7 +1,7 @@
 #include "stream.h"
 
 #include <algorithm>
-#include <cassert>
+#include <contracts>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -56,7 +56,7 @@ struct StreamReadAwait : uv::AwaitOp<StreamReadAwait> {
 
     static void on_alloc(uv_handle_t *handle, usize, uv_buf_t *buf) {
         auto s = static_cast<Stream::Self *>(handle->data);
-        assert(s != nullptr && "on_alloc requires Stream state in handle->data");
+        contract_assert(s != nullptr);
 
         auto [dst, writable] = s->buffer.get_write_ptr();
         buf->base = dst;
@@ -71,7 +71,7 @@ struct StreamReadAwait : uv::AwaitOp<StreamReadAwait> {
     // When nread=0, it means no data was read but the Stream is still alive (e.g., EAGAIN).
     static void on_read(uv_stream_t *stream, isize nread, const uv_buf_t *) {
         auto s = static_cast<Stream::Self *>(stream->data);
-        assert(s != nullptr && "on_read requires Stream state in stream->data");
+        contract_assert(s != nullptr);
         if (auto err = uv::status_to_error(nread)) {
             uv::read_stop(*stream);
             s->active_read_mode = Stream::Self::ReadMode::NONE;
@@ -146,7 +146,7 @@ struct StreamReadSomeAwait : uv::AwaitOp<StreamReadSomeAwait> {
 
     static void on_alloc(uv_handle_t *handle, usize, uv_buf_t *buf) {
         auto s = static_cast<Stream::Self *>(handle->data);
-        assert(s != nullptr && "on_alloc requires Stream state in handle->data");
+        contract_assert(s != nullptr);
 
         // stop() calls uv_read_stop then disarm(), but libuv may still invoke
         // a queued on_alloc callback after the stop. Tolerate waiter == nullptr
@@ -166,7 +166,7 @@ struct StreamReadSomeAwait : uv::AwaitOp<StreamReadSomeAwait> {
     // When nread=0, it means no data was read but the Stream is still alive (e.g., EAGAIN).
     static void on_read(uv_stream_t *stream, isize nread, const uv_buf_t *) {
         auto s = static_cast<Stream::Self *>(stream->data);
-        assert(s != nullptr && "on_read requires Stream state in stream->data");
+        contract_assert(s != nullptr);
 
         // stop() may have already disarmed the waiter. If a queued on_read
         // fires after stop(), there is nothing left to complete - just bail out.
@@ -246,8 +246,8 @@ struct StreamWriteAwait : uv::AwaitOp<StreamWriteAwait> {
 
     static void on_write(uv_write_t *req, i32 status) {
         auto *aw = static_cast<StreamWriteAwait *>(req->data);
-        assert(aw != nullptr && "on_write requires Awaiter in req->data");
-        assert(aw->self != nullptr && "on_write requires Stream state");
+        contract_assert(aw != nullptr);
+        contract_assert(aw->self != nullptr);
 
         aw->mark_cancelled_if(status);
 
@@ -420,7 +420,6 @@ Task<void, Error> Stream::write(std::span<const char> data) {
     }
 
     if (self->writer.has_waiter()) {
-        assert(false && "Stream::write supports a single writer at a time");
         co_await fail(Error::k_invalid_argument);
     }
 

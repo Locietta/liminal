@@ -1,7 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <cassert>
+#include <contracts>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -272,16 +272,10 @@ public:
     }
 
     /// Return a StringRef with the first n elements dropped.
-    [[nodiscard]] constexpr StringRef drop_front(usize n = 1) const {
-        assert(size() >= n && "Dropping more elements than exist");
-        return substr(n);
-    }
+    [[nodiscard]] constexpr StringRef drop_front(usize n = 1) const pre(size() >= n) { return substr(n); }
 
     /// Return a StringRef with the last n elements dropped.
-    [[nodiscard]] constexpr StringRef drop_back(usize n = 1) const {
-        assert(size() >= n && "Dropping more elements than exist");
-        return substr(0, size() - n);
-    }
+    [[nodiscard]] constexpr StringRef drop_back(usize n = 1) const pre(size() >= n) { return substr(0, size() - n); }
 
     /// Drop characters from the front while they satisfy the predicate.
     template <typename F>

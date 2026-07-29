@@ -1,6 +1,6 @@
 #include "request.h"
 
-#include <cassert>
+#include <contracts>
 
 #include <lighter/types.hpp>
 #include <lighter/async/io/awaiter.h>
@@ -56,13 +56,13 @@ Task<void, Error> queue(Function<void()> fn, Function<void()> on_cancel, EventLo
 
     auto work_cb = [](uv_work_t *req) {
         auto *holder = static_cast<WorkOp *>(req->data);
-        assert(holder != nullptr && "work_cb requires operation in req->data");
+        contract_assert(holder != nullptr);
         holder->fn();
     };
 
     auto after_cb = [](uv_work_t *req, i32 status) {
         auto *holder = static_cast<WorkOp *>(req->data);
-        assert(holder != nullptr && "after_cb requires operation in req->data");
+        contract_assert(holder != nullptr);
 
         holder->mark_cancelled_if(status);
         holder->result = uv::status_to_error(status);

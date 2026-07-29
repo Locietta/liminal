@@ -1,7 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <cassert>
+#include <contracts>
 #include <compare>
 #include <cstddef>
 #include <initializer_list>
@@ -145,10 +145,7 @@ protected:
         this->m_capacity = static_cast<size_storage_type>(inline_capacity);
     }
 
-    constexpr void set_size(size_type count) noexcept {
-        assert(count <= capacity());
-        m_size = static_cast<size_storage_type>(count);
-    }
+    constexpr void set_size(size_type count) noexcept pre(count <= capacity()) { m_size = static_cast<size_storage_type>(count); }
 
 private:
     constexpr static usize k_header_alignment = alignof(pointer) > alignof(size_storage_type) ? alignof(pointer) :
@@ -171,22 +168,20 @@ protected:
         return std::ranges::subrange(first, last);
     }
 
-    [[nodiscard]] constexpr static auto counted_range(pointer first, size_type count) noexcept {
+    [[nodiscard]] constexpr static auto counted_range(pointer first, size_type count) noexcept pre(first != nullptr || count == 0) {
         if (count == 0) {
             return pointer_range(first, first);
         }
 
-        assert(first != nullptr);
         return pointer_range(first, first + static_cast<difference_type>(count));
     }
 
     [[nodiscard]]
-    constexpr static auto counted_range(const_pointer first, size_type count) noexcept {
+    constexpr static auto counted_range(const_pointer first, size_type count) noexcept pre(first != nullptr || count == 0) {
         if (count == 0) {
             return pointer_range(first, first);
         }
 
-        assert(first != nullptr);
         return pointer_range(first, first + static_cast<difference_type>(count));
     }
 
@@ -260,8 +255,7 @@ private:
             }
             return new_size <= capacity();
         };
-        assert(safe() && "Attempting to reference an element of the vector in an operation that "
-                         "invalidates it");
+        contract_assert(safe());
     }
 
     template <std::ranges::range Range>
@@ -708,8 +702,8 @@ protected:
     /// Adopt a pre-allocated buffer. The buffer must have been allocated with
     /// mem::allocate<value_type>. After this call, the HybridVector owns the
     /// buffer and will deallocate it on destruction.
-    constexpr void adopt_allocation(pointer data, size_type count, size_type cap) noexcept {
-        assert(count <= cap);
+    constexpr void adopt_allocation(pointer data, size_type count, size_type cap) noexcept pre(count <= cap)
+        pre(data != nullptr || cap == 0) {
         destroy_elements();
         if (begin() != inline_begin()) {
             mem::deallocate(this->m_begin, this->m_capacity);
@@ -855,15 +849,9 @@ public:
                            (std::numeric_limits<size_type>::max)() / sizeof(value_type));
     }
 
-    [[nodiscard]] constexpr reference operator[](size_type idx) noexcept {
-        assert(idx < size());
-        return begin()[idx];
-    }
+    [[nodiscard]] constexpr reference operator[](size_type idx) noexcept pre(idx < size()) { return begin()[idx]; }
 
-    [[nodiscard]] constexpr const_reference operator[](size_type idx) const noexcept {
-        assert(idx < size());
-        return begin()[idx];
-    }
+    [[nodiscard]] constexpr const_reference operator[](size_type idx) const noexcept pre(idx < size()) { return begin()[idx]; }
 
     constexpr reference at(size_type idx) {
         if (idx >= size()) {
@@ -879,25 +867,13 @@ public:
         return (*this)[idx];
     }
 
-    [[nodiscard]] constexpr reference front() noexcept {
-        assert(!empty());
-        return begin()[0];
-    }
+    [[nodiscard]] constexpr reference front() noexcept pre(!empty()) { return begin()[0]; }
 
-    [[nodiscard]] constexpr const_reference front() const noexcept {
-        assert(!empty());
-        return begin()[0];
-    }
+    [[nodiscard]] constexpr const_reference front() const noexcept pre(!empty()) { return begin()[0]; }
 
-    [[nodiscard]] constexpr reference back() noexcept {
-        assert(!empty());
-        return end()[-1];
-    }
+    [[nodiscard]] constexpr reference back() noexcept pre(!empty()) { return end()[-1]; }
 
-    [[nodiscard]] constexpr const_reference back() const noexcept {
-        assert(!empty());
-        return end()[-1];
-    }
+    [[nodiscard]] constexpr const_reference back() const noexcept pre(!empty()) { return end()[-1]; }
 
     constexpr void clear() noexcept { destroy_elements(); }
 
@@ -929,10 +905,7 @@ public:
         resize_fill(count, value);
     }
 
-    constexpr void truncate(size_type count) {
-        assert(count <= size());
-        shrink_to_size(count);
-    }
+    constexpr void truncate(size_type count) pre(count <= size()) { shrink_to_size(count); }
 
     constexpr void push_back(value_type value)
         requires(takes_param_by_value)
@@ -973,16 +946,12 @@ public:
         return back();
     }
 
-    constexpr void pop_back() noexcept {
-        assert(!empty());
+    constexpr void pop_back() noexcept pre(!empty()) {
         this->set_size(size() - 1);
         mem::destroy(end());
     }
 
-    constexpr void pop_back_n(size_type count) noexcept {
-        assert(count <= size());
-        truncate(size() - count);
-    }
+    constexpr void pop_back_n(size_type count) noexcept pre(count <= size()) { truncate(size() - count); }
 
     [[nodiscard]] constexpr value_type pop_back_val() {
         value_type result = std::move(back());
@@ -1087,23 +1056,20 @@ public:
 
     constexpr iterator insert(iterator pos, value_type value)
         requires(takes_param_by_value)
-    {
-        assert(valid_insert_position(pos));
+    pre(valid_insert_position(pos)) {
         return insert_one_impl(pos, value);
     }
 
     constexpr iterator insert(iterator pos, const_reference value)
         requires(!takes_param_by_value)
-    {
-        assert(valid_insert_position(pos));
+    pre(valid_insert_position(pos)) {
         auto tmp = make_temporary(value);
         return insert_one_impl(pos, std::move(tmp.release()));
     }
 
     constexpr iterator insert(iterator pos, value_type &&value)
         requires(!takes_param_by_value)
-    {
-        assert(valid_insert_position(pos));
+    pre(valid_insert_position(pos)) {
         if (references_storage(std::addressof(value))) {
             auto tmp = make_temporary(std::move(value));
             return insert_one_impl(pos, std::move(tmp.release()));
@@ -1113,22 +1079,19 @@ public:
 
     constexpr iterator insert(iterator pos, size_type count, value_type value)
         requires(takes_param_by_value)
-    {
-        assert(valid_insert_position(pos));
+    pre(valid_insert_position(pos)) {
         return insert_copies(pos, count, value);
     }
 
     constexpr iterator insert(iterator pos, size_type count, const_reference value)
         requires(!takes_param_by_value)
-    {
-        assert(valid_insert_position(pos));
+    pre(valid_insert_position(pos)) {
         auto tmp = make_temporary(value);
         return insert_copies(pos, count, tmp.get());
     }
 
     template <detail::small_vector_compatible_range<value_type> Range>
-    constexpr iterator insert(iterator pos, Range &&range) {
-        assert(valid_insert_position(pos));
+    constexpr iterator insert(iterator pos, Range &&range) pre(valid_insert_position(pos)) {
         if constexpr (std::ranges::forward_range<Range>) {
             return insert_forward_range(pos, std::forward<Range>(range));
         } else {
@@ -1147,13 +1110,9 @@ public:
         return insert(pos, std::move(tmp.release()));
     }
 
-    constexpr iterator erase(const_iterator pos) {
-        assert(valid_erase_range(pos, std::next(pos)));
-        return erase(pos, pos + 1);
-    }
+    constexpr iterator erase(const_iterator pos) pre(valid_insert_position(pos) && pos != end()) { return erase(pos, pos + 1); }
 
-    constexpr iterator erase(const_iterator first, const_iterator last) {
-        assert(valid_erase_range(first, last));
+    constexpr iterator erase(const_iterator first, const_iterator last) pre(valid_erase_range(first, last)) {
         if (first == last) {
             return const_cast<pointer>(first);
         }

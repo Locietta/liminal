@@ -1,8 +1,8 @@
 #pragma once
 
 #include <algorithm>
-#include <cassert>
 #include <concepts>
+#include <contracts>
 #include <cstdlib>
 #include <initializer_list>
 #include <meta>
@@ -17,6 +17,7 @@
 
 #include <lighter/types.hpp>
 #include <lighter/utils/config.h>
+#include <lighter/utils/panic.h>
 #include <lighter/utils/type_traits.h>
 #include <lighter/async/runtime/node.h>
 #include <lighter/async/runtime/task.h>
@@ -147,7 +148,7 @@ auto strip_channels_from_result(Outcome<T, E, C> &&result) {
                                     Outcome<T, void, C>>;
 
     if constexpr (!std::is_void_v<E>) {
-        assert(!result.has_error());
+        contract_assert(!result.has_error());
     }
 
     if constexpr (!std::is_void_v<C>) {
@@ -156,7 +157,7 @@ auto strip_channels_from_result(Outcome<T, E, C> &&result) {
                 return type(outcome_cancel(std::move(result).cancellation()));
             }
         } else {
-            assert(!result.is_cancelled());
+            contract_assert(!result.is_cancelled());
         }
     }
 
@@ -210,8 +211,7 @@ Return tuple_visit_at_return(usize index, Tuple &tuple, F &&f) {
         }
         return tuple_visit_at_return<Return, I + 1>(index, tuple, std::forward<F>(f));
     } else {
-        assert(false && "tuple_visit_at_return index out of bounds");
-        std::abort();
+        lighter::panic("tuple_visit_at_return index out of bounds");
     }
 }
 
@@ -219,8 +219,7 @@ Return tuple_visit_at_return(usize index, Tuple &tuple, F &&f) {
 #if LIGHTER_ENABLE_EXCEPTIONS
     throw std::invalid_argument("WhenAny(range) requires a non-empty range");
 #else
-    assert(false && "WhenAny(range) requires a non-empty range");
-    LIGHTER_THROW(std::invalid_argument("WhenAny(range) requires a non-empty range"));
+    lighter::panic("WhenAny(range) requires a non-empty range");
 #endif
 }
 

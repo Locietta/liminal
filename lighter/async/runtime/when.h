@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cassert>
+#include <contracts>
 #include <cstdlib>
 #include <optional>
 #include <ranges>
@@ -15,6 +15,7 @@
 #include <lighter/utils/small_vector.h>
 #include <lighter/async/runtime/node.h>
 #include <lighter/async/runtime/traits.h>
+#include <lighter/utils/panic.h>
 #include <lighter/async/vocab/outcome.h>
 
 namespace lighter {
@@ -73,11 +74,10 @@ public:
                     using task_t = std::remove_reference_t<decltype(task)>;
                     if constexpr (!std::is_void_v<detail::task_error_type_t<task_t>>) {
                         auto result = detail::take_result(task);
-                        assert(result.has_error());
+                        contract_assert(result.has_error());
                         return error_type(std::move(result).error());
                     } else {
-                        assert(false && "Error child must expose an Error channel");
-                        std::abort();
+                        lighter::panic("Error child must expose an Error channel");
                     }
                 });
                 return result_type(outcome_error(std::move(error)));
@@ -86,14 +86,14 @@ public:
 
         if constexpr (!std::is_void_v<cancel_type>) {
             if (this->state == AsyncNode::CANCELLED) {
-                assert(first_cancel_child != AggregateOp::k_npos && "INTERCEPT_CANCEL aggregate cancelled with no attributed child");
+                contract_assert(first_cancel_child != AggregateOp::k_npos);
                 auto cancel = detail::tuple_visit_at_return<cancel_type>(first_cancel_child, tasks, [&](auto, auto &task) -> cancel_type {
                     using task_t = std::remove_reference_t<decltype(task)>;
                     if constexpr (std::is_void_v<detail::task_cancel_type_t<task_t>>) {
                         return cancel_type(Cancellation{});
                     } else {
                         auto result = detail::take_result(task);
-                        assert(result.is_cancelled());
+                        contract_assert(result.is_cancelled());
                         return cancel_type(std::move(result).cancellation());
                     }
                 });
@@ -116,7 +116,7 @@ private:
                 return success_type(detail::take_success_result<capture_cancel>(std::get<I>(tasks))...);
             }(std::index_sequence_for<Tasks...>{});
         } else {
-            assert(winner != AggregateOp::k_npos && "WhenAny winner not set");
+            contract_assert(winner != AggregateOp::k_npos);
             return detail::tuple_visit_at_return<success_type>(winner, tasks, [&](auto I, auto &task) -> success_type {
                 return success_type(std::in_place_index<I.value>, detail::take_success_result<capture_cancel>(task));
             });
@@ -187,16 +187,16 @@ public:
         if constexpr (!std::is_void_v<error_type>) {
             if (first_error_child != AggregateOp::k_npos) {
                 auto result = detail::take_result(tasks[first_error_child]);
-                assert(result.has_error());
+                contract_assert(result.has_error());
                 return result_type(outcome_error(error_type(std::move(result).error())));
             }
         }
 
         if constexpr (!std::is_void_v<cancel_type>) {
             if (this->state == AsyncNode::CANCELLED) {
-                assert(first_cancel_child != AggregateOp::k_npos && "INTERCEPT_CANCEL aggregate cancelled with no attributed child");
+                contract_assert(first_cancel_child != AggregateOp::k_npos);
                 auto result = detail::take_result(tasks[first_cancel_child]);
-                assert(result.is_cancelled());
+                contract_assert(result.is_cancelled());
                 return result_type(outcome_cancel(std::move(result).cancellation()));
             }
         }
@@ -219,7 +219,7 @@ private:
             }
             return results;
         } else {
-            assert(winner != AggregateOp::k_npos && "WhenAny winner not set");
+            contract_assert(winner != AggregateOp::k_npos);
             return success_type{winner, detail::take_success_result<capture_cancel>(tasks[winner])};
         }
     }

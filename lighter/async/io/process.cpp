@@ -1,6 +1,6 @@
 #include "process.h"
 
-#include <cassert>
+#include <contracts>
 #include <csignal>
 
 #include <lighter/types.hpp>
@@ -185,7 +185,7 @@ Result<Process::SpawnResult> Process::spawn(const Options &opts, EventLoop &loop
     uv_process_options_t uv_opts{};
     uv_opts.exit_cb = +[](uv_process_t *handle, i64 exit_status, i32 term_signal) {
         auto *self = static_cast<Process::Self *>(handle->data);
-        assert(self != nullptr && "Process exit callback requires Process state in handle->data");
+        contract_assert(self != nullptr);
 
         ProcessAwait::notify(*self, Process::ExitStatus{exit_status, term_signal});
     };

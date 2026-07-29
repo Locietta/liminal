@@ -1,6 +1,6 @@
 #include "stream.h"
 
-#include <cassert>
+#include <contracts>
 #include <type_traits>
 #include <utility>
 
@@ -98,9 +98,9 @@ template <typename Stream>
 void on_connection(uv_stream_t *server, i32 status) {
     using self_t = typename Acceptor<Stream>::Self;
 
-    assert(server != nullptr && "on_connection requires non-null server");
+    contract_assert(server != nullptr);
     auto *listener = static_cast<self_t *>(server->data);
-    assert(listener != nullptr && "on_connection requires listener state in server->data");
+    contract_assert(listener != nullptr);
 
     if (auto err = uv::status_to_error(status)) {
         listener->deliver(err);
@@ -193,7 +193,7 @@ struct ConnectAwait : uv::AwaitOp<ConnectAwait<Stream>> {
 
     static void on_connect(uv_connect_t *req, i32 status) {
         auto *aw = static_cast<ConnectAwait *>(req->data);
-        assert(aw != nullptr && "on_connect requires Awaiter in req->data");
+        contract_assert(aw != nullptr);
 
         aw->mark_cancelled_if(status);
 

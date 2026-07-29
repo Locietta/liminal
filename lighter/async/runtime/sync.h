@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cassert>
+#include <contracts>
 #include <source_location>
 
 #include <lighter/types.hpp>
@@ -28,10 +28,10 @@ struct SyncPrimitive {
     std::source_location location;
 
     /// Appends a waiter to the end of the wait queue.
-    void insert(WaitNode *link);
+    void insert(WaitNode *link) pre(link != nullptr && link->resource == nullptr && link->prev == nullptr && link->next == nullptr);
 
     /// Removes a waiter from the wait queue.
-    void remove(WaitNode *link);
+    void remove(WaitNode *link) pre(link != nullptr && link->resource == this);
 
     const WaitNode *get_head() const noexcept { return head; }
 
@@ -46,9 +46,9 @@ protected:
         return link;
     }
 
-    bool resume_waiter(WaitNode &link) noexcept;
+    bool resume_waiter(WaitNode &link) noexcept pre(link.parent != nullptr && EventLoop::has_current());
 
-    bool cancel_waiter(WaitNode &link) noexcept;
+    bool cancel_waiter(WaitNode &link) noexcept pre(link.parent != nullptr && EventLoop::has_current());
 
     /// Pops and processes every queued waiter.
     ///
@@ -116,8 +116,7 @@ struct Mutex : SyncPrimitive {
         return true;
     }
 
-    void unlock() noexcept {
-        assert(locked && "Mutex::unlock without lock");
+    void unlock() noexcept pre(locked) {
         while (auto *waiter = pop_waiter()) {
             if (resume_waiter(*waiter)) {
                 return;
@@ -131,9 +130,8 @@ private:
 };
 
 struct Semaphore : SyncPrimitive {
-    explicit Semaphore(isize initial = 0, std::source_location location = std::source_location::current())
+    explicit Semaphore(isize initial = 0, std::source_location location = std::source_location::current()) pre(initial >= 0)
         : SyncPrimitive(SyncPrimitive::Kind::SEMAPHORE) {
-        assert(initial >= 0 && "Semaphore initial count must be non-negative");
         this->location = location;
         count = initial;
     }
@@ -183,8 +181,7 @@ struct Semaphore : SyncPrimitive {
         return true;
     }
 
-    void release(isize n = 1) {
-        assert(n >= 0 && "Semaphore::release count must be non-negative");
+    void release(isize n = 1) pre(n >= 0) {
         for (isize i = 0; i < n; ++i) {
             bool transferred = false;
             if (has_waiters()) {

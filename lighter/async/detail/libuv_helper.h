@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cassert>
+#include <contracts>
 #include <concepts>
 #include <memory>
 #include <mutex>
@@ -163,91 +163,61 @@ ALWAYS_INLINE i32 run(uv_loop_t &loop, uv_run_mode mode) noexcept { return ::uv_
 
 ALWAYS_INLINE void stop(uv_loop_t &loop) noexcept { ::uv_stop(&loop); }
 
-ALWAYS_INLINE void walk(uv_loop_t &loop, uv_walk_cb cb, void *arg) noexcept {
-    assert(cb != nullptr && "uv::walk requires non-null callback");
-    ::uv_walk(&loop, cb, arg);
-}
+ALWAYS_INLINE void walk(uv_loop_t &loop, uv_walk_cb cb, void *arg) noexcept pre(cb != nullptr) { ::uv_walk(&loop, cb, arg); }
 
-ALWAYS_INLINE void idle_init(uv_loop_t &loop, uv_idle_t &handle) noexcept {
-    [[maybe_unused]] i32 rc = ::uv_idle_init(&loop, &handle);
-    assert(rc == 0 && "uv::idle_init failed");
-}
+ALWAYS_INLINE void idle_init(uv_loop_t &loop, uv_idle_t &handle) noexcept { [[maybe_unused]] i32 rc = ::uv_idle_init(&loop, &handle); }
 
-ALWAYS_INLINE void idle_start(uv_idle_t &handle, uv_idle_cb cb) noexcept {
-    assert(cb != nullptr && "uv::idle_start requires non-null callback");
+ALWAYS_INLINE void idle_start(uv_idle_t &handle, uv_idle_cb cb) noexcept pre(cb != nullptr) {
     [[maybe_unused]] i32 rc = ::uv_idle_start(&handle, cb);
-    assert(rc == 0 && "uv::idle_start failed");
+    // for cb != nullptr, idle start always succeeds
 }
 
-ALWAYS_INLINE void idle_stop(uv_idle_t &handle) noexcept {
-    [[maybe_unused]] i32 rc = ::uv_idle_stop(&handle);
-    assert(rc == 0 && "uv::idle_stop failed");
-}
+ALWAYS_INLINE void idle_stop(uv_idle_t &handle) noexcept { [[maybe_unused]] i32 rc = ::uv_idle_stop(&handle); }
 
 ALWAYS_INLINE void async_init(uv_loop_t &loop, uv_async_t &handle, uv_async_cb cb) noexcept {
     [[maybe_unused]] i32 rc = ::uv_async_init(&loop, &handle, cb);
-    assert(rc == 0 && "uv::async_init failed");
+    lighter::check(rc == 0, "uv_async_init failed");
 }
 
 ALWAYS_INLINE void async_send(uv_async_t &handle) noexcept {
     [[maybe_unused]] i32 rc = ::uv_async_send(&handle);
-    assert(rc == 0 && "uv::async_send failed");
+    lighter::check(rc == 0, "uv_async_send failed");
 }
 
 ALWAYS_INLINE void prepare_init(uv_loop_t &loop, uv_prepare_t &handle) noexcept {
     [[maybe_unused]] i32 rc = ::uv_prepare_init(&loop, &handle);
-    assert(rc == 0 && "uv::prepare_init failed");
 }
 
-ALWAYS_INLINE void prepare_start(uv_prepare_t &handle, uv_prepare_cb cb) noexcept {
-    assert(cb != nullptr && "uv::prepare_start requires non-null callback");
+ALWAYS_INLINE void prepare_start(uv_prepare_t &handle, uv_prepare_cb cb) noexcept pre(cb != nullptr) {
     [[maybe_unused]] i32 rc = ::uv_prepare_start(&handle, cb);
-    assert(rc == 0 && "uv::prepare_start failed");
+    // for cb != nullptr, prepare start always succeeds
 }
 
-ALWAYS_INLINE void prepare_stop(uv_prepare_t &handle) noexcept {
-    [[maybe_unused]] i32 rc = ::uv_prepare_stop(&handle);
-    assert(rc == 0 && "uv::prepare_stop failed");
-}
+ALWAYS_INLINE void prepare_stop(uv_prepare_t &handle) noexcept { [[maybe_unused]] i32 rc = ::uv_prepare_stop(&handle); }
 
-ALWAYS_INLINE void check_init(uv_loop_t &loop, uv_check_t &handle) noexcept {
-    [[maybe_unused]] i32 rc = ::uv_check_init(&loop, &handle);
-    assert(rc == 0 && "uv::check_init failed");
-}
+ALWAYS_INLINE void check_init(uv_loop_t &loop, uv_check_t &handle) noexcept { [[maybe_unused]] i32 rc = ::uv_check_init(&loop, &handle); }
 
-ALWAYS_INLINE void check_start(uv_check_t &handle, uv_check_cb cb) noexcept {
-    assert(cb != nullptr && "uv::check_start requires non-null callback");
+ALWAYS_INLINE void check_start(uv_check_t &handle, uv_check_cb cb) noexcept pre(cb != nullptr) {
     [[maybe_unused]] i32 rc = ::uv_check_start(&handle, cb);
-    assert(rc == 0 && "uv::check_start failed");
+    // for cb != nullptr, check start always succeeds
 }
 
-ALWAYS_INLINE void check_stop(uv_check_t &handle) noexcept {
-    [[maybe_unused]] i32 rc = ::uv_check_stop(&handle);
-    assert(rc == 0 && "uv::check_stop failed");
-}
+ALWAYS_INLINE void check_stop(uv_check_t &handle) noexcept { [[maybe_unused]] i32 rc = ::uv_check_stop(&handle); }
 
-ALWAYS_INLINE void timer_init(uv_loop_t &loop, uv_timer_t &handle) noexcept {
-    [[maybe_unused]] i32 rc = ::uv_timer_init(&loop, &handle);
-    assert(rc == 0 && "uv::timer_init failed");
-}
+ALWAYS_INLINE void timer_init(uv_loop_t &loop, uv_timer_t &handle) noexcept { [[maybe_unused]] i32 rc = ::uv_timer_init(&loop, &handle); }
 
-ALWAYS_INLINE void timer_start(uv_timer_t &handle, uv_timer_cb cb, u64 timeout, u64 repeat) noexcept {
-    assert(cb != nullptr && "uv::timer_start requires non-null callback");
+ALWAYS_INLINE void timer_start(uv_timer_t &handle, uv_timer_cb cb, u64 timeout, u64 repeat) noexcept
+    pre(cb != nullptr && !is_closing(handle)) {
     [[maybe_unused]] i32 rc = ::uv_timer_start(&handle, cb, timeout, repeat);
-    assert(rc == 0 && "uv::timer_start failed");
 }
 
-ALWAYS_INLINE void timer_stop(uv_timer_t &handle) noexcept {
-    [[maybe_unused]] i32 rc = ::uv_timer_stop(&handle);
-    assert(rc == 0 && "uv::timer_stop failed");
-}
+ALWAYS_INLINE void timer_stop(uv_timer_t &handle) noexcept { [[maybe_unused]] i32 rc = ::uv_timer_stop(&handle); }
 
 ALWAYS_INLINE Error poll_init_socket(uv_loop_t &loop, uv_poll_t &handle, uv_os_sock_t socket) noexcept {
     return status_to_error(::uv_poll_init_socket(&loop, &handle, socket));
 }
 
-ALWAYS_INLINE Error poll_start(uv_poll_t &handle, i32 events, uv_poll_cb cb) noexcept {
-    assert(cb != nullptr && "uv::poll_start requires non-null callback");
+ALWAYS_INLINE Error poll_start(uv_poll_t &handle, i32 events, uv_poll_cb cb) noexcept pre(cb != nullptr) {
     return status_to_error(::uv_poll_start(&handle, events, cb));
 }
 
@@ -258,23 +228,22 @@ ALWAYS_INLINE Error signal_init(uv_loop_t &loop, uv_signal_t &handle) noexcept {
     return status_to_error(::uv_signal_init(&loop, &handle));
 }
 
-ALWAYS_INLINE Error signal_start(uv_signal_t &handle, uv_signal_cb cb, i32 signum) noexcept {
-    assert(cb != nullptr && "uv::signal_start requires non-null callback");
+ALWAYS_INLINE Error signal_start(uv_signal_t &handle, uv_signal_cb cb, i32 signum) noexcept pre(cb != nullptr) {
     // Errors: UV_EINVAL for invalid signum/cb and backend register failures.
     return status_to_error(::uv_signal_start(&handle, cb, signum));
 }
 
 ALWAYS_INLINE Error signal_stop(uv_signal_t &handle) noexcept { return status_to_error(::uv_signal_stop(&handle)); }
 
-ALWAYS_INLINE Error queue_work(uv_loop_t &loop, uv_work_t &req, uv_work_cb work_cb, uv_after_work_cb after_work_cb) noexcept {
-    assert(work_cb != nullptr && "uv::queue_work requires non-null work callback");
+ALWAYS_INLINE Error queue_work(uv_loop_t &loop, uv_work_t &req, uv_work_cb work_cb, uv_after_work_cb after_work_cb) noexcept
+    pre(work_cb != nullptr) {
     // Errors: UV_EINVAL for invalid arguments.
     return status_to_error(::uv_queue_work(&loop, &req, work_cb, after_work_cb));
 }
 
 template <stream_like S>
-ALWAYS_INLINE Error read_start(S &stream, uv_alloc_cb alloc_cb, uv_read_cb read_cb) noexcept {
-    assert(alloc_cb != nullptr && read_cb != nullptr && "uv::read_start requires non-null callbacks");
+ALWAYS_INLINE Error read_start(S &stream, uv_alloc_cb alloc_cb, uv_read_cb read_cb) noexcept pre(alloc_cb != nullptr)
+    pre(read_cb != nullptr) {
     // Errors: UV_EINVAL / UV_EALREADY / UV_ENOTCONN
     return status_to_error(::uv_read_start(as_stream(stream), alloc_cb, read_cb));
 }
@@ -282,12 +251,11 @@ ALWAYS_INLINE Error read_start(S &stream, uv_alloc_cb alloc_cb, uv_read_cb read_
 template <stream_like S>
 ALWAYS_INLINE void read_stop(S &stream) noexcept {
     [[maybe_unused]] i32 rc = ::uv_read_stop(as_stream(stream));
-    assert(rc == 0 && "uv::read_stop failed");
+    // read_stop always succeeds, non zero rc will only mean it's still pending
 }
 
 template <stream_like S>
-ALWAYS_INLINE Error write(uv_write_t &req, S &stream, std::span<const uv_buf_t> bufs, uv_write_cb cb) noexcept {
-    assert(!bufs.empty() && "uv::write requires a non-empty buffer span");
+ALWAYS_INLINE Error write(uv_write_t &req, S &stream, std::span<const uv_buf_t> bufs, uv_write_cb cb) noexcept pre(!bufs.empty()) {
     // Errors: stream state/fd/write precondition failures.
     return status_to_error(::uv_write(&req, as_stream(stream), bufs.data(), static_cast<u32>(bufs.size()), cb));
 }
@@ -298,8 +266,7 @@ ALWAYS_INLINE Error accept(Server &server, Client &client) noexcept {
 }
 
 template <stream_like S>
-ALWAYS_INLINE Error listen(S &stream, i32 backlog, uv_connection_cb cb) noexcept {
-    assert(cb != nullptr && "uv::listen requires non-null callback");
+ALWAYS_INLINE Error listen(S &stream, i32 backlog, uv_connection_cb cb) noexcept pre(cb != nullptr) {
     return status_to_error(::uv_listen(as_stream(stream), backlog, cb));
 }
 
@@ -309,14 +276,13 @@ ALWAYS_INLINE Error pipe_init(uv_loop_t &loop, uv_pipe_t &handle, i32 ipc) noexc
 
 ALWAYS_INLINE Error pipe_open(uv_pipe_t &handle, uv_file fd) noexcept { return status_to_error(::uv_pipe_open(&handle, fd)); }
 
-ALWAYS_INLINE Error pipe_bind2(uv_pipe_t &handle, const char *name, usize namelen, u32 flags) noexcept {
-    assert(name != nullptr && namelen > 0 && "uv::pipe_bind2 requires non-null non-empty name");
+ALWAYS_INLINE Error pipe_bind2(uv_pipe_t &handle, const char *name, usize namelen, u32 flags) noexcept pre(name != nullptr)
+    pre(namelen > 0) {
     return status_to_error(::uv_pipe_bind2(&handle, name, namelen, flags));
 }
 
 ALWAYS_INLINE Error pipe_connect2(uv_connect_t &req, uv_pipe_t &handle, const char *name, usize namelen, u32 flags,
-                                  uv_connect_cb cb) noexcept {
-    assert(cb != nullptr && name != nullptr && namelen > 0 && "uv::pipe_connect2 requires non-null callback and non-empty name");
+                                  uv_connect_cb cb) noexcept pre(cb != nullptr) pre(name != nullptr) pre(namelen > 0) {
     return status_to_error(::uv_pipe_connect2(&req, &handle, name, namelen, flags, cb));
 }
 
@@ -324,21 +290,19 @@ ALWAYS_INLINE Error tcp_init(uv_loop_t &loop, uv_tcp_t &handle) noexcept { retur
 
 ALWAYS_INLINE Error tcp_open(uv_tcp_t &handle, uv_os_sock_t sock) noexcept { return status_to_error(::uv_tcp_open(&handle, sock)); }
 
-ALWAYS_INLINE Error tcp_bind(uv_tcp_t &handle, const sockaddr *addr, u32 flags) noexcept {
-    assert(addr != nullptr && "uv::tcp_bind requires non-null address");
+ALWAYS_INLINE Error tcp_bind(uv_tcp_t &handle, const sockaddr *addr, u32 flags) noexcept pre(addr != nullptr) {
     return status_to_error(::uv_tcp_bind(&handle, addr, flags));
 }
 
-ALWAYS_INLINE Error tcp_connect(uv_connect_t &req, uv_tcp_t &handle, const sockaddr *addr, uv_connect_cb cb) noexcept {
-    assert(addr != nullptr && cb != nullptr && "uv::tcp_connect requires non-null address and callback");
+ALWAYS_INLINE Error tcp_connect(uv_connect_t &req, uv_tcp_t &handle, const sockaddr *addr, uv_connect_cb cb) noexcept pre(addr != nullptr)
+    pre(cb != nullptr) {
     return status_to_error(::uv_tcp_connect(&req, &handle, addr, cb));
 }
 
 ALWAYS_INLINE uv_handle_type guess_handle(uv_file file) noexcept { return ::uv_guess_handle(file); }
 
 template <stream_like S>
-ALWAYS_INLINE Result<usize> try_write(S &stream, std::span<const uv_buf_t> bufs) noexcept {
-    assert(!bufs.empty() && "uv::try_write requires a non-empty buffer span");
+ALWAYS_INLINE Result<usize> try_write(S &stream, std::span<const uv_buf_t> bufs) noexcept pre(!bufs.empty()) {
     [[maybe_unused]] i32 rc = ::uv_try_write(as_stream(stream), bufs.data(), static_cast<u32>(bufs.size()));
     if (rc < 0) {
         return outcome_error(Error(rc));
@@ -389,8 +353,7 @@ ALWAYS_INLINE Error udp_init_ex(uv_loop_t &loop, uv_udp_t &handle, u32 flags) no
 
 ALWAYS_INLINE Error udp_open(uv_udp_t &handle, uv_os_sock_t sock) noexcept { return status_to_error(::uv_udp_open(&handle, sock)); }
 
-ALWAYS_INLINE Error udp_bind(uv_udp_t &handle, const sockaddr *addr, u32 flags) noexcept {
-    assert(addr != nullptr && "uv::udp_bind requires non-null address");
+ALWAYS_INLINE Error udp_bind(uv_udp_t &handle, const sockaddr *addr, u32 flags) noexcept pre(addr != nullptr) {
     return status_to_error(::uv_udp_bind(&handle, addr, flags));
 }
 
@@ -398,24 +361,20 @@ ALWAYS_INLINE Error udp_connect(uv_udp_t &handle, const sockaddr *addr) noexcept
     return status_to_error(::uv_udp_connect(&handle, addr));
 }
 
-ALWAYS_INLINE Error udp_recv_start(uv_udp_t &handle, uv_alloc_cb alloc_cb, uv_udp_recv_cb recv_cb) noexcept {
-    assert(alloc_cb != nullptr && recv_cb != nullptr && "uv::udp_recv_start requires non-null callbacks");
+ALWAYS_INLINE Error udp_recv_start(uv_udp_t &handle, uv_alloc_cb alloc_cb, uv_udp_recv_cb recv_cb) noexcept pre(alloc_cb != nullptr)
+    pre(recv_cb != nullptr) {
     return status_to_error(::uv_udp_recv_start(&handle, alloc_cb, recv_cb));
 }
 
-ALWAYS_INLINE void udp_recv_stop(uv_udp_t &handle) noexcept {
-    [[maybe_unused]] i32 rc = ::uv_udp_recv_stop(&handle);
-    assert(rc == 0 && "uv::udp_recv_stop failed");
-}
+ALWAYS_INLINE void udp_recv_stop(uv_udp_t &handle) noexcept pre(handle.type == UV_UDP) { ::uv_udp_recv_stop(&handle); }
 
 ALWAYS_INLINE Error udp_send(uv_udp_send_t &req, uv_udp_t &handle, std::span<const uv_buf_t> bufs, const sockaddr *addr,
-                             uv_udp_send_cb cb) noexcept {
-    assert(!bufs.empty() && "uv::udp_send requires a non-empty buffer span");
+                             uv_udp_send_cb cb) noexcept pre(!bufs.empty()) {
     return status_to_error(::uv_udp_send(&req, &handle, bufs.data(), static_cast<u32>(bufs.size()), addr, cb));
 }
 
-ALWAYS_INLINE Result<usize> udp_try_send(uv_udp_t &handle, std::span<const uv_buf_t> bufs, const sockaddr *addr) noexcept {
-    assert(!bufs.empty() && "uv::udp_try_send requires a non-empty buffer span");
+ALWAYS_INLINE Result<usize> udp_try_send(uv_udp_t &handle, std::span<const uv_buf_t> bufs, const sockaddr *addr) noexcept
+    pre(!bufs.empty()) {
     [[maybe_unused]] i32 rc = ::uv_udp_try_send(&handle, bufs.data(), static_cast<u32>(bufs.size()), addr);
     if (rc < 0) {
         return outcome_error(Error(rc));
@@ -468,8 +427,7 @@ ALWAYS_INLINE usize udp_get_send_queue_count(const uv_udp_t &handle) noexcept { 
 /// uv_spawn internally registers a SIGCHLD handler in a process-global
 /// red-black tree that is NOT thread-safe.  Serialise all spawn calls
 /// so that concurrent Event-loops on different threads do not race.
-inline Error spawn(uv_loop_t &loop, uv_process_t &process, const uv_process_options_t &options) noexcept {
-    assert(options.file != nullptr && "uv::spawn requires options.file");
+inline Error spawn(uv_loop_t &loop, uv_process_t &process, const uv_process_options_t &options) noexcept pre(options.file != nullptr) {
     static std::mutex spawn_mutex;
     std::lock_guard lock(spawn_mutex);
     return status_to_error(::uv_spawn(&loop, &process, &options));
@@ -481,23 +439,19 @@ ALWAYS_INLINE Error process_kill(uv_process_t &process, i32 signum) noexcept {
 
 ALWAYS_INLINE uv_buf_t buf_init(char *base, u32 len) noexcept { return ::uv_buf_init(base, len); }
 
-ALWAYS_INLINE Error ip4_addr(const char *ip, i32 port, sockaddr_in &out) noexcept {
-    assert(ip != nullptr && "uv::ip4_addr requires non-null ip");
+ALWAYS_INLINE Error ip4_addr(const char *ip, i32 port, sockaddr_in &out) noexcept pre(ip != nullptr) {
     return status_to_error(::uv_ip4_addr(ip, port, &out));
 }
 
-ALWAYS_INLINE Error ip6_addr(const char *ip, i32 port, sockaddr_in6 &out) noexcept {
-    assert(ip != nullptr && "uv::ip6_addr requires non-null ip");
+ALWAYS_INLINE Error ip6_addr(const char *ip, i32 port, sockaddr_in6 &out) noexcept pre(ip != nullptr) {
     return status_to_error(::uv_ip6_addr(ip, port, &out));
 }
 
-ALWAYS_INLINE Error ip4_name(const sockaddr_in &src, char *dst, usize size) noexcept {
-    assert(dst != nullptr && size > 0 && "uv::ip4_name requires non-null destination and size > 0");
+ALWAYS_INLINE Error ip4_name(const sockaddr_in &src, char *dst, usize size) noexcept pre(dst != nullptr) pre(size > 0) {
     return status_to_error(::uv_ip4_name(&src, dst, size));
 }
 
-ALWAYS_INLINE Error ip6_name(const sockaddr_in6 &src, char *dst, usize size) noexcept {
-    assert(dst != nullptr && size > 0 && "uv::ip6_name requires non-null destination and size > 0");
+ALWAYS_INLINE Error ip6_name(const sockaddr_in6 &src, char *dst, usize size) noexcept pre(dst != nullptr) pre(size > 0) {
     return status_to_error(::uv_ip6_name(&src, dst, size));
 }
 
@@ -508,50 +462,42 @@ ALWAYS_INLINE std::string_view strerror(i32 code) noexcept {
 
 ALWAYS_INLINE void fs_req_cleanup(uv_fs_t &req) noexcept { ::uv_fs_req_cleanup(&req); }
 
-ALWAYS_INLINE Error fs_unlink(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_unlink requires non-null path");
+ALWAYS_INLINE Error fs_unlink(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_unlink(&loop, &req, path, cb));
 }
 
-ALWAYS_INLINE Error fs_mkdir(uv_loop_t &loop, uv_fs_t &req, const char *path, i32 mode, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_mkdir requires non-null path");
+ALWAYS_INLINE Error fs_mkdir(uv_loop_t &loop, uv_fs_t &req, const char *path, i32 mode, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_mkdir(&loop, &req, path, mode, cb));
 }
 
-ALWAYS_INLINE Error fs_stat(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_stat requires non-null path");
+ALWAYS_INLINE Error fs_stat(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_stat(&loop, &req, path, cb));
 }
 
-ALWAYS_INLINE Error fs_copyfile(uv_loop_t &loop, uv_fs_t &req, const char *path, const char *new_path, i32 flags, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && new_path != nullptr && "uv::fs_copyfile requires non-null source and destination paths");
+ALWAYS_INLINE Error fs_copyfile(uv_loop_t &loop, uv_fs_t &req, const char *path, const char *new_path, i32 flags, uv_fs_cb cb) noexcept
+    pre(path != nullptr) pre(new_path != nullptr) {
     return status_to_error(::uv_fs_copyfile(&loop, &req, path, new_path, flags, cb));
 }
 
-ALWAYS_INLINE Error fs_mkdtemp(uv_loop_t &loop, uv_fs_t &req, const char *tpl, uv_fs_cb cb) noexcept {
-    assert(tpl != nullptr && "uv::fs_mkdtemp requires non-null template");
+ALWAYS_INLINE Error fs_mkdtemp(uv_loop_t &loop, uv_fs_t &req, const char *tpl, uv_fs_cb cb) noexcept pre(tpl != nullptr) {
     return status_to_error(::uv_fs_mkdtemp(&loop, &req, tpl, cb));
 }
 
-ALWAYS_INLINE Error fs_mkstemp(uv_loop_t &loop, uv_fs_t &req, const char *tpl, uv_fs_cb cb) noexcept {
-    assert(tpl != nullptr && "uv::fs_mkstemp requires non-null template");
+ALWAYS_INLINE Error fs_mkstemp(uv_loop_t &loop, uv_fs_t &req, const char *tpl, uv_fs_cb cb) noexcept pre(tpl != nullptr) {
     return status_to_error(::uv_fs_mkstemp(&loop, &req, tpl, cb));
 }
 
-ALWAYS_INLINE Error fs_rmdir(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_rmdir requires non-null path");
+ALWAYS_INLINE Error fs_rmdir(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_rmdir(&loop, &req, path, cb));
 }
 
-ALWAYS_INLINE Error fs_scandir(uv_loop_t &loop, uv_fs_t &req, const char *path, i32 flags, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_scandir requires non-null path");
+ALWAYS_INLINE Error fs_scandir(uv_loop_t &loop, uv_fs_t &req, const char *path, i32 flags, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_scandir(&loop, &req, path, flags, cb));
 }
 
 ALWAYS_INLINE Error fs_scandir_next(uv_fs_t &req, uv_dirent_t &ent) noexcept { return Error(::uv_fs_scandir_next(&req, &ent)); }
 
-ALWAYS_INLINE Error fs_opendir(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_opendir requires non-null path");
+ALWAYS_INLINE Error fs_opendir(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_opendir(&loop, &req, path, cb));
 }
 
@@ -567,13 +513,12 @@ ALWAYS_INLINE Error fs_fstat(uv_loop_t &loop, uv_fs_t &req, uv_file file, uv_fs_
     return status_to_error(::uv_fs_fstat(&loop, &req, file, cb));
 }
 
-ALWAYS_INLINE Error fs_lstat(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_lstat requires non-null path");
+ALWAYS_INLINE Error fs_lstat(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_lstat(&loop, &req, path, cb));
 }
 
-ALWAYS_INLINE Error fs_rename(uv_loop_t &loop, uv_fs_t &req, const char *path, const char *new_path, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && new_path != nullptr && "uv::fs_rename requires non-null source and destination paths");
+ALWAYS_INLINE Error fs_rename(uv_loop_t &loop, uv_fs_t &req, const char *path, const char *new_path, uv_fs_cb cb) noexcept
+    pre(path != nullptr) pre(new_path != nullptr) {
     return status_to_error(::uv_fs_rename(&loop, &req, path, new_path, cb));
 }
 
@@ -594,18 +539,16 @@ ALWAYS_INLINE Error fs_sendfile(uv_loop_t &loop, uv_fs_t &req, uv_file out_file,
     return status_to_error(::uv_fs_sendfile(&loop, &req, out_file, in_file, in_offset, length, cb));
 }
 
-ALWAYS_INLINE Error fs_access(uv_loop_t &loop, uv_fs_t &req, const char *path, i32 mode, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_access requires non-null path");
+ALWAYS_INLINE Error fs_access(uv_loop_t &loop, uv_fs_t &req, const char *path, i32 mode, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_access(&loop, &req, path, mode, cb));
 }
 
-ALWAYS_INLINE Error fs_chmod(uv_loop_t &loop, uv_fs_t &req, const char *path, i32 mode, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_chmod requires non-null path");
+ALWAYS_INLINE Error fs_chmod(uv_loop_t &loop, uv_fs_t &req, const char *path, i32 mode, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_chmod(&loop, &req, path, mode, cb));
 }
 
-ALWAYS_INLINE Error fs_utime(uv_loop_t &loop, uv_fs_t &req, const char *path, f64 atime, f64 mtime, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_utime requires non-null path");
+ALWAYS_INLINE Error fs_utime(uv_loop_t &loop, uv_fs_t &req, const char *path, f64 atime, f64 mtime, uv_fs_cb cb) noexcept
+    pre(path != nullptr) {
     return status_to_error(::uv_fs_utime(&loop, &req, path, atime, mtime, cb));
 }
 
@@ -613,28 +556,26 @@ ALWAYS_INLINE Error fs_futime(uv_loop_t &loop, uv_fs_t &req, uv_file file, f64 a
     return status_to_error(::uv_fs_futime(&loop, &req, file, atime, mtime, cb));
 }
 
-ALWAYS_INLINE Error fs_lutime(uv_loop_t &loop, uv_fs_t &req, const char *path, f64 atime, f64 mtime, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_lutime requires non-null path");
+ALWAYS_INLINE Error fs_lutime(uv_loop_t &loop, uv_fs_t &req, const char *path, f64 atime, f64 mtime, uv_fs_cb cb) noexcept
+    pre(path != nullptr) {
     return status_to_error(::uv_fs_lutime(&loop, &req, path, atime, mtime, cb));
 }
 
-ALWAYS_INLINE Error fs_link(uv_loop_t &loop, uv_fs_t &req, const char *path, const char *new_path, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && new_path != nullptr && "uv::fs_link requires non-null source and destination paths");
+ALWAYS_INLINE Error fs_link(uv_loop_t &loop, uv_fs_t &req, const char *path, const char *new_path, uv_fs_cb cb) noexcept
+    pre(path != nullptr) pre(new_path != nullptr) {
     return status_to_error(::uv_fs_link(&loop, &req, path, new_path, cb));
 }
 
-ALWAYS_INLINE Error fs_symlink(uv_loop_t &loop, uv_fs_t &req, const char *path, const char *new_path, i32 flags, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && new_path != nullptr && "uv::fs_symlink requires non-null source and destination paths");
+ALWAYS_INLINE Error fs_symlink(uv_loop_t &loop, uv_fs_t &req, const char *path, const char *new_path, i32 flags, uv_fs_cb cb) noexcept
+    pre(path != nullptr) pre(new_path != nullptr) {
     return status_to_error(::uv_fs_symlink(&loop, &req, path, new_path, flags, cb));
 }
 
-ALWAYS_INLINE Error fs_readlink(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_readlink requires non-null path");
+ALWAYS_INLINE Error fs_readlink(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_readlink(&loop, &req, path, cb));
 }
 
-ALWAYS_INLINE Error fs_realpath(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_realpath requires non-null path");
+ALWAYS_INLINE Error fs_realpath(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_realpath(&loop, &req, path, cb));
 }
 
@@ -642,8 +583,8 @@ ALWAYS_INLINE Error fs_fchmod(uv_loop_t &loop, uv_fs_t &req, uv_file file, i32 m
     return status_to_error(::uv_fs_fchmod(&loop, &req, file, mode, cb));
 }
 
-ALWAYS_INLINE Error fs_chown(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_uid_t uid, uv_gid_t gid, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_chown requires non-null path");
+ALWAYS_INLINE Error fs_chown(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_uid_t uid, uv_gid_t gid, uv_fs_cb cb) noexcept
+    pre(path != nullptr) {
     return status_to_error(::uv_fs_chown(&loop, &req, path, uid, gid, cb));
 }
 
@@ -651,18 +592,17 @@ ALWAYS_INLINE Error fs_fchown(uv_loop_t &loop, uv_fs_t &req, uv_file file, uv_ui
     return status_to_error(::uv_fs_fchown(&loop, &req, file, uid, gid, cb));
 }
 
-ALWAYS_INLINE Error fs_lchown(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_uid_t uid, uv_gid_t gid, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_lchown requires non-null path");
+ALWAYS_INLINE Error fs_lchown(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_uid_t uid, uv_gid_t gid, uv_fs_cb cb) noexcept
+    pre(path != nullptr) {
     return status_to_error(::uv_fs_lchown(&loop, &req, path, uid, gid, cb));
 }
 
-ALWAYS_INLINE Error fs_statfs(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_statfs requires non-null path");
+ALWAYS_INLINE Error fs_statfs(uv_loop_t &loop, uv_fs_t &req, const char *path, uv_fs_cb cb) noexcept pre(path != nullptr) {
     return status_to_error(::uv_fs_statfs(&loop, &req, path, cb));
 }
 
-ALWAYS_INLINE Error fs_open(uv_loop_t &loop, uv_fs_t &req, const char *path, i32 flags, i32 mode, uv_fs_cb cb) noexcept {
-    assert(path != nullptr && "uv::fs_open requires non-null path");
+ALWAYS_INLINE Error fs_open(uv_loop_t &loop, uv_fs_t &req, const char *path, i32 flags, i32 mode, uv_fs_cb cb) noexcept
+    pre(path != nullptr) {
     return status_to_error(::uv_fs_open(&loop, &req, path, flags, mode, cb));
 }
 
@@ -692,22 +632,15 @@ ALWAYS_INLINE void free_cpu_info(uv_cpu_info_t *infos, i32 count) noexcept { ::u
 
 ALWAYS_INLINE Error os_uname(uv_utsname_t &buf) noexcept { return status_to_error(::uv_os_uname(&buf)); }
 
-ALWAYS_INLINE Error os_gethostname(char *buf, usize &size) noexcept {
-    assert(buf != nullptr && "uv::os_gethostname requires non-null buffer");
+ALWAYS_INLINE Error os_gethostname(char *buf, usize &size) noexcept pre(buf != nullptr) {
     return status_to_error(::uv_os_gethostname(buf, &size));
 }
 
 ALWAYS_INLINE Error uptime(f64 &value) noexcept { return status_to_error(::uv_uptime(&value)); }
 
-ALWAYS_INLINE Error os_homedir(char *buf, usize &size) noexcept {
-    assert(buf != nullptr && "uv::os_homedir requires non-null buffer");
-    return status_to_error(::uv_os_homedir(buf, &size));
-}
+ALWAYS_INLINE Error os_homedir(char *buf, usize &size) noexcept pre(buf != nullptr) { return status_to_error(::uv_os_homedir(buf, &size)); }
 
-ALWAYS_INLINE Error os_tmpdir(char *buf, usize &size) noexcept {
-    assert(buf != nullptr && "uv::os_tmpdir requires non-null buffer");
-    return status_to_error(::uv_os_tmpdir(buf, &size));
-}
+ALWAYS_INLINE Error os_tmpdir(char *buf, usize &size) noexcept pre(buf != nullptr) { return status_to_error(::uv_os_tmpdir(buf, &size)); }
 
 ALWAYS_INLINE Error os_getpriority(uv_pid_t pid, i32 &priority) noexcept { return status_to_error(::uv_os_getpriority(pid, &priority)); }
 
@@ -727,8 +660,7 @@ ALWAYS_INLINE u32 available_parallelism() noexcept { return ::uv_available_paral
 
 // --- Synchronous fs wrappers (no Event loop needed) ---
 
-ALWAYS_INLINE i32 fs_open_sync(uv_fs_t &req, const char *path, i32 flags, i32 mode) noexcept {
-    assert(path != nullptr && "uv::fs_open_sync requires non-null path");
+ALWAYS_INLINE i32 fs_open_sync(uv_fs_t &req, const char *path, i32 flags, i32 mode) noexcept pre(path != nullptr) {
     return ::uv_fs_open(nullptr, &req, path, flags, mode, nullptr);
 }
 
@@ -844,11 +776,13 @@ public:
         h.data = self;
         if (uv::is_closing(h)) {
             const bool closed_by_loop_cleanup = uv::LoopCloseFallback::take(uv::as_handle(h));
-            assert(closed_by_loop_cleanup && "uv handle destroyed while close is still pending or without loop cleanup "
-                                             "tracking");
             if (!closed_by_loop_cleanup) {
+                // This is a lifetime bug: the handle is closing, but not through
+                // the recognized loop-teardown fallback.
+                contract_assert(false);
                 return;
             }
+
             delete self;
             return;
         }

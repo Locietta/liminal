@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cassert>
+#include <contracts>
 #include <source_location>
 #include <type_traits>
 #include <vector>
@@ -35,9 +35,9 @@ struct TaskGroup : AggregateOp {
             if (!child) {
                 continue;
             }
-            assert(child->kind == AsyncNode::NodeKind::TASK);
-            assert((child->state == AsyncNode::FINISHED || child->state == AsyncNode::CANCELLED || child->state == AsyncNode::FAILED) &&
-                   "TaskGroup destroyed before all children completed; co_await join() first");
+            contract_assert(child->kind == AsyncNode::NodeKind::TASK);
+            contract_assert(child->state == AsyncNode::FINISHED || child->state == AsyncNode::CANCELLED ||
+                            child->state == AsyncNode::FAILED);
             static_cast<TaskFrame *>(child)->handle().destroy();
         }
     }
@@ -95,7 +95,7 @@ private:
         TaskGroup &group;
 
         bool await_ready() noexcept {
-            assert(!group.joined && "join() called twice on the same TaskGroup");
+            contract_assert(!group.joined);
             if (group.pending == 0) {
                 group.settled = true;
                 group.state = FINISHED;
@@ -107,11 +107,11 @@ private:
         template <typename Promise>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h,
                                               std::source_location location = std::source_location::current()) noexcept {
-            assert(!group.settled && "join() called twice on the same TaskGroup");
-            assert(group.pending > 0 && "join await_suspend called even though TaskGroup is complete");
+            contract_assert(!group.settled);
+            contract_assert(group.pending > 0);
             group.location = location;
             auto *parent_node = static_cast<AsyncNode *>(&h.promise());
-            assert(parent_node->is_task_frame() && "TaskGroup join must be awaited from a Task");
+            contract_assert(parent_node->is_task_frame());
             static_cast<TaskFrame *>(parent_node)->set_child(&group);
             group.parent = parent_node;
             group.state = RUNNING;
@@ -153,7 +153,7 @@ private:
     };
 
     void collect_errors() {
-        assert(children.size() == error_handlers.size() && "TaskGroup child/Error-handler vectors diverged");
+        contract_assert(children.size() == error_handlers.size());
         for (usize i = 0; i < children.size(); ++i) {
             if (children[i] && children[i]->state == AsyncNode::FAILED) {
                 error_handlers[i](*children[i], *this);

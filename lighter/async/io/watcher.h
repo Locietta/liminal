@@ -29,9 +29,7 @@ struct Timer {
 
     static Timer create(EventLoop &loop = EventLoop::current());
 
-    /// Both durations must be non-negative; a negative one is a caller bug and
-    /// panics rather than being cast into an effectively infinite wait.
-    void start(std::chrono::milliseconds timeout, std::chrono::milliseconds repeat = {});
+    void start(std::chrono::milliseconds timeout, std::chrono::milliseconds repeat = {}) pre(timeout.count() >= 0 && repeat.count() >= 0);
 
     void stop();
 
@@ -181,7 +179,7 @@ struct SignalSet {
     /// handle reference is a boolean rather than a counter, so these are
     /// counted and only the outermost pair touches libuv.
     void hold_loop() noexcept;
-    void release_loop() noexcept;
+    void release_loop() noexcept pre(!self || holding_loop());
 
     /// True while at least one hold is outstanding, i.e. this set is currently
     /// keeping the Event loop alive. Exposed for tests.
@@ -283,9 +281,9 @@ private:
     UniqueHandle<Self> self;
 };
 
-Task<> sleep(std::chrono::milliseconds timeout, EventLoop &loop = EventLoop::current());
+Task<> sleep(std::chrono::milliseconds timeout, EventLoop &loop = EventLoop::current()) pre(timeout.count() >= 0);
 
-inline Task<> sleep(i32 ms, EventLoop &loop = EventLoop::current()) { return sleep(std::chrono::milliseconds{ms}, loop); }
+inline Task<> sleep(i32 ms, EventLoop &loop = EventLoop::current()) pre(ms >= 0) { return sleep(std::chrono::milliseconds{ms}, loop); }
 
 /// Awaitable returned by yield(): suspends and resumes no earlier than the
 /// next Event-loop iteration, strictly after every callback, deferred resume

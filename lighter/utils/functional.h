@@ -1,5 +1,5 @@
 #pragma once
-#include <cassert>
+#include <contracts>
 #include <cstddef>
 #include <functional>
 #include <new>
@@ -287,12 +287,15 @@ public:
         requires(!std::is_same_v<std::remove_cvref_t<Class>, Function>) && std::is_invocable_r_v<R, Class, Args...>
     constexpr Function(Class &&invocable) : Function(make(std::forward<Class>(invocable))) {}
 
+    // GCC PR c++/125733: a precondition on this member function template
+    // currently ICEs GCC 16 and 17. Keep this as a body-level contract until
+    // the compiler bug is fixed.
     template <typename... CallArgs>
     constexpr R operator()(CallArgs &&...args) {
         static_assert(
             requires(Sign *fn, CallArgs &&...call_args) { fn(std::forward<CallArgs>(call_args)...); },
             "invocable object must be callable with the given arguments");
-        assert(vptr && "Attempting to call an empty Function object");
+        contract_assert(vptr != nullptr);
         return vptr->proxy(this, args...);
     }
 
@@ -463,7 +466,7 @@ public:
         static_assert(
             requires(Sign *fn, CallArgs &&...call_args) { fn(std::forward<CallArgs>(call_args)...); },
             "invocable object must be callable with the given arguments");
-        assert(vptr && "Attempting to call an empty Function object");
+        contract_assert(vptr != nullptr);
         return vptr->proxy(this, args...);
     }
 

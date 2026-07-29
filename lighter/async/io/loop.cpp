@@ -1,7 +1,7 @@
 #include "loop.h"
 
 #include <atomic>
-#include <cassert>
+#include <contracts>
 #include <deque>
 #include <mutex>
 #include <vector>
@@ -104,10 +104,7 @@ Relay EventLoop::create_relay() {
 
 static thread_local EventLoop *current_loop = nullptr;
 
-EventLoop &EventLoop::current() {
-    assert(current_loop && "EventLoop::current() called outside a running loop");
-    return *current_loop;
-}
+EventLoop &EventLoop::current() { return *current_loop; }
 
 bool EventLoop::has_current() noexcept { return current_loop != nullptr; }
 
@@ -141,14 +138,7 @@ void each(uv_idle_t *idle) {
 }
 
 void EventLoop::schedule(AsyncNode &frame, std::source_location loc) {
-    assert(self && "schedule: no current Event loop in this thread");
-
-    if (frame.state == AsyncNode::PENDING) {
-        frame.state = AsyncNode::RUNNING;
-    } else if (frame.state == AsyncNode::FINISHED || frame.state == AsyncNode::RUNNING) {
-        std::abort();
-    }
-
+    frame.state = AsyncNode::RUNNING;
     frame.location = loc;
     auto &loop = *this;
     if (!loop->idle_running && loop->tasks.empty()) {
@@ -159,9 +149,6 @@ void EventLoop::schedule(AsyncNode &frame, std::source_location loc) {
 }
 
 void EventLoop::start(AsyncNode &frame, std::source_location loc) {
-    assert(self && "start: no Event loop in this thread");
-    assert(frame.state == AsyncNode::PENDING && "start requires a pending Task");
-
     frame.state = AsyncNode::RUNNING;
     frame.location = loc;
 
@@ -263,7 +250,7 @@ EventLoop::~EventLoop() {
         }
     };
 
-    assert(self->count.load(std::memory_order_acquire) == 0 && "EventLoop destroyed with live relays");
+    contract_assert(self->count.load(std::memory_order_acquire) == 0);
 
     {
         std::lock_guard lock(self->mutex);

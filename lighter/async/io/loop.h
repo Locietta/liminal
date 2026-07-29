@@ -1,5 +1,6 @@
 #pragma once
 
+#include <contracts>
 #include <memory>
 #include <source_location>
 #include <tuple>
@@ -10,10 +11,10 @@
 
 #include <lighter/types.hpp>
 #include <lighter/utils/functional.h>
+#include <lighter/async/runtime/node.h>
 
 namespace lighter {
 
-struct AsyncNode;
 struct InterruptSource;
 
 template <typename T, typename E, typename C>
@@ -96,7 +97,7 @@ struct EventLoop {
     ~EventLoop();
 
     /// Returns the Event loop running on the current thread.
-    static EventLoop &current();
+    static EventLoop &current() pre(has_current());
 
     /// Returns true if a loop is running on the current thread.
     static bool has_current() noexcept;
@@ -136,7 +137,8 @@ struct EventLoop {
     /// If the Task is passed by rvalue (temporary), the loop takes ownership
     /// (sets root=true). The Task will be destroyed after it completes.
     template <typename TaskT>
-    void schedule(TaskT &&task, std::source_location location = std::source_location::current()) {
+    void schedule(TaskT &&task, std::source_location location = std::source_location::current())
+        pre(self != nullptr && task.h != nullptr && task.h.promise().state == AsyncNode::PENDING) {
         auto &promise = task.h.promise();
         if constexpr (std::is_rvalue_reference_v<TaskT &&>) {
             promise.root = true;
@@ -161,9 +163,10 @@ struct EventLoop {
 private:
     /// Starts a lifetime-bound background Task immediately so its owner can
     /// cancel it before run().
-    void start(AsyncNode &frame, std::source_location location = std::source_location::current());
+    void start(AsyncNode &frame, std::source_location location = std::source_location::current())
+        pre(self != nullptr && frame.state == AsyncNode::PENDING);
 
-    void schedule(AsyncNode &frame, std::source_location location);
+    void schedule(AsyncNode &frame, std::source_location location) pre(self != nullptr && frame.state == AsyncNode::PENDING);
 
     std::unique_ptr<Self> self;
 };

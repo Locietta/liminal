@@ -9,7 +9,7 @@ namespace lighter {
 
 inline void check(bool condition, std::string_view message, std::source_location location = std::source_location::current()) noexcept {
     if (!condition) [[unlikely]] {
-        panic(message, location);
+        lighter::panic(message, location);
     }
 }
 

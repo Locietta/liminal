@@ -73,7 +73,7 @@ struct InterruptSource {
 
     /// Fires when the first fatal signal arrives. Safe to copy and to hand to
     /// with_token().
-    CancellationToken token() const noexcept;
+    CancellationToken token() const noexcept pre(self != nullptr);
 
     /// Resolves with the next signal of any kind, fatal ones included.
     ///

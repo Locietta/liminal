@@ -1,7 +1,7 @@
 #include "fs.h"
 
-#include <cassert>
 #include <concepts>
+#include <contracts>
 #include <utility>
 
 #include <lighter/types.hpp>
@@ -99,7 +99,7 @@ static Task<Result, Error> run_fs(Submit submit, Populate populate, [[maybe_unus
 
     auto after_cb = [](uv_fs_t *req) {
         auto *h = static_cast<Op *>(req->data);
-        assert(h != nullptr && "fs after_cb requires operation in req->data");
+        contract_assert(h != nullptr);
 
         h->mark_cancelled_if(req->result);
 

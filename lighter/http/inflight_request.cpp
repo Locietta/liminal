@@ -1,6 +1,6 @@
 #include "inflight_request.h"
 
-#include <cassert>
+#include <contracts>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -116,7 +116,7 @@ void InflightRequest::enable_streaming() {
 
 usize InflightRequest::on_write(char *data, usize size, usize count, void *userdata) {
     auto *self = static_cast<InflightRequest *>(userdata);
-    assert(self != nullptr && "curl write callback requires inflight_request");
+    contract_assert(self != nullptr);
 
     const auto bytes = size * count;
 
@@ -143,7 +143,7 @@ usize InflightRequest::on_write(char *data, usize size, usize count, void *userd
 
 usize InflightRequest::on_header(char *data, usize size, usize count, void *userdata) {
     auto *self = static_cast<InflightRequest *>(userdata);
-    assert(self != nullptr && "curl header callback requires inflight_request");
+    contract_assert(self != nullptr);
 
     const auto bytes = size * count;
     std::string_view line(data, bytes);

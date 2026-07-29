@@ -1,7 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <cassert>
+#include <contracts>
 #include <coroutine>
 #include <cstdlib>
 #include <exception>
@@ -11,11 +11,16 @@
 
 #include <lighter/types.hpp>
 #include <lighter/utils/config.h>
+#include <lighter/utils/panic.h>
 
 namespace lighter {
 
 struct SyncPrimitive;
 struct TaskFrame;
+
+namespace detail {
+bool task_frame_is_cancelled(const TaskFrame &frame) noexcept;
+} // namespace detail
 
 /// Type-erased base for all coroutine-related nodes in the Task tree.
 ///
@@ -78,6 +83,8 @@ struct AsyncNode {
 
     bool is_failed() const noexcept { return state == FAILED; }
 
+    bool is_terminal() const noexcept { return state == CANCELLED || state == FINISHED || state == FAILED; }
+
     // Keep this out-of-line. clang -O3 miscompiles direct promise policy writes in
     // coroutine return-object conversions, which can drop INTERCEPT_CANCEL. See also
     // https://github.com/llvm/llvm-project/issues/105595. Fixed in clang 21.
@@ -95,12 +102,12 @@ private:
     /// Cancellation-checkpoint path of attach(): the awaiting Task was
     /// cancelled while it was executing, so instead of starting new work
     /// under it, finalize it at this suspension point.
-    std::coroutine_handle<> attach_cancelled(TaskFrame &parent);
+    std::coroutine_handle<> attach_cancelled(TaskFrame &parent) pre(detail::task_frame_is_cancelled(parent));
 
 public:
-    std::coroutine_handle<> on_child_complete(AsyncNode &child);
+    std::coroutine_handle<> on_child_complete(AsyncNode &child) pre(&child != this);
 
-    static void resume_and_drain(std::coroutine_handle<> handle);
+    static void resume_and_drain(std::coroutine_handle<> handle) pre(handle != nullptr);
 
 protected:
     explicit AsyncNode(NodeKind k) : kind(k) {}
@@ -169,6 +176,10 @@ private:
 
     error_hook error_hook_fn = nullptr;
 };
+
+namespace detail {
+inline bool task_frame_is_cancelled(const TaskFrame &frame) noexcept { return frame.state == AsyncNode::CANCELLED; }
+} // namespace detail
 
 struct WaitNode : AsyncNode {
     friend struct AsyncNode;
@@ -315,8 +326,8 @@ protected:
 
     usize find_child_index(const AsyncNode &child) const {
         auto it = std::ranges::find(children, &child);
-        assert(it != children.end() && "child not found in aggregate");
-        if (it == children.end()) std::abort();
+        lighter::check(it != children.end(), "child not found in aggregate");
+
         return static_cast<usize>(it - children.begin());
     }
 
@@ -335,12 +346,11 @@ protected:
     std::coroutine_handle<> settle_if_idle() noexcept;
 
     /// Delivers the final Outcome to the parent. Runs exactly once.
-    std::coroutine_handle<> settle() noexcept;
+    std::coroutine_handle<> settle() noexcept pre(pending == 0 && parent != nullptr && !settled && parent->is_task_frame());
 
-    std::coroutine_handle<> arm_and_resume(AsyncNode &parent_node, std::source_location loc) noexcept {
+    std::coroutine_handle<> arm_and_resume(AsyncNode &parent_node, std::source_location loc) noexcept pre(parent_node.is_task_frame()) {
+
         this->location = loc;
-
-        assert(parent_node.is_task_frame() && "aggregate parent must be a Task");
 
         // Cancellation checkpoint: don't start any children under a parent
         // that is already cancelled. The unstarted child tasks are destroyed
@@ -367,7 +377,7 @@ protected:
             Pin held(*this);
 
             for (auto *child : children) {
-                assert(child && "aggregate contains a null child");
+                contract_assert(child != nullptr);
                 child->attach(*this, location);
             }
 
@@ -402,7 +412,7 @@ protected:
     AsyncNode *parent = nullptr;
 
 public:
-    void complete() noexcept;
+    void complete() noexcept pre(parent != nullptr);
 
     const AsyncNode *get_parent() const noexcept { return parent; }
 };

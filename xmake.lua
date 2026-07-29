@@ -5,8 +5,31 @@ add_rules("mode.release", "mode.debug", "mode.releasedbg")
 
 set_languages("cxxlatest")
 
--- GCC does not enable P2996 static reflection from -std=c++26 alone.
-add_cxxflags("-freflection", {tools = {"gcc", "gxx"}, force = true})
+option("contract_semantic")
+    set_default("enforce")
+    set_values("ignore", "observe", "enforce", "quick_enforce")
+    set_description("Select the C++26 contract evaluation semantic")
+    after_check(function (option)
+        local valid_semantics = {
+            ignore = true,
+            observe = true,
+            enforce = true,
+            quick_enforce = true,
+        }
+        local semantic = option:value()
+        assert(
+            valid_semantics[semantic],
+            "Invalid contract semantic '" .. tostring(semantic) ..
+                "'; expected ignore, observe, enforce, or quick_enforce.")
+    end)
+option_end()
+
+-- Enable reflection and contracts on gcc 16+
+add_cxxflags(
+    "-freflection",
+    "-fcontracts",
+    "-fcontract-evaluation-semantic=$(contract_semantic)",
+    {tools = {"gcc", "gxx"}, force = true})
 
 if is_os("windows") then
     local msys2_root = os.getenv("MSYS2")

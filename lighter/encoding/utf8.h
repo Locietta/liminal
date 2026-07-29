@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <contracts>
 #include <string>
 #include <string_view>
 
@@ -37,7 +38,7 @@ struct Decoded {
 /// Decode the sequence starting at bytes[0]. `bytes` must be non-empty.
 /// INVALID consumes exactly the maximal subpart (>= 1 byte), so repeated
 /// calls implement per-subpart U+FFFD replacement.
-Decoded decode_one(std::string_view bytes) noexcept;
+Decoded decode_one(std::string_view bytes) noexcept pre(!bytes.empty());
 
 struct Encoded {
     std::array<char, 4> bytes;

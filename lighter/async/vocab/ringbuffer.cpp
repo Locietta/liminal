@@ -1,7 +1,7 @@
 #include "ringbuffer.h"
 
 #include <algorithm>
-#include <cassert>
+#include <contracts>
 #include <cstring>
 
 #include <lighter/types.hpp>
@@ -43,7 +43,7 @@ std::pair<const char *, usize> RingBuffer::get_read_ptr() const {
         contiguous = capacity - head;
     }
 
-    assert(contiguous > 0 && "get_read_ptr: non-empty buffer must yield contiguous > 0");
+    contract_assert(contiguous > 0);
     return {storage.get() + head, contiguous};
 }
 

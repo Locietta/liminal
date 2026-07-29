@@ -1,13 +1,11 @@
 #include "utf8.h"
 
-#include <cassert>
+#include <contracts>
 #include <cstring>
 
 namespace lighter::encoding::utf8 {
 
 Decoded decode_one(std::string_view bytes) noexcept {
-    assert(!bytes.empty() && "decode_one requires at least one byte");
-
     const auto b0 = static_cast<u8>(bytes[0]);
     if (b0 < 0x80) {
         return {b0, 1, DecodeStatus::OK};
@@ -177,7 +175,7 @@ void Sanitizer::feed(std::string_view bytes, std::string &out) {
             out.append(k_replacement);
         }
         // the carry was a valid prefix, so decode never stops short of it
-        assert(decoded.size >= carry_len && "maximal subpart cannot end inside the carried prefix");
+        contract_assert(decoded.size >= carry_len);
         bytes.remove_prefix(decoded.size - carry_len);
         carry_len = 0;
     }

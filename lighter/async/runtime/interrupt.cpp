@@ -1,6 +1,7 @@
 #include "interrupt.h"
 
 #include <algorithm>
+#include <contracts>
 #include <deque>
 #include <utility>
 #include <vector>
@@ -10,7 +11,6 @@
 #include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/sync.h>
 #include <lighter/async/vocab/cancellation.h>
-#include <lighter/utils/panic.h>
 
 namespace lighter {
 
@@ -156,16 +156,7 @@ Result<InterruptSource> InterruptSource::create(std::initializer_list<SignalKind
                   loop);
 }
 
-CancellationToken InterruptSource::token() const noexcept {
-    // Unlike the other accessors this cannot degrade gracefully:
-    // CancellationToken has no default state to hand back, so a moved-from
-    // source is a caller bug. Panics in every build - under NDEBUG an assert
-    // would vanish and leave a null dereference in its place.
-    if (!self) {
-        panic("InterruptSource::token() on a moved-from source");
-    }
-    return self->source.token();
-}
+CancellationToken InterruptSource::token() const noexcept { return self->source.token(); }
 
 Task<SignalKind, Error> InterruptSource::next() {
     if (!self) {

@@ -1,6 +1,6 @@
 #include "node.h"
 
-#include <cassert>
+#include <contracts>
 #include <utility>
 #include <vector>
 
@@ -22,7 +22,7 @@ void drain_pending_destroys() {
         auto queued = std::move(pending_frame_destroys);
         pending_frame_destroys.clear();
         for (auto handle : queued) {
-            assert(handle && "pending destroy queue contains a null handle");
+            contract_assert(handle != nullptr);
             handle.destroy();
         }
     }
@@ -34,7 +34,6 @@ void drain_pending_destroys() {
 void AsyncNode::resume_and_drain(std::coroutine_handle<> handle) {
     static thread_local bool draining = false;
 
-    assert(handle && "resume_and_drain called with null handle");
     const bool outermost = !draining;
     if (outermost) {
         draining = true;
@@ -71,10 +70,8 @@ std::coroutine_handle<> AggregateOp::settle_if_idle() noexcept {
 ///      intercepting, propagated upward via finalize otherwise;
 ///   3. success.
 std::coroutine_handle<> AggregateOp::settle() noexcept {
-    assert(pending == 0 && parent && !settled && "settle() caller must Check settle_if_idle");
     settled = true;
 
-    assert(parent->is_task_frame() && "aggregate parent must be a Task");
     auto *p = static_cast<TaskFrame *>(parent);
     parent = nullptr;
 
@@ -135,7 +132,7 @@ void AsyncNode::cancel() {
             }
             auto *p = self->parent;
             self->parent = nullptr;
-            assert(p && "WaitNode cancelled without a parent");
+            contract_assert(p != nullptr);
             auto next = p->on_child_complete(*self);
             AsyncNode::resume_and_drain(next);
             break;
@@ -162,7 +159,7 @@ void AsyncNode::cancel() {
 
         case NodeKind::SYSTEM_IO: {
             auto *self = static_cast<IoOp *>(this);
-            assert(self->action && "IoOp cancelled without a Cancellation action");
+            contract_assert(self->action != nullptr);
             self->action(self);
             break;
         }
@@ -213,7 +210,6 @@ void IoOp::complete() noexcept {
     }
     auto *p = parent;
     parent = nullptr;
-    assert(p && "IoOp completed without a linked parent");
     auto next = p->on_child_complete(*this);
     AsyncNode::resume_and_drain(next);
 }
@@ -224,8 +220,6 @@ void IoOp::complete() noexcept {
 /// is resumed while the parent's await_suspend is still on the stack; the
 /// compiler performs the transfer after it returns.
 std::coroutine_handle<> AsyncNode::attach_cancelled(TaskFrame &parent) {
-    assert(parent.state == CANCELLED && "checkpoint requires a cancelled parent");
-
     switch (kind) {
         case NodeKind::TASK:
             // Never started; the frame is destroyed together with the parent
@@ -355,8 +349,6 @@ std::coroutine_handle<> AsyncNode::finalize() {
 ///   first deciding Event, counts the child off, and settles once every
 ///   child has completed (structured completion).
 std::coroutine_handle<> AsyncNode::on_child_complete(AsyncNode &child) {
-    assert(&child != this && "invalid parameter!");
-
     switch (kind) {
         case NodeKind::TASK: {
             auto self = static_cast<TaskFrame *>(this);
@@ -385,8 +377,8 @@ std::coroutine_handle<> AsyncNode::on_child_complete(AsyncNode &child) {
         case NodeKind::WHEN_ALL:
         case NodeKind::WHEN_ANY: {
             auto self = static_cast<AggregateOp *>(this);
-            assert(!self->settled && "aggregate received child completion after settling");
-            assert(self->pending > 0 && "aggregate completed more children than it owns");
+            contract_assert(!self->settled);
+            contract_assert(self->pending > 0);
 
             const bool intercepts = self->policy & INTERCEPT_CANCEL;
             // A cancelled child is a Cancellation Event unless the child
@@ -426,8 +418,8 @@ std::coroutine_handle<> AsyncNode::on_child_complete(AsyncNode &child) {
 
         case NodeKind::TASK_GROUP: {
             auto *self = static_cast<AggregateOp *>(this);
-            assert(!self->settled && "TaskGroup received child completion after settling");
-            assert(self->pending > 0 && "TaskGroup completed more children than it owns");
+            contract_assert(!self->settled);
+            contract_assert(self->pending > 0);
 
             if (child.state == FAILED) {
                 // A failed child aborts the group, and its Error must survive
@@ -455,7 +447,7 @@ std::coroutine_handle<> AsyncNode::on_child_complete(AsyncNode &child) {
             // own final suspension is the same pattern finalize() uses for
             // root tasks.
             if (child.state != FAILED) {
-                assert(child.kind == NodeKind::TASK && "TaskGroup children must be tasks");
+                contract_assert(child.kind == NodeKind::TASK);
                 self->children[self->find_child_index(child)] = nullptr;
                 self->reclaimed += 1;
                 auto handle = static_cast<TaskFrame &>(child).handle();

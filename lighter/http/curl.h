@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cassert>
+#include <contracts>
 #include <string_view>
 #include <utility>
 
@@ -72,65 +72,51 @@ inline void slist_free_all(curl_slist *list) noexcept {
 }
 
 template <typename T>
-inline EasyError setopt(CURL *handle, CURLoption option, T value) noexcept {
-    assert(handle != nullptr && "curl::setopt requires non-null easy handle");
+inline EasyError setopt(CURL *handle, CURLoption option, T value) noexcept pre(handle != nullptr) {
     return static_cast<EasyError>(::curl_easy_setopt(handle, option, value));
 }
 
 template <typename T>
-inline EasyError getinfo(CURL *handle, CURLINFO info, T value) noexcept {
-    assert(handle != nullptr && "curl::getinfo requires non-null easy handle");
+inline EasyError getinfo(CURL *handle, CURLINFO info, T value) noexcept pre(handle != nullptr) {
     return static_cast<EasyError>(::curl_easy_getinfo(handle, info, value));
 }
 
-inline EasyError easy_pause(CURL *handle, int bitmask) noexcept {
-    assert(handle != nullptr && "curl::easy_pause requires non-null easy handle");
+inline EasyError easy_pause(CURL *handle, int bitmask) noexcept pre(handle != nullptr) {
     return static_cast<EasyError>(::curl_easy_pause(handle, bitmask));
 }
 
 template <typename T>
-inline MultiError multi_setopt(CURLM *handle, CURLMoption option, T value) noexcept {
-    assert(handle != nullptr && "curl::multi_setopt requires non-null multi handle");
+inline MultiError multi_setopt(CURLM *handle, CURLMoption option, T value) noexcept pre(handle != nullptr) {
     return static_cast<MultiError>(::curl_multi_setopt(handle, option, value));
 }
 
 template <typename T>
-inline ShareError share_setopt(CURLSH *handle, CURLSHoption option, T value) noexcept {
-    assert(handle != nullptr && "curl::share_setopt requires non-null share handle");
+inline ShareError share_setopt(CURLSH *handle, CURLSHoption option, T value) noexcept pre(handle != nullptr) {
     return static_cast<ShareError>(::curl_share_setopt(handle, option, value));
 }
 
-inline MultiError multi_add_handle(CURLM *multi, CURL *easy) noexcept {
-    assert(multi != nullptr && "curl::multi_add_handle requires non-null multi handle");
-    assert(easy != nullptr && "curl::multi_add_handle requires non-null easy handle");
+inline MultiError multi_add_handle(CURLM *multi, CURL *easy) noexcept pre(multi != nullptr) pre(easy != nullptr) {
     return static_cast<MultiError>(::curl_multi_add_handle(multi, easy));
 }
 
-inline MultiError multi_remove_handle(CURLM *multi, CURL *easy) noexcept {
-    assert(multi != nullptr && "curl::multi_remove_handle requires non-null multi handle");
-    assert(easy != nullptr && "curl::multi_remove_handle requires non-null easy handle");
+inline MultiError multi_remove_handle(CURLM *multi, CURL *easy) noexcept pre(multi != nullptr) pre(easy != nullptr) {
     return static_cast<MultiError>(::curl_multi_remove_handle(multi, easy));
 }
 
-inline MultiError multi_assign(CURLM *multi, curl_socket_t socket, void *ptr) noexcept {
-    assert(multi != nullptr && "curl::multi_assign requires non-null multi handle");
+inline MultiError multi_assign(CURLM *multi, curl_socket_t socket, void *ptr) noexcept pre(multi != nullptr) {
     return static_cast<MultiError>(::curl_multi_assign(multi, socket, ptr));
 }
 
-inline MultiError multi_socket_action(CURLM *multi, curl_socket_t socket, int events, int *running_handles) noexcept {
-    assert(multi != nullptr && "curl::multi_socket_action requires non-null multi handle");
-    assert(running_handles != nullptr && "curl::multi_socket_action requires running counter");
+inline MultiError multi_socket_action(CURLM *multi, curl_socket_t socket, int events, int *running_handles) noexcept pre(multi != nullptr)
+    pre(running_handles != nullptr) {
     return static_cast<MultiError>(::curl_multi_socket_action(multi, socket, events, running_handles));
 }
 
-inline CURLMsg *multi_info_read(CURLM *multi, int *msgs_in_queue) noexcept {
-    assert(multi != nullptr && "curl::multi_info_read requires non-null multi handle");
-    assert(msgs_in_queue != nullptr && "curl::multi_info_read requires queue counter");
+inline CURLMsg *multi_info_read(CURLM *multi, int *msgs_in_queue) noexcept pre(multi != nullptr) pre(msgs_in_queue != nullptr) {
     return ::curl_multi_info_read(multi, msgs_in_queue);
 }
 
-inline curl_slist *slist_append(curl_slist *list, const char *text) noexcept {
-    assert(text != nullptr && "curl::slist_append requires non-null text");
+inline curl_slist *slist_append(curl_slist *list, const char *text) noexcept pre(text != nullptr) {
     return ::curl_slist_append(list, text);
 }
 

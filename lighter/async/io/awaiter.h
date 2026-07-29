@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cassert>
+#include <contracts>
 #include <concepts>
 #include <deque>
 #include <optional>
@@ -73,8 +73,7 @@ struct AwaitOp : IoOp {
     AwaitOp() : IoOp(Kind) { this->action = &Derived::on_cancel; }
 
     template <typename CleanupFn>
-    static void complete_cancel(IoOp *op, CleanupFn &&cleanup) noexcept {
-        assert(op && "complete_cancel requires a non-null operation");
+    static void complete_cancel(IoOp *op, CleanupFn &&cleanup) noexcept pre(op != nullptr) {
         auto *aw = static_cast<Derived *>(op);
         cleanup(*aw);
         aw->complete();
@@ -97,8 +96,7 @@ struct QueuedDelivery : WaiterBinding<ResultT> {
 
     bool has_pending() const noexcept { return !pending.empty(); }
 
-    ResultT take_pending() {
-        assert(!pending.empty() && "take_pending requires queued value");
+    ResultT take_pending() pre(!pending.empty()) {
         auto out = std::move(pending.front());
         pending.pop_front();
         return out;
@@ -123,8 +121,7 @@ struct StoredDelivery : WaiterBinding<ResultT> {
 
     bool has_pending() const noexcept { return pending.has_value(); }
 
-    ResultT take_pending() {
-        assert(pending.has_value() && "take_pending requires stored value");
+    ResultT take_pending() pre(pending.has_value()) {
         auto out = std::move(*pending);
         pending.reset();
         return out;
@@ -149,10 +146,7 @@ struct LatchedDelivery : WaiterBinding<ResultT> {
 
     bool has_pending() const noexcept { return pending.has_value(); }
 
-    const ResultT &peek_pending() const noexcept {
-        assert(pending.has_value() && "peek_pending requires latched value");
-        return *pending;
-    }
+    const ResultT &peek_pending() const noexcept pre(pending.has_value()) { return *pending; }
 
     void deliver(ResultT value) {
         pending = value;
@@ -172,8 +166,7 @@ struct LatestValueDelivery : WaiterBinding<Result<ValueT>> {
 
     bool has_pending() const noexcept { return pending.has_value(); }
 
-    Result<ValueT> take_pending() {
-        assert(pending.has_value() && "take_pending requires stored value");
+    Result<ValueT> take_pending() pre(pending.has_value()) {
         Result<ValueT> out(std::move(*pending));
         pending.reset();
         return out;

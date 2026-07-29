@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cassert>
 #include <concepts>
 #include <memory>
 #include <type_traits>
@@ -57,6 +56,13 @@ private:
     template <typename X>
     using member_t = std::conditional_t<std::is_void_v<X>, std::type_identity<void>, X>;
 
+    // GCC 16.1 ICEs when a contract on an explicit this member function is combined
+    // with a placeholder return type. Keep the return type explicitly
+    // dependent while preserving the cv/ref category deduced for Self.
+    // See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=115168 for the ICE report.
+    template <usize I, typename Self>
+    using member_ref_t = decltype(std::get<I>(std::declval<Self &&>().variant));
+
 public:
     template <typename U = T>
         requires(!std::is_void_v<T>) && std::constructible_from<T, U &&> &&
@@ -98,10 +104,9 @@ public:
     explicit operator bool() const noexcept { return has_value(); }
 
     template <typename Self>
-    decltype(auto) value(this Self &&self)
+    member_ref_t<0, Self> value(this Self &&self)
         requires(!std::is_void_v<T>)
-    {
-        assert(self.has_value());
+    pre(self.has_value()) {
         return std::get<0>(std::forward<Self>(self).variant);
     }
 
@@ -125,18 +130,16 @@ public:
     }
 
     template <typename Self>
-    decltype(auto) error(this Self &&self)
+    member_ref_t<1, Self> error(this Self &&self)
         requires(!std::is_void_v<E>)
-    {
-        assert(self.has_error());
+    pre(self.has_error()) {
         return std::get<1>(std::forward<Self>(self).variant);
     }
 
     template <typename Self>
-    decltype(auto) cancellation(this Self &&self)
+    member_ref_t<2, Self> cancellation(this Self &&self)
         requires(!std::is_void_v<C>)
-    {
-        assert(self.is_cancelled());
+    pre(self.is_cancelled()) {
         return std::get<2>(std::forward<Self>(self).variant);
     }
 

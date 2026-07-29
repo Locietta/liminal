@@ -1,7 +1,7 @@
 #pragma once
 
-#include <cassert>
 #include <concepts>
+#include <contracts>
 #include <coroutine>
 #include <cstdlib>
 #include <exception>
@@ -12,6 +12,7 @@
 #include <utility>
 
 #include <lighter/utils/config.h>
+#include <lighter/utils/panic.h>
 #include <lighter/utils/type_traits.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/runtime/node.h>
@@ -106,8 +107,7 @@ struct TransitionAwait {
             if (promise.state == AsyncNode::FAILED) {
                 return promise.finalize();
             }
-            assert((promise.state == AsyncNode::RUNNING || promise.state == AsyncNode::CANCELLED) &&
-                   "only a running or lazily-cancelled Task can finish");
+            contract_assert(promise.state == AsyncNode::RUNNING || promise.state == AsyncNode::CANCELLED);
             // Real errors outrank Cancellation (trio semantics): a Task that
             // fails or throws after being cancelled still reports the Error.
             // Only a normal completion of a cancelled Task finalizes as
@@ -123,7 +123,7 @@ struct TransitionAwait {
         } else if (state == AsyncNode::CANCELLED) {
             promise.state = state;
         } else {
-            assert(false && "unexpected Task state");
+            lighter::panic("unexpected Task state");
         }
         return promise.finalize();
     }
@@ -231,7 +231,7 @@ std::coroutine_handle<> propagate_fail(AsyncNode &child_node, AsyncNode &parent_
     }
 
     // Error: move into parent and short-circuit to FINISHED.
-    assert(child->value.has_value() && child->value->has_error());
+    contract_assert(child->value.has_value() && child->value->has_error());
     parent->value.emplace(outcome_error(ParentError(std::move(*child->value).error())));
     parent_task->state = AsyncNode::FAILED;
     return parent_task->finalize();
@@ -356,6 +356,10 @@ struct Task {
     using promise_type = TaskPromiseObject<T, E>;
 
     using coroutine_handle = std::coroutine_handle<promise_type>;
+    using result_type = std::conditional_t<std::is_void_v<E> && std::is_void_v<C>, std::conditional_t<std::is_void_v<T>, std::nullopt_t, T>,
+                                           Outcome<T, E, C>>;
+    using value_result_type = std::conditional_t<std::is_void_v<E>, std::conditional_t<std::is_void_v<T>, std::nullopt_t, std::optional<T>>,
+                                                 std::optional<Outcome<T, E, void>>>;
 
     struct Awaiter {
         Task awaitee;
@@ -376,7 +380,7 @@ struct Task {
                     std::abort();
                 }
                 if constexpr (!std::is_void_v<T>) {
-                    assert(promise.value.has_value() && "await_resume: value not set");
+                    contract_assert(promise.value.has_value());
                     return std::move(**promise.value);
                 }
             } else {
@@ -391,11 +395,11 @@ struct Task {
                 }
 
                 if constexpr (std::is_void_v<E>) {
-                    assert(promise.state == AsyncNode::FINISHED);
+                    contract_assert(promise.state == AsyncNode::FINISHED);
                 } else {
-                    assert(promise.state == AsyncNode::FINISHED || promise.state == AsyncNode::FAILED);
+                    contract_assert(promise.state == AsyncNode::FINISHED || promise.state == AsyncNode::FAILED);
                 }
-                assert(promise.value.has_value());
+                contract_assert(promise.value.has_value());
 
                 if constexpr (!std::is_void_v<E>) {
                     if (promise.value->has_error()) {
@@ -456,25 +460,25 @@ struct Task {
         }
     }
 
-    auto result() {
+    result_type result() pre(h != nullptr && h.promise().is_terminal() && (!h.promise().is_cancelled() || !std::is_void_v<C>) ) {
         auto &&promise = h.promise();
         promise.rethrow_if_exception();
         if constexpr (std::is_void_v<E> && std::is_void_v<C>) {
             if constexpr (!std::is_void_v<T>) {
-                assert(promise.value.has_value() && "result() on empty return");
+                contract_assert(promise.value.has_value());
                 return std::move(**promise.value);
             } else {
                 return std::nullopt;
             }
         } else if constexpr (std::is_void_v<C>) {
-            assert(promise.value.has_value() && "result() on empty return");
+            contract_assert(promise.value.has_value());
             return std::move(*promise.value);
         } else {
             return take_outcome(promise);
         }
     }
 
-    auto value() {
+    value_result_type value() pre(h != nullptr && h.promise().is_terminal()) {
         auto &&promise = h.promise();
         promise.rethrow_if_exception();
         if constexpr (std::is_void_v<E>) {
@@ -493,10 +497,10 @@ struct Task {
 
     void release() { this->h = nullptr; }
 
-    AsyncNode *operator->() { return &h.promise(); }
+    AsyncNode *operator->() pre(h != nullptr) { return &h.promise(); }
 
     /// Adds Cancellation interception. Idempotent if already intercepting.
-    auto catch_cancel() && {
+    Task<T, E, Cancellation> catch_cancel() && pre(h != nullptr) {
         if constexpr (std::same_as<C, Cancellation>) {
             return std::move(*this);
         } else {
@@ -518,11 +522,11 @@ private:
         }
 
         if constexpr (std::is_void_v<E>) {
-            assert(promise.state == AsyncNode::FINISHED);
+            contract_assert(promise.state == AsyncNode::FINISHED);
         } else {
-            assert(promise.state == AsyncNode::FINISHED || promise.state == AsyncNode::FAILED);
+            contract_assert(promise.state == AsyncNode::FINISHED || promise.state == AsyncNode::FAILED);
         }
-        assert(promise.value.has_value() && "result() on empty return");
+        contract_assert(promise.value.has_value());
 
         if constexpr (!std::is_void_v<E>) {
             if (promise.value->has_error()) {

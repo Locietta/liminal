@@ -1,7 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <cassert>
+#include <contracts>
 #include <concepts>
 #include <cstring>
 #include <functional>
@@ -354,7 +354,7 @@ constexpr usize range_length(Range &&range) {
     if constexpr (numeric_max<usize>() < numeric_max<ItDiffT>()) {
         if constexpr (std::ranges::random_access_range<Range>) {
             const auto len = last - first;
-            assert(0 <= len && "Invalid range.");
+            contract_assert(0 <= len);
             check_range_length_overflow(len);
             return static_cast<usize>(len);
         } else {

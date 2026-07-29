@@ -189,7 +189,8 @@ void test_leak_free() {
         owners.insert(owners.begin() + 5, std::make_unique<i32>(1000));
         owners.shrink_to_fit();
     }
-    require(live_allocations == live_before, "relocation paths leaked or double-freed");
+    const bool leak_free = live_allocations == live_before;
+    require(leak_free, "relocation paths leaked or double-freed");
 }
 
 // --- runtime: Function SBO admits move-only relocatable callables -----------

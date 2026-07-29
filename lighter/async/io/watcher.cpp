@@ -1,7 +1,6 @@
 #include "watcher.h"
 
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <csignal>
 #include <memory>
@@ -9,7 +8,6 @@
 #include <vector>
 
 #include <lighter/types.hpp>
-#include <lighter/utils/config.h>
 #include <lighter/async/io/awaiter.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/vocab/error.h>
@@ -93,10 +91,7 @@ struct SignalSet::Self : uv::QueuedDelivery<Result<SignalKind>> {
         }
     }
 
-    void unref_slots() noexcept {
-        if (holds == 0) {
-            LIGHTER_PANIC("SignalSet loop hold released more times than it was taken");
-        }
+    void unref_slots() noexcept pre(holds > 0) {
         if (--holds > 0) {
             return;
         }
@@ -139,9 +134,7 @@ struct BasicTickAwait : uv::AwaitOp<BasicTickAwait<SelfT, HandleT>> {
 
     static void on_fire(HandleT *handle) {
         auto *watcher = static_cast<SelfT *>(handle->data);
-        if (watcher == nullptr) {
-            LIGHTER_PANIC("watcher tick fired with no state in handle->data");
-        }
+        contract_assert(watcher != nullptr);
 
         if (watcher->waiter) {
             auto w = watcher->waiter;
@@ -202,9 +195,7 @@ struct SignalAwait : uv::AwaitOp<SignalAwait> {
 
     static void on_fire(uv_signal_t *handle) {
         auto *watcher = static_cast<Signal::Self *>(handle->data);
-        if (watcher == nullptr) {
-            LIGHTER_PANIC("signal fired with no watcher state in handle->data");
-        }
+        contract_assert(watcher != nullptr);
 
         if (watcher->waiter && watcher->active) {
             *watcher->active = {};
@@ -273,9 +264,8 @@ struct SignalSetAwait : uv::AwaitOp<SignalSetAwait> {
 
     static void on_fire(uv_signal_t *handle) {
         auto *slot = static_cast<SignalSlot *>(handle->data);
-        if (slot == nullptr || slot->owner == nullptr) {
-            LIGHTER_PANIC("signal fired on a slot that outlived its SignalSet");
-        }
+
+        contract_assert(slot != nullptr && slot->owner != nullptr);
 
         slot->owner->deliver(Result<SignalKind>(slot->kind));
     }
@@ -341,12 +331,6 @@ void Timer::start(std::chrono::milliseconds timeout, std::chrono::milliseconds r
     }
 
     auto &handle = self->handle;
-    // Checked in every build: with NDEBUG these asserts vanished and the
-    // negative count was cast to u64, turning "already expired" into a wait of
-    // roughly 584 million years.
-    if (timeout.count() < 0 || repeat.count() < 0) {
-        LIGHTER_PANIC("Timer::start requires non-negative durations");
-    }
     uv::timer_start(
         handle, [](uv_timer_t *h) { timer_await::on_fire(h); }, static_cast<u64>(timeout.count()), static_cast<u64>(repeat.count()));
 }
@@ -645,9 +629,8 @@ Task<> sleep(std::chrono::milliseconds timeout, EventLoop &loop) {
     // report - no handle, or a second concurrent waiter - are both unreachable
     // here. Keeping sleep() as Task<> spares every caller an error channel it
     // could never observe.
-    if (auto result = co_await t.wait(); result.has_error()) {
-        LIGHTER_PANIC("sleep: private Timer failed to wait");
-    }
+    auto result = co_await t.wait();
+    contract_assert(!result.has_error());
 }
 
 } // namespace lighter

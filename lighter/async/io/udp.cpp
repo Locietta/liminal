@@ -1,6 +1,6 @@
 #include "udp.h"
 
-#include <cassert>
+#include <contracts>
 #include <optional>
 #include <utility>
 
@@ -128,7 +128,7 @@ struct UdpRecvAwait : uv::AwaitOp<UdpRecvAwait> {
 
     static void on_alloc(uv_handle_t *handle, usize, uv_buf_t *buf) {
         auto *u = static_cast<Udp::Self *>(handle->data);
-        assert(u != nullptr && "on_alloc requires Udp state in handle->data");
+        contract_assert(u != nullptr);
 
         buf->base = u->buffer.data();
         buf->len = static_cast<decltype(buf->len)>(u->buffer.size());
@@ -136,7 +136,7 @@ struct UdpRecvAwait : uv::AwaitOp<UdpRecvAwait> {
 
     static void on_read(uv_udp_t *handle, isize nread, const uv_buf_t *buf, const struct sockaddr *addr, u32 flags) {
         auto *u = static_cast<Udp::Self *>(handle->data);
-        assert(u != nullptr && "on_read requires Udp state in handle->data");
+        contract_assert(u != nullptr);
 
         if (auto err = uv::status_to_error(nread)) {
             u->recv.mark_cancelled_if(nread);
@@ -153,11 +153,7 @@ struct UdpRecvAwait : uv::AwaitOp<UdpRecvAwait> {
 
         Udp::RecvResult out{};
         if (nread > 0) {
-            assert(buf != nullptr && buf->base != nullptr && "successful UDP read requires a buffer");
-            if (buf == nullptr || buf->base == nullptr) {
-                u->recv.deliver(Error::k_io_error);
-                return;
-            }
+            contract_assert(buf != nullptr && buf->base != nullptr);
             out.data.assign(buf->base, buf->base + static_cast<usize>(nread));
         }
         out.flags = to_udp_recv_flags(flags);
@@ -233,9 +229,9 @@ struct UdpSendAwait : uv::AwaitOp<UdpSendAwait> {
 
     static void on_send(uv_udp_send_t *req, i32 status) {
         auto *handle = static_cast<uv_udp_t *>(req->handle);
-        assert(handle != nullptr && "on_send requires req->handle");
+        contract_assert(handle != nullptr);
         auto *u = static_cast<Udp::Self *>(handle->data);
-        assert(u != nullptr && "on_send requires Udp state in handle->data");
+        contract_assert(u != nullptr);
 
         u->send_inflight = false;
 
