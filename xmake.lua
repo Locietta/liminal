@@ -1,34 +1,21 @@
 set_xmakever("3.0.0")
 set_project("liminal")
 
-add_rules("mode.release", "mode.debug", "mode.releasedbg")
+-- use releasedbg for development builds, ship with release
+add_rules("mode.release", "mode.releasedbg")
 
 set_languages("cxxlatest")
 
-option("contract_semantic")
-    set_default("enforce")
-    set_values("ignore", "observe", "enforce", "quick_enforce")
-    set_description("Select the C++26 contract evaluation semantic")
-    after_check(function (option)
-        local valid_semantics = {
-            ignore = true,
-            observe = true,
-            enforce = true,
-            quick_enforce = true,
-        }
-        local semantic = option:value()
-        assert(
-            valid_semantics[semantic],
-            "Invalid contract semantic '" .. tostring(semantic) ..
-                "'; expected ignore, observe, enforce, or quick_enforce.")
-    end)
-option_end()
+local contract_semantic = "enforce"
+if is_mode("release") then
+    contract_semantic = "ignore"
+end
 
 -- Enable reflection and contracts on gcc 16+
 add_cxxflags(
     "-freflection",
     "-fcontracts",
-    "-fcontract-evaluation-semantic=$(contract_semantic)",
+    "-fcontract-evaluation-semantic=" .. contract_semantic,
     {tools = {"gcc", "gxx"}, force = true})
 
 if is_os("windows") then
