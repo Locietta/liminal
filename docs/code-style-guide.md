@@ -86,3 +86,24 @@ This way we can keep the main structs in our codebase as plain non virtual struc
 We have some short convenience types defined in `lighter/types.hpp`, use them over the standard types. (e.g. use `usize` instead of `std::size_t`).
 
 These types should be direcly available inside the `lighter` namespace, if you are in a different namespace, `using namespace lighter::types;` is generally recommended.
+
+## Assertions, Contracts and Panic
+
+Do not use `<cassert>` or `assert()`. Use C++26 contracts for programmer obligations and internal invariants:
+
+- Use `pre` and `post` for interface-level preconditions and postconditions. Place them on the first declaration, normally in the public header, and do not repeat them on an out-of-line definition.
+- Use `contract_assert` for internal invariants at a particular point in an implementation.
+
+Production builds use `-fcontract-evaluation-semantic=ignore`, while development and test builds use `enforce`. Consequently, correctness in production must not depend on a contract predicate being evaluated.
+
+Use `lighter::check(condition, message)` for conditional failures that must remain checked in production. Use `lighter::panic(message)` for unconditional fatal paths. Prefer `lighter::check` over an `if` statement whose only purpose is to call `lighter::panic`.
+
+## Error Handling
+
+Generally we will have 3 kinds of failures in our codebase:
+
+- **Expected failures**. These are failures that are expected to happen and should be handled by the caller. For example, a file not found error when trying to open a file. These failures should be returned as `lighter::Outcome` (or `std::expected` if cancellation is not needed).
+- **Rare failures whose only sensible handler is a distant recovery boundary**. These are failures that hardly happen and cannot be handled by the immediate caller. These should be thrown as runtime exceptions.
+- **Fatal failures**. These are the failures that can't be handled meaningfully anywhere in the codebase. For example, an OOM error. These should `panic` .
+
+Distinguish these 3 kinds of failures by asking who can act on the failure. If the immediate caller can act on it, return `lighter::Outcome`. If only a distant recovery boundary can act on it, throw an exception. If no one can act on it, `panic`.
