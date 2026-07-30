@@ -29,9 +29,13 @@ struct Error {
 
     // HTTP_STATUS extras
     int status = 0;
-    std::string api_type;   ///< Anthropic error envelope type, e.g. "overloaded_error"
+    std::string api_type;   ///< provider error envelope type, e.g. "overloaded_error"
     std::string request_id; ///< request-id header when available
     std::optional<std::chrono::milliseconds> retry_after;
+    /// For API errors without an HTTP status (SSE error events): whether the
+    /// originating provider classified its envelope type as transient. Only
+    /// the provider knows its own vocabulary, so it sets this at creation.
+    bool transient = false;
 
     // wrapped source errors
     std::optional<lighter::http::Error> http_error;
@@ -46,9 +50,9 @@ struct Error {
                 if (status != 0) {
                     return status == 429 || status >= 500;
                 }
-                // SSE `error` events carry no HTTP status, only an envelope type.
-                return api_type == "overloaded_error" || api_type == "rate_limit_error" || api_type == "api_error" ||
-                       api_type == "timeout_error" || api_type == "server_error" || api_type == "rate_limit_exceeded";
+                // SSE `error` events carry no HTTP status; the provider
+                // classified its envelope type when it created the error.
+                return transient;
             default: return false;
         }
     }
@@ -96,6 +100,19 @@ struct Error {
             .api_type = std::move(api_type),
             .request_id = std::move(request_id),
             .retry_after = retry_after,
+        };
+    }
+
+    /// A provider-reported error with no HTTP status (e.g. an SSE `error`
+    /// event); `transient` is the provider's own classification of its
+    /// envelope type.
+    static Error api(std::string api_type, std::string detail, std::string request_id, bool transient) {
+        return {
+            .kind = ErrorKind::HTTP_STATUS,
+            .detail = std::move(detail),
+            .api_type = std::move(api_type),
+            .request_id = std::move(request_id),
+            .transient = transient,
         };
     }
 
