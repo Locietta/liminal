@@ -191,7 +191,7 @@ Task<std::string, Error> tool_run_command(const ToolSet &tools, RunCommandInput 
 
 ToolSet::ToolSet(std::string working_directory) : working_directory(std::move(working_directory)) {}
 
-std::vector<anthropic::ToolDefinition> ToolSet::definitions() const {
+std::vector<provider::ToolDefinition> ToolSet::definitions() const {
     return {
         {
             .name = "read_file",
@@ -216,8 +216,8 @@ std::vector<anthropic::ToolDefinition> ToolSet::definitions() const {
     };
 }
 
-Task<anthropic::ToolResultBlock, Error> ToolSet::execute(const anthropic::ToolUseBlock &call) const {
-    anthropic::ToolResultBlock result{.tool_use_id = call.id};
+Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &call) const {
+    provider::ToolResult result{.call_id = call.id};
 
     if (call.name == "read_file") {
         auto input = co_await or_fail(parse_input<ReadFileInput>(call.input));

@@ -13,6 +13,9 @@
 #include <lighter/async/runtime/when.h>
 #include <lighter/async/vocab/cancellation.h>
 
+#include "liminal/provider/anthropic.h"
+#include "liminal/provider/openai.h"
+
 namespace liminal {
 
 using lighter::CancellationSource;
@@ -30,11 +33,11 @@ namespace {
 /// Runs one tool call, converting infrastructure failures into is_error
 /// results so one bad call never aborts its siblings. Cancellation still
 /// unwinds normally - it is not an error.
-Task<anthropic::ToolResultBlock> execute_one(const ToolSet &tools, const anthropic::ToolUseBlock &call) {
+Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::ToolCall &call) {
     auto outcome = co_await tools.execute(call);
     if (!outcome) {
-        co_return anthropic::ToolResultBlock{
-            .tool_use_id = call.id,
+        co_return provider::ToolResult{
+            .call_id = call.id,
             .content = "Error: " + outcome.error().message(),
             .is_error = true,
         };
@@ -44,55 +47,47 @@ Task<anthropic::ToolResultBlock> execute_one(const ToolSet &tools, const anthrop
 
 } // namespace
 
-Task<void, Error> Agent::run_turn(std::string prompt, const anthropic::StreamCallbacks &callbacks) {
+template <typename Client>
+Task<void, Error> Agent<Client>::run_turn(std::string prompt, const provider::StreamCallbacks &callbacks) {
     // Transactional: staged history only replaces the committed history after
     // a complete terminal response, so cancellation and errors can simply
     // drop the partial turn without leaving tool_use/tool_result imbalances.
     auto staged = history;
-    staged.push_back(anthropic::user_text(std::move(prompt)));
+    Client::append_user(staged, std::move(prompt));
 
     constexpr i32 k_max_iterations = 32;
     for (i32 iteration = 0; iteration < k_max_iterations; ++iteration) {
-        anthropic::MessageRequest request{
-            .model = model,
-            .max_tokens = max_tokens,
-            .messages = staged,
-            .tools = tools->definitions(),
-        };
-        auto response = co_await client->create_message(request, callbacks).or_fail();
+        auto response = co_await client->create_message(model, max_tokens, staged, tools->definitions(), callbacks).or_fail();
+        auto calls = Client::tool_calls(response);
 
-        if (response.stop_reason == "end_turn" || response.stop_reason == "stop_sequence") {
-            staged.push_back({.role = std::string(anthropic::k_role_assistant), .content = std::move(response.content)});
+        if (Client::is_terminal(response)) {
+            Client::append_response(staged, std::move(response));
             history = std::move(staged);
             co_return;
         }
-        if (response.stop_reason != "tool_use") {
-            co_await fail(Error::protocol("turn ended with unhandled stop_reason: " + response.stop_reason));
+        if (!Client::requires_tool_results(response)) {
+            co_await fail(Error::protocol("provider returned an unsupported non-terminal response"));
+        }
+        if (calls.empty()) {
+            co_await fail(Error::protocol("provider requested continuation without any tool calls"));
         }
 
-        // The full content array - thinking blocks included - must be echoed
-        // back for a valid continuation.
-        staged.push_back({.role = std::string(anthropic::k_role_assistant), .content = std::move(response.content)});
-
-        std::vector<Task<anthropic::ToolResultBlock>> pending;
-        for (const auto &block : staged.back().content) {
-            if (const auto *call = std::get_if<anthropic::ToolUseBlock>(&block)) {
-                std::printf("\n[running tool: %s]\n", call->name.c_str());
-                pending.push_back(execute_one(*tools, *call));
-            }
+        std::vector<Task<provider::ToolResult>> pending;
+        pending.reserve(calls.size());
+        for (const auto *call : calls) {
+            std::printf("\n[running tool: %s]\n", call->name.c_str());
+            pending.push_back(execute_one(*tools, *call));
         }
-        if (pending.empty()) {
-            co_await fail(Error::protocol("stop_reason tool_use without tool_use blocks"));
-        }
-
         auto joined = co_await WhenAll(std::move(pending));
 
-        // All results travel in a single user message, in call order.
-        anthropic::Message tool_message{.role = std::string(anthropic::k_role_user)};
+        // Preserve the complete provider response before its tool outputs.
+        Client::append_response(staged, std::move(response));
+        std::vector<provider::ToolResult> results;
+        results.reserve(joined.size());
         for (auto &result : joined) {
-            tool_message.content.push_back(std::move(result));
+            results.push_back(std::move(result));
         }
-        staged.push_back(std::move(tool_message));
+        Client::append_tool_results(staged, std::move(results));
     }
     co_await fail(Error::protocol("exceeded " + std::to_string(k_max_iterations) + " tool iterations in one turn"));
 }
@@ -149,6 +144,10 @@ struct TurnControl {
     CancellationSource *active_turn = nullptr;
 };
 
+constexpr std::string_view k_default_compact_instructions =
+    "Compact the conversation while preserving the user's goals, constraints, decisions, "
+    "important tool results, modified files, unresolved issues, and the context needed to continue.";
+
 /// Watches fatal signals for the REPL's lifetime. First Ctrl-C cancels the
 /// in-flight turn (and keeps watching); with no turn active it returns, which
 /// makes WhenAny cancel the REPL body blocked on stdin. A second Ctrl-C
@@ -171,8 +170,9 @@ Task<void> signal_monitor(InterruptSource &interrupts, TurnControl &control) {
     }
 }
 
-Task<i32> repl_body(Agent &agent, LineReader &reader, TurnControl &control) {
-    anthropic::StreamCallbacks callbacks{
+template <typename Client>
+Task<i32> repl_body(Agent<Client> &agent, LineReader &reader, TurnControl &control) {
+    provider::StreamCallbacks callbacks{
         .on_text_delta = [](std::string_view text) { std::fwrite(text.data(), 1, text.size(), stdout); },
     };
 
@@ -190,6 +190,21 @@ Task<i32> repl_body(Agent &agent, LineReader &reader, TurnControl &control) {
         }
         if (prompt == "/quit" || prompt == "/exit") {
             co_return 0;
+        }
+        if (prompt == "/compact" || prompt.starts_with("/compact ")) {
+            if constexpr (requires { agent.client->compact_history(agent.model, agent.history, std::string{}); }) {
+                auto instructions = prompt == "/compact" ? std::string(k_default_compact_instructions) :
+                                                           prompt.substr(std::string_view("/compact ").size());
+                auto compacted = co_await agent.client->compact_history(agent.model, agent.history, std::move(instructions));
+                if (compacted) {
+                    std::fputs("[history compacted]\n", stdout);
+                } else {
+                    std::fprintf(stdout, "[compact error: %s]\n", compacted.error().message().c_str());
+                }
+            } else {
+                std::fputs("[this provider does not support remote compaction]\n", stdout);
+            }
+            continue;
         }
 
         CancellationSource turn_source;
@@ -209,7 +224,8 @@ Task<i32> repl_body(Agent &agent, LineReader &reader, TurnControl &control) {
 
 } // namespace
 
-Task<i32> run_repl(Agent &agent, InterruptSource &interrupts) {
+template <typename Client>
+Task<i32> run_repl(Agent<Client> &agent, InterruptSource &interrupts) {
     LineReader reader;
     Console console;
     Pipe pipe;
@@ -238,5 +254,10 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts) {
     }
     co_return 130; // idle Ctrl-C
 }
+
+template struct Agent<anthropic::Client>;
+template struct Agent<openai::Client>;
+template Task<i32> run_repl(Agent<anthropic::Client> &, InterruptSource &);
+template Task<i32> run_repl(Agent<openai::Client> &, InterruptSource &);
 
 } // namespace liminal

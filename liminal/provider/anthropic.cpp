@@ -495,4 +495,49 @@ Task<AssistantMessage, Error> Client::create_message(const MessageRequest &reque
     }
 }
 
+Task<AssistantMessage, Error> Client::create_message(std::string model, u32 max_tokens, const History &history,
+                                                     const std::vector<ToolDefinition> &tools, const StreamCallbacks &callbacks) {
+    co_return co_await create_message(
+        {
+            .model = std::move(model),
+            .max_tokens = max_tokens,
+            .messages = history,
+            .tools = tools,
+        },
+        callbacks);
+}
+
+void Client::append_user(History &history, std::string prompt) { history.push_back(user_text(std::move(prompt))); }
+
+std::vector<const ToolUseBlock *> Client::tool_calls(const Response &response) {
+    std::vector<const ToolUseBlock *> calls;
+    for (const auto &block : response.content) {
+        if (const auto *call = std::get_if<ToolUseBlock>(&block)) {
+            calls.push_back(call);
+        }
+    }
+    return calls;
+}
+
+bool Client::is_terminal(const Response &response) { return response.stop_reason == "end_turn" || response.stop_reason == "stop_sequence"; }
+
+bool Client::requires_tool_results(const Response &response) { return response.stop_reason == "tool_use"; }
+
+void Client::append_response(History &history, Response response) {
+    history.push_back({.role = std::string(k_role_assistant), .content = std::move(response.content)});
+}
+
+void Client::append_tool_results(History &history, std::vector<provider::ToolResult> results) {
+    Message message{.role = std::string(k_role_user)};
+    message.content.reserve(results.size());
+    for (auto &result : results) {
+        message.content.push_back(ToolResultBlock{
+            .tool_use_id = std::move(result.call_id),
+            .content = std::move(result.content),
+            .is_error = result.is_error,
+        });
+    }
+    history.push_back(std::move(message));
+}
+
 } // namespace liminal::anthropic

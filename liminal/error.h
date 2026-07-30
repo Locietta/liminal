@@ -48,7 +48,7 @@ struct Error {
                 }
                 // SSE `error` events carry no HTTP status, only an envelope type.
                 return api_type == "overloaded_error" || api_type == "rate_limit_error" || api_type == "api_error" ||
-                       api_type == "timeout_error";
+                       api_type == "timeout_error" || api_type == "server_error" || api_type == "rate_limit_exceeded";
             default: return false;
         }
     }

@@ -2,8 +2,6 @@
 
 #include <array>
 #include <chrono>
-#include <functional>
-#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -17,6 +15,7 @@
 #include <lighter/types.hpp>
 
 #include "liminal/error.h"
+#include "liminal/provider/common.h"
 
 namespace liminal::anthropic {
 
@@ -33,12 +32,13 @@ struct TextBlock {
     std::string text;
 };
 
-struct ToolUseBlock {
-    std::string id;
-    std::string name;
-    glz::generic input;
-};
+// Neutral ToolCall's fields (id/name/input) already spell the Anthropic wire
+// names, so the alias serializes correctly as-is.
+using ToolUseBlock = provider::ToolCall;
 
+/// Wire shape for tool results; note `tool_use_id` is Anthropic's spelling of
+/// the neutral ToolResult's `call_id`. Requests only - responses never carry
+/// tool_result blocks.
 struct ToolResultBlock {
     std::string tool_use_id;
     std::string content;
@@ -67,23 +67,9 @@ inline Message user_text(std::string text) { return {.role = std::string(k_role_
 
 // --- tool definitions --------------------------------------------------
 
-struct SchemaProperty {
-    std::string type;
-    std::string description;
-};
-
-struct InputSchema {
-    std::string type = "object";
-    std::map<std::string, SchemaProperty> properties;
-    std::vector<std::string> required;
-    bool additional_properties = false; // serialized as "additionalProperties"
-};
-
-struct ToolDefinition {
-    std::string name;
-    std::string description;
-    InputSchema input_schema;
-};
+using SchemaProperty = provider::SchemaProperty;
+using InputSchema = provider::InputSchema;
+using ToolDefinition = provider::ToolDefinition;
 
 // --- request / response ------------------------------------------------
 
@@ -114,10 +100,7 @@ struct AssistantMessage {
 
 // --- client ------------------------------------------------------------
 
-struct StreamCallbacks {
-    /// Called for each text_delta as it arrives; may be empty.
-    std::function<void(std::string_view)> on_text_delta;
-};
+using StreamCallbacks = provider::StreamCallbacks;
 
 struct ClientOptions {
     /// Sent as `x-api-key` (direct Anthropic API convention).
@@ -131,12 +114,24 @@ struct ClientOptions {
 };
 
 struct Client {
+    using History = std::vector<Message>;
+    using Response = AssistantMessage;
+
     explicit Client(ClientOptions options);
 
     /// Streams one Messages API call to completion, invoking callbacks live.
     /// Retries transport/429/5xx failures with backoff, but only while no
     /// text has been surfaced through the callbacks.
     lighter::Task<AssistantMessage, Error> create_message(const MessageRequest &request, const StreamCallbacks &callbacks = {});
+    lighter::Task<AssistantMessage, Error> create_message(std::string model, u32 max_tokens, const History &history,
+                                                          const std::vector<ToolDefinition> &tools, const StreamCallbacks &callbacks = {});
+
+    static void append_user(History &history, std::string prompt);
+    static std::vector<const ToolUseBlock *> tool_calls(const Response &response);
+    static bool is_terminal(const Response &response);
+    static bool requires_tool_results(const Response &response);
+    static void append_response(History &history, Response response);
+    static void append_tool_results(History &history, std::vector<provider::ToolResult> results);
 
     ClientOptions options;
     lighter::http::Client http_client;
@@ -150,11 +145,4 @@ template <>
 struct glz::meta<liminal::anthropic::ContentBlock> {
     static constexpr std::string_view tag = "type";
     static constexpr auto ids = std::array{"text", "tool_use", "tool_result", "thinking", "redacted_thinking"};
-};
-
-template <>
-struct glz::meta<liminal::anthropic::InputSchema> {
-    using T = liminal::anthropic::InputSchema;
-    static constexpr auto value =
-        object("type", &T::type, "properties", &T::properties, "required", &T::required, "additionalProperties", &T::additional_properties);
 };
