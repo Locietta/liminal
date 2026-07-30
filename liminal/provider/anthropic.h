@@ -68,6 +68,11 @@ struct Client {
         co_return co_await complete(history, tools, callbacks).or_fail();
     }
 
+    lighter::Task<void, Error> compact_history(std::string model, History &history, std::string instructions) {
+        options.model = std::move(model);
+        co_return co_await compact(history, instructions).or_fail();
+    }
+
     static void append_user(History &history, std::string prompt) { provider::append_user(history, std::move(prompt)); }
     static std::vector<const provider::ToolCall *> tool_calls(const Response &response) { return provider::tool_calls(response); }
     static bool is_terminal(const Response &response) { return response.stop == provider::StopKind::DONE; }

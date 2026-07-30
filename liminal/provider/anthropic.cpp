@@ -14,6 +14,8 @@
 #include <lighter/async/io/watcher.h>
 #include <lighter/codec/json/json.h>
 
+#include "liminal/provider/compact.h"
+
 // Anthropic Messages API wire types. Internal: the public surface speaks the
 // neutral transcript (provider/history.h); everything here is serialization
 // detail behind complete()/compact().
@@ -689,11 +691,8 @@ Task<provider::TurnResponse, Error> Client::complete(const provider::History &hi
 }
 
 Task<void, Error> Client::compact(provider::History &history, std::string_view instructions) {
-    // Local compaction through complete() lands with provider/compact.h;
-    // until then this capability reports honestly instead of half-working.
-    (void) history;
-    (void) instructions;
-    co_await fail(Error::config("local compaction is not implemented yet"));
+    // No native compaction endpoint; summarize through our own complete().
+    co_return co_await provider::local_compact(this, history, instructions).or_fail();
 }
 
 } // namespace liminal::anthropic
