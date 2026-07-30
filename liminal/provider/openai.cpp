@@ -12,14 +12,131 @@
 #include <glaze/json.hpp>
 
 #include <lighter/async/async.h>
+#include <lighter/async/io/watcher.h>
 #include <lighter/codec/json/json.h>
-#include <lighter/http/http.h>
+
+#include "liminal/provider/compact.h"
+#include "liminal/provider/provider.h"
+
+// OpenAI Responses API wire types. Internal: the public surface speaks the
+// neutral transcript (provider/history.h); everything here is serialization
+// detail behind complete()/compact().
+namespace liminal::openai::wire {
+
+struct InputText {
+    std::string text;
+};
+
+struct OutputText {
+    std::string text;
+};
+
+struct Refusal {
+    std::string refusal;
+};
+
+using MessageContent = std::variant<InputText, OutputText, Refusal>;
+
+struct MessageItem {
+    std::optional<std::string> id;
+    std::string role;
+    std::vector<MessageContent> content;
+    std::optional<std::string> status;
+};
+
+struct FunctionCallItem {
+    std::optional<std::string> id;
+    std::string call_id;
+    std::string name;
+    std::string arguments;
+    std::optional<std::string> status;
+};
+
+struct FunctionCallOutputItem {
+    std::optional<std::string> id;
+    std::string call_id;
+    std::string output;
+    std::optional<std::string> status;
+};
+
+struct ReasoningSummaryText {
+    std::string type = "summary_text";
+    std::string text;
+};
+
+struct ReasoningText {
+    std::string type = "reasoning_text";
+    std::string text;
+};
+
+struct ReasoningItem {
+    std::string id;
+    std::vector<ReasoningSummaryText> summary;
+    std::vector<ReasoningText> content;
+    std::optional<std::string> encrypted_content;
+    std::optional<std::string> status;
+};
+
+struct CompactionItem {
+    std::string id;
+    std::string encrypted_content;
+    std::optional<std::string> created_by;
+};
+
+using ResponseItem = std::variant<MessageItem, FunctionCallItem, FunctionCallOutputItem, ReasoningItem, CompactionItem>;
+
+struct FunctionTool {
+    std::string name;
+    std::string description;
+    provider::InputSchema parameters;
+    bool strict = true;
+};
+
+using Tool = std::variant<FunctionTool>;
+
+struct ResponseRequest {
+    std::string model;
+    u32 max_output_tokens = 8192;
+    std::vector<ResponseItem> input;
+    std::optional<std::vector<Tool>> tools;
+    bool parallel_tool_calls = true;
+    bool stream = true;
+    bool store = false;
+    std::vector<std::string> include = {"reasoning.encrypted_content"};
+};
+
+struct CompactRequest {
+    std::string model;
+    std::vector<ResponseItem> input;
+    std::string instructions;
+};
+
+} // namespace liminal::openai::wire
+
+template <>
+struct glz::meta<liminal::openai::wire::MessageContent> {
+    static constexpr std::string_view tag = "type";
+    static constexpr auto ids = std::array{"input_text", "output_text", "refusal"};
+};
+
+template <>
+struct glz::meta<liminal::openai::wire::ResponseItem> {
+    static constexpr std::string_view tag = "type";
+    static constexpr auto ids = std::array{"message", "function_call", "function_call_output", "reasoning", "compaction"};
+};
+
+template <>
+struct glz::meta<liminal::openai::wire::Tool> {
+    static constexpr std::string_view tag = "type";
+    static constexpr auto ids = std::array{"function"};
+};
 
 namespace liminal::openai {
 
 namespace http = lighter::http;
 namespace json = lighter::codec::json;
 using lighter::fail;
+using lighter::or_fail;
 using lighter::outcome_error;
 using lighter::Task;
 
@@ -35,6 +152,131 @@ Result<T> parse_wire(std::string_view text, std::string_view context) {
     }
     return value;
 }
+
+/// OpenAI error codes/types that indicate a transient upstream condition.
+bool transient_api_type(std::string_view type) {
+    return type == "rate_limit_error" || type == "rate_limit_exceeded" || type == "server_error" || type == "api_error" ||
+           type == "overloaded_error" || type == "timeout_error";
+}
+
+// --- neutral <-> wire translation ---------------------------------------
+
+Result<std::string> encode_opaque(const wire::ResponseItem &item) {
+    auto encoded = json::to_string(item);
+    if (!encoded) {
+        return outcome_error(Error::json(std::move(encoded).error(), "opaque item"));
+    }
+    return *std::move(encoded);
+}
+
+Result<wire::FunctionCallItem> to_function_call(const provider::ToolCall &call) {
+    auto arguments = json::to_string(call.input);
+    if (!arguments) {
+        return outcome_error(Error::json(std::move(arguments).error(), "tool call arguments"));
+    }
+    return wire::FunctionCallItem{.call_id = call.id, .name = call.name, .arguments = *std::move(arguments)};
+}
+
+/// History -> Responses input items. One neutral item may fan out into
+/// several wire items: contiguous text parts form one message; every tool
+/// call/result and replayed opaque is its own top-level item. Opaque parts
+/// carrying our tag (reasoning with encrypted content, compaction items) are
+/// replayed verbatim; foreign-tagged parts are dropped.
+Result<std::vector<wire::ResponseItem>> to_wire(const provider::History &history) {
+    std::vector<wire::ResponseItem> items;
+    items.reserve(history.size());
+
+    for (const auto &item : history) {
+        const bool assistant = item.role == provider::Role::ASSISTANT;
+        wire::MessageItem message{.role = assistant ? "assistant" : "user"};
+
+        auto flush_message = [&] {
+            if (!message.content.empty()) {
+                items.push_back(std::exchange(message, wire::MessageItem{.role = assistant ? "assistant" : "user"}));
+            }
+        };
+
+        for (const auto &part : item.parts) {
+            if (const auto *text = std::get_if<provider::TextPart>(&part)) {
+                if (assistant) {
+                    message.content.push_back(wire::OutputText{.text = text->text});
+                } else {
+                    message.content.push_back(wire::InputText{.text = text->text});
+                }
+            } else if (const auto *call = std::get_if<provider::ToolCall>(&part)) {
+                flush_message();
+                auto function = to_function_call(*call);
+                if (!function) {
+                    return outcome_error(std::move(function).error());
+                }
+                items.push_back(*std::move(function));
+            } else if (const auto *result = std::get_if<provider::ToolResult>(&part)) {
+                flush_message();
+                items.push_back(wire::FunctionCallOutputItem{.call_id = result->call_id, .output = result->content});
+            } else if (const auto *opaque = std::get_if<provider::OpaquePart>(&part)) {
+                if (opaque->provider_tag != k_provider_tag) {
+                    continue; // another provider's private state
+                }
+                flush_message();
+                auto replayed = parse_wire<wire::ResponseItem>(opaque->payload, "opaque replay");
+                if (!replayed) {
+                    return outcome_error(std::move(replayed).error());
+                }
+                items.push_back(*std::move(replayed));
+            }
+        }
+        flush_message();
+    }
+    return items;
+}
+
+/// Wire output items -> neutral parts of one assistant response. Reasoning
+/// and compaction items become opaque parts so encrypted content replays
+/// bit-exact; refusal text stays visible as a text part.
+Result<void> to_parts(std::vector<wire::ResponseItem> output, provider::TurnResponse &response, bool &refused) {
+    for (auto &item : output) {
+        if (auto *message = std::get_if<wire::MessageItem>(&item)) {
+            for (auto &content : message->content) {
+                if (auto *text = std::get_if<wire::OutputText>(&content)) {
+                    response.parts.push_back(provider::TextPart{.text = std::move(text->text)});
+                } else if (auto *refusal = std::get_if<wire::Refusal>(&content)) {
+                    refused = true;
+                    response.parts.push_back(provider::TextPart{.text = std::move(refusal->refusal)});
+                } else if (auto *input = std::get_if<wire::InputText>(&content)) {
+                    response.parts.push_back(provider::TextPart{.text = std::move(input->text)});
+                }
+            }
+        } else if (auto *function = std::get_if<wire::FunctionCallItem>(&item)) {
+            auto input = parse_wire<glz::generic>(function->arguments.empty() ? std::string_view("{}") : function->arguments,
+                                                  "function_call arguments");
+            if (!input) {
+                return outcome_error(std::move(input).error());
+            }
+            if (!input->is_object()) {
+                return outcome_error(Error::protocol("function_call arguments are not a JSON object"));
+            }
+            response.parts.push_back(provider::ToolCall{
+                .id = std::move(function->call_id),
+                .name = std::move(function->name),
+                .input = *std::move(input),
+            });
+        } else if (std::holds_alternative<wire::ReasoningItem>(item) || std::holds_alternative<wire::CompactionItem>(item)) {
+            auto payload = encode_opaque(item);
+            if (!payload) {
+                return outcome_error(std::move(payload).error());
+            }
+            response.parts.push_back(provider::OpaquePart{
+                .provider_tag = std::string(k_provider_tag),
+                .payload = *std::move(payload),
+            });
+        } else {
+            return outcome_error(Error::protocol("unexpected function_call_output in model output"));
+        }
+    }
+    return {};
+}
+
+// --- SSE wire event payloads --------------------------------------------
 
 struct WireType {
     std::string type;
@@ -60,7 +302,6 @@ struct WireOutputTokenDetails {
 struct WireUsage {
     std::optional<u64> input_tokens;
     std::optional<u64> output_tokens;
-    std::optional<u64> total_tokens;
     std::optional<WireInputTokenDetails> input_tokens_details;
     std::optional<WireOutputTokenDetails> output_tokens_details;
 };
@@ -100,91 +341,40 @@ struct ErrorEvent {
 struct FailedResponseEvent {
     struct FailedResponse {
         std::optional<WireApiError> error;
+        std::optional<WireResponse::IncompleteDetails> incomplete_details;
     } response;
 };
 
-Result<ResponseItem> parse_item(const glz::generic &value) {
+Result<wire::ResponseItem> parse_item(const glz::generic &value) {
     auto encoded = json::to_string(value);
     if (!encoded) {
         return outcome_error(Error::json(std::move(encoded).error(), "response output item"));
     }
-    auto type = parse_wire<WireType>(*encoded, "response output item type");
-    if (!type) {
-        return outcome_error(std::move(type).error());
-    }
-
-    if (type->type == "message") {
-        auto item = parse_wire<MessageItem>(*encoded, "message output item");
-        if (!item) {
-            return outcome_error(std::move(item).error());
-        }
-        return ResponseItem(*std::move(item));
-    }
-    if (type->type == "function_call") {
-        auto item = parse_wire<FunctionCallItem>(*encoded, "function_call output item");
-        if (!item) {
-            return outcome_error(std::move(item).error());
-        }
-        return ResponseItem(*std::move(item));
-    }
-    if (type->type == "function_call_output") {
-        auto item = parse_wire<FunctionCallOutputItem>(*encoded, "function_call_output item");
-        if (!item) {
-            return outcome_error(std::move(item).error());
-        }
-        return ResponseItem(*std::move(item));
-    }
-    if (type->type == "reasoning") {
-        auto item = parse_wire<ReasoningItem>(*encoded, "reasoning output item");
-        if (!item) {
-            return outcome_error(std::move(item).error());
-        }
-        return ResponseItem(*std::move(item));
-    }
-    if (type->type == "compaction") {
-        auto item = parse_wire<CompactionItem>(*encoded, "compaction output item");
-        if (!item) {
-            return outcome_error(std::move(item).error());
-        }
-        return ResponseItem(*std::move(item));
-    }
-    return outcome_error(Error::protocol("unknown OpenAI response item type: " + type->type));
+    return parse_wire<wire::ResponseItem>(*encoded, "response output item");
 }
 
-Result<provider::ToolCall> make_tool_call(const FunctionCallItem &item) {
-    auto input = parse_wire<glz::generic>(item.arguments, "function_call arguments");
-    if (!input) {
-        return outcome_error(std::move(input).error());
-    }
-    if (!input->is_object()) {
-        return outcome_error(Error::protocol("function_call arguments are not a JSON object"));
-    }
-    return provider::ToolCall{
-        .id = item.call_id,
-        .name = item.name,
-        .input = *std::move(input),
-    };
-}
+// --- stream accumulator -------------------------------------------------
 
 struct StreamAccumulator {
-    Response response;
-    std::vector<std::optional<ResponseItem>> completed;
+    provider::TurnResponse response;
+    std::vector<std::optional<wire::ResponseItem>> completed;
+    std::string status;
     bool saw_created = false;
     bool saw_completed = false;
+    bool emitted_text = false;
 
     void apply_usage(const WireUsage &usage) {
         if (usage.input_tokens) response.usage.input_tokens = *usage.input_tokens;
         if (usage.output_tokens) response.usage.output_tokens = *usage.output_tokens;
-        if (usage.total_tokens) response.usage.total_tokens = *usage.total_tokens;
         if (usage.input_tokens_details && usage.input_tokens_details->cached_tokens) {
-            response.usage.cached_tokens = *usage.input_tokens_details->cached_tokens;
+            response.usage.cache_read_tokens = *usage.input_tokens_details->cached_tokens;
         }
         if (usage.output_tokens_details && usage.output_tokens_details->reasoning_tokens) {
             response.usage.reasoning_tokens = *usage.output_tokens_details->reasoning_tokens;
         }
     }
 
-    Result<void> add_item(u64 output_index, ResponseItem item) {
+    Result<void> add_item(u64 output_index, wire::ResponseItem item) {
         auto index = static_cast<usize>(output_index);
         if (completed.size() <= index) {
             completed.resize(index + 1);
@@ -210,7 +400,6 @@ struct StreamAccumulator {
                 return outcome_error(std::move(parsed).error());
             }
             saw_created = true;
-            response.id = std::move(parsed->response.id);
             response.model = std::move(parsed->response.model);
             return {};
         }
@@ -222,7 +411,7 @@ struct StreamAccumulator {
             if (!parsed) {
                 return outcome_error(std::move(parsed).error());
             }
-            response.emitted_text = true;
+            emitted_text = true;
             if (callbacks.on_text_delta && !parsed->delta.empty()) {
                 callbacks.on_text_delta(parsed->delta);
             }
@@ -247,10 +436,11 @@ struct StreamAccumulator {
             if (parsed->response.status != "completed") {
                 return outcome_error(Error::protocol("response.completed carried status: " + parsed->response.status));
             }
-            if (response.id.empty()) response.id = std::move(parsed->response.id);
             if (response.model.empty()) response.model = std::move(parsed->response.model);
             if (parsed->response.usage) apply_usage(*parsed->response.usage);
 
+            // Non-streaming-shaped gateways may only carry output on the
+            // final response object.
             if (completed.empty() && parsed->response.output) {
                 for (usize index = 0; index < parsed->response.output->size(); ++index) {
                     auto item = parse_item((*parsed->response.output)[index]);
@@ -263,8 +453,8 @@ struct StreamAccumulator {
                     }
                 }
             }
+            status = "completed";
             saw_completed = true;
-            response.completed = true;
             return {};
         }
         if (name == "response.failed" || name == "response.incomplete") {
@@ -274,14 +464,12 @@ struct StreamAccumulator {
             }
             if (parsed->response.error) {
                 auto type = parsed->response.error->code.value_or(parsed->response.error->type.value_or(""));
+                bool transient = transient_api_type(type);
                 return outcome_error(
-                    Error::http_status(0, std::move(type), std::move(parsed->response.error->message), response.request_id));
+                    Error::api(std::move(type), std::move(parsed->response.error->message), response.request_id, transient));
             }
-            if (name == "response.incomplete") {
-                auto response = parse_wire<ResponseEvent>(event.data, name);
-                if (response && response->response.incomplete_details) {
-                    return outcome_error(Error::protocol("response incomplete: " + response->response.incomplete_details->reason));
-                }
+            if (parsed->response.incomplete_details) {
+                return outcome_error(Error::protocol("response incomplete: " + parsed->response.incomplete_details->reason));
             }
             return outcome_error(Error::protocol(name + " without error detail"));
         }
@@ -290,32 +478,42 @@ struct StreamAccumulator {
             if (!parsed) {
                 return outcome_error(std::move(parsed).error());
             }
-            return outcome_error(Error::http_status(0, parsed->code.value_or(""), std::move(parsed->message), response.request_id));
+            auto code = parsed->code.value_or("");
+            bool transient = transient_api_type(code);
+            return outcome_error(Error::api(std::move(code), std::move(parsed->message), response.request_id, transient));
         }
         return {};
     }
 
-    Result<Response> finish() && {
+    Result<provider::TurnResponse> finish() && {
         if (!saw_completed) {
-            return outcome_error(Error::protocol("OpenAI stream ended before response.completed"));
+            return outcome_error(Error::protocol("stream ended before response.completed"));
         }
-        response.output.reserve(completed.size());
+        std::vector<wire::ResponseItem> output;
+        output.reserve(completed.size());
         for (auto &entry : completed) {
             if (!entry) {
-                return outcome_error(Error::protocol("OpenAI output item index gap"));
+                return outcome_error(Error::protocol("response output item index gap"));
             }
-            response.output.push_back(*std::move(entry));
-            if (const auto *function = std::get_if<FunctionCallItem>(&response.output.back())) {
-                auto call = make_tool_call(*function);
-                if (!call) {
-                    return outcome_error(std::move(call).error());
-                }
-                response.calls.push_back(*std::move(call));
-            }
+            output.push_back(*std::move(entry));
         }
+
+        bool refused = false;
+        auto converted = to_parts(std::move(output), response, refused);
+        if (!converted) {
+            return outcome_error(std::move(converted).error());
+        }
+
+        bool has_calls = !provider::tool_calls(response).empty();
+        response.stop = refused   ? provider::StopKind::REFUSED :
+                        has_calls ? provider::StopKind::NEEDS_TOOL_RESULTS :
+                                    provider::StopKind::DONE;
+        response.stop_detail = std::move(status);
         return std::move(response);
     }
 };
+
+// --- request helpers ----------------------------------------------------
 
 Task<std::string> read_bounded_body(http::StreamingResponse &response, usize limit) {
     std::string body;
@@ -367,8 +565,8 @@ Error parse_status_error(int status, std::string_view body, std::string request_
     return Error::http_status(status, std::move(api_type), std::move(detail), std::move(request_id), retry_after);
 }
 
-Task<Response, Error> attempt_stream(http::Client &http_client, const ClientOptions &options, const std::string &body,
-                                     const provider::StreamCallbacks &callbacks, bool &text_emitted) {
+Task<provider::TurnResponse, Error> attempt_stream(http::Client &http_client, const ClientOptions &options, const std::string &body,
+                                                   const provider::StreamCallbacks &callbacks, bool &text_emitted) {
     auto request = http_client.on().post(options.base_url + "/responses");
     request.header("accept", "text/event-stream").json_text(body);
     apply_auth_headers(request, options);
@@ -395,26 +593,48 @@ Task<Response, Error> attempt_stream(http::Client &http_client, const ClientOpti
     while (!accumulator.saw_completed) {
         auto event = co_await events.next();
         if (!event) {
-            text_emitted = accumulator.response.emitted_text;
+            text_emitted = accumulator.emitted_text;
             co_await fail(Error::http(std::move(event).error()));
         }
         if (!*event) {
             break;
         }
         auto consumed = accumulator.consume(**event, callbacks);
-        text_emitted = accumulator.response.emitted_text;
+        text_emitted = accumulator.emitted_text;
         if (!consumed) {
             co_await fail(std::move(consumed).error());
         }
     }
-    co_return co_await lighter::or_fail(std::move(accumulator).finish());
+    co_return co_await or_fail(std::move(accumulator).finish());
 }
 
+std::optional<std::vector<wire::Tool>> make_tools(const std::vector<provider::ToolDefinition> &definitions) {
+    if (definitions.empty()) {
+        return std::nullopt;
+    }
+    std::vector<wire::Tool> tools;
+    tools.reserve(definitions.size());
+    for (const auto &definition : definitions) {
+        tools.push_back(wire::FunctionTool{
+            .name = definition.name,
+            .description = definition.description,
+            .parameters = definition.input_schema,
+        });
+    }
+    return tools;
+}
+
+// --- remote compaction ---------------------------------------------------
+
 struct CompactEnvelope {
-    std::vector<ResponseItem> output;
+    std::vector<glz::generic> output;
 };
 
-Task<CompactResponse, Error> attempt_compact(http::Client &http_client, const ClientOptions &options, const std::string &body) {
+/// One attempt against OpenAI's proprietary `POST /responses/compact`
+/// (stateless: full input in, compacted items out). Modeled on codex's
+/// remote-compaction path.
+Task<std::vector<wire::ResponseItem>, Error> attempt_remote_compact(http::Client &http_client, const ClientOptions &options,
+                                                                    const std::string &body) {
     auto request = http_client.on().post(options.base_url + "/responses/compact");
     request.json_text(body);
     apply_auth_headers(request, options);
@@ -428,24 +648,28 @@ Task<CompactResponse, Error> attempt_compact(http::Client &http_client, const Cl
     if (!response.ok()) {
         co_await fail(parse_status_error(response.status, response.text(), std::move(request_id), parse_retry_after(response)));
     }
-    auto parsed = parse_wire<CompactEnvelope>(response.text(), "compact response");
-    if (!parsed) {
-        co_await fail(std::move(parsed).error());
+
+    auto envelope = parse_wire<CompactEnvelope>(response.text(), "compact response");
+    if (!envelope) {
+        co_await fail(std::move(envelope).error());
     }
-    co_return CompactResponse{.output = std::move(parsed->output), .request_id = std::move(request_id)};
+    std::vector<wire::ResponseItem> output;
+    output.reserve(envelope->output.size());
+    for (const auto &value : envelope->output) {
+        output.push_back(co_await or_fail(parse_item(value)));
+    }
+    co_return output;
 }
 
-std::vector<Tool> make_tools(const std::vector<provider::ToolDefinition> &definitions) {
-    std::vector<Tool> tools;
-    tools.reserve(definitions.size());
-    for (const auto &definition : definitions) {
-        tools.push_back(FunctionTool{
-            .name = definition.name,
-            .description = definition.description,
-            .parameters = definition.input_schema,
-        });
+/// The compat question: gateways speaking the OpenAI dialect usually lack the
+/// proprietary compact endpoint. Anything that reads as "no such endpoint /
+/// bad request shape" selects the local fallback; transient failures (429,
+/// 5xx, transport) do not - the endpoint exists, so report them.
+bool selects_local_fallback(const Error &error) {
+    if (error.kind != ErrorKind::HTTP_STATUS) {
+        return false;
     }
-    return tools;
+    return error.status == 400 || error.status == 404 || error.status == 405 || error.status == 501;
 }
 
 } // namespace
@@ -456,7 +680,15 @@ Client::Client(ClientOptions options) : options(std::move(options)) {
     }
 }
 
-Task<Response, Error> Client::create_response(const ResponseRequest &request, const provider::StreamCallbacks &callbacks) {
+Task<provider::TurnResponse, Error> Client::complete(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
+                                                     const provider::StreamCallbacks &callbacks) {
+    wire::ResponseRequest request{
+        .model = options.model,
+        .max_output_tokens = options.max_output_tokens,
+        .input = co_await or_fail(to_wire(history)),
+        .tools = make_tools(tools),
+    };
+
     auto encoded = json::to_string(request);
     if (!encoded) {
         co_await fail(Error::json(std::move(encoded).error(), "response request body"));
@@ -470,7 +702,11 @@ Task<Response, Error> Client::create_response(const ResponseRequest &request, co
             co_return *std::move(outcome);
         }
         auto error = std::move(outcome).error();
-        if (attempt >= options.max_retries || !error.retryable() || text_emitted) {
+
+        // Once output reached the user we cannot transparently re-send:
+        // the duplicated prefix would be visible. Surface the error instead.
+        bool can_retry = attempt < options.max_retries && error.retryable() && !text_emitted;
+        if (!can_retry) {
             co_await fail(std::move(error));
         }
         auto delay = error.retry_after.value_or(options.initial_retry_delay * (1 << attempt));
@@ -478,7 +714,12 @@ Task<Response, Error> Client::create_response(const ResponseRequest &request, co
     }
 }
 
-Task<CompactResponse, Error> Client::compact(const CompactRequest &request) {
+Task<void, Error> Client::compact(provider::History &history, std::string_view instructions) {
+    wire::CompactRequest request{
+        .model = options.model,
+        .input = co_await or_fail(to_wire(history)),
+        .instructions = std::string(instructions),
+    };
     auto encoded = json::to_string(request);
     if (!encoded) {
         co_await fail(Error::json(std::move(encoded).error(), "compact request body"));
@@ -486,78 +727,31 @@ Task<CompactResponse, Error> Client::compact(const CompactRequest &request) {
     const std::string body = *std::move(encoded);
 
     for (usize attempt = 0;; ++attempt) {
-        auto outcome = co_await attempt_compact(http_client, options, body);
+        auto outcome = co_await attempt_remote_compact(http_client, options, body);
         if (outcome) {
-            co_return *std::move(outcome);
+            // The compacted items (typically one encrypted compaction item)
+            // replace the transcript, carried opaquely until the next call.
+            provider::History compacted;
+            compacted.push_back({.role = provider::Role::USER});
+            for (auto &item : *outcome) {
+                auto payload = co_await or_fail(encode_opaque(item));
+                compacted.back().parts.push_back(provider::OpaquePart{
+                    .provider_tag = std::string(k_provider_tag),
+                    .payload = std::move(payload),
+                });
+            }
+            history = std::move(compacted);
+            co_return;
         }
         auto error = std::move(outcome).error();
+        if (selects_local_fallback(error)) {
+            co_return co_await provider::local_compact(this, history, instructions).or_fail();
+        }
         if (attempt >= options.max_retries || !error.retryable()) {
             co_await fail(std::move(error));
         }
         auto delay = error.retry_after.value_or(options.initial_retry_delay * (1 << attempt));
         co_await lighter::sleep(delay);
-    }
-}
-
-Task<void, Error> Client::compact_history(std::string model, History &history, std::string instructions) {
-    auto compacted = co_await compact({
-        .model = std::move(model),
-        .input = history,
-        .instructions = std::move(instructions),
-    });
-    if (!compacted) {
-        co_await fail(std::move(compacted).error());
-    }
-    history = std::move(compacted->output);
-}
-
-Task<Response, Error> Client::create_message(std::string model, u32 max_tokens, const History &history,
-                                             const std::vector<provider::ToolDefinition> &tools,
-                                             const provider::StreamCallbacks &callbacks) {
-    co_return co_await create_response(
-        {
-            .model = std::move(model),
-            .max_output_tokens = max_tokens,
-            .input = history,
-            .tools = make_tools(tools),
-        },
-        callbacks);
-}
-
-void Client::append_user(History &history, std::string prompt) {
-    history.push_back(MessageItem{
-        .role = "user",
-        .content = {InputText{.text = std::move(prompt)}},
-    });
-}
-
-std::vector<const provider::ToolCall *> Client::tool_calls(const Response &response) {
-    std::vector<const provider::ToolCall *> calls;
-    calls.reserve(response.calls.size());
-    for (const auto &call : response.calls) {
-        calls.push_back(&call);
-    }
-    return calls;
-}
-
-bool Client::is_terminal(const Response &response) { return response.completed && response.calls.empty(); }
-
-bool Client::requires_tool_results(const Response &response) { return response.completed && !response.calls.empty(); }
-
-void Client::append_response(History &history, Response response) {
-    history.reserve(history.size() + response.output.size());
-    for (auto &item : response.output) {
-        history.push_back(std::move(item));
-    }
-}
-
-void Client::append_tool_results(History &history, std::vector<provider::ToolResult> results) {
-    history.reserve(history.size() + results.size());
-    for (auto &result : results) {
-        history.push_back(FunctionCallOutputItem{
-            .call_id = std::move(result.call_id),
-            .output = std::move(result.content),
-        });
     }
 }
 
