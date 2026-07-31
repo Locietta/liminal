@@ -8,3 +8,5 @@
 
 build/
 .xmake/
+
+__pycache__/
