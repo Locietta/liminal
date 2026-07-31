@@ -2,7 +2,7 @@
 authors = ["Locietta <locietta@gmail.com>"]
 channels = ["https://prefix.dev/locietta-toolchains", "conda-forge"]
 name = "liminal"
-platforms = ["win-64"]
+platforms = ["win-64", "linux-64"]
 version = "0.1.0"
 
 [tasks]

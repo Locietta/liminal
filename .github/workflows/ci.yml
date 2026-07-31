@@ -38,6 +38,12 @@ jobs:
       - name: Allow xmake to run as root
         run: echo "XMAKE_ROOT=y" >> "$GITHUB_ENV"
 
+      # pixi provides python/pytest for the integration tests and the
+      # test-all task that wraps unit + integration testing.
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          cache: true
+
       # Only glaze is built from source; the rest come from pacman.
       - name: Cache xmake packages
         uses: actions/cache@main
@@ -53,7 +59,7 @@ jobs:
         run: xmake -j$(nproc)
 
       - name: Test
-        run: xmake test
+        run: pixi run test-all
 
   windows:
     name: Windows (ucrt64)
@@ -85,6 +91,12 @@ jobs:
 
       - uses: xmake-io/github-action-setup-xmake@v1
 
+      # pixi provides python/pytest for the integration tests and the
+      # test-all task that wraps unit + integration testing.
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          cache: true
+
       # The root xmake.lua resolves the toolchain from %MSYS2%, refusing to
       # configure without it, and the msys2:: package manager locates pacman
       # under the same root.
@@ -111,4 +123,4 @@ jobs:
         run: xmake
 
       - name: Test
-        run: xmake test
+        run: pixi run test-all
