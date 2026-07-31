@@ -46,6 +46,39 @@ if is_os("windows") then
 
 end
 
+-- Binaries built with the ucrt64 toolchain need its DLLs (gcc runtime, libuv,
+-- fmt, curl, ...) at load time. `xmake run/test` injects the toolchain runenv,
+-- but anything launching the exe directly (integration tests, a plain shell)
+-- would need %MSYS2%\ucrt64\bin on PATH. Instead, walk the import table with
+-- objdump and copy the ucrt64 DLLs next to the binary.
+rule("mingw.bundle-dlls")
+    after_build(function (target)
+        if not target:is_plat("windows") then
+            return
+        end
+        local bindir = path.join(os.getenv("MSYS2"), "ucrt64", "bin")
+        local objdump = path.join(bindir, "objdump.exe")
+        local seen = {}
+        local function bundle(file)
+            for name in os.iorunv(objdump, {"-p", file}):gmatch("DLL Name: (%S+)") do
+                if not seen[name] then
+                    seen[name] = true
+                    -- System DLLs (kernel32, ...) don't live in ucrt64/bin.
+                    local src = path.join(bindir, name)
+                    if os.isfile(src) then
+                        local dst = path.join(target:targetdir(), name)
+                        if not os.isfile(dst) or os.mtime(src) > os.mtime(dst) then
+                            os.cp(src, dst)
+                        end
+                        bundle(src)
+                    end
+                end
+            end
+        end
+        bundle(target:targetfile())
+    end)
+rule_end()
+
 add_repositories("loia-pinned xmake", {rootdir = os.scriptdir()})
 add_moduledirs("xmake/modules")
 
