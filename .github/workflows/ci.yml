@@ -47,7 +47,7 @@ jobs:
           restore-keys: xmake-linux-
 
       - name: Configure
-        run: xmake f -y
+        run: xmake f -m releasedbg -y
 
       - name: Build
         run: xmake -j$(nproc)
@@ -105,7 +105,7 @@ jobs:
           restore-keys: xmake-windows-
 
       - name: Configure
-        run: xmake f -y
+        run: xmake f -m releasedbg -y
 
       - name: Build
         run: xmake
