@@ -52,35 +52,6 @@ struct Client {
 
     ClientOptions options;
     lighter::http::Client http_client;
-
-    // --- temporary bridge for the templated Agent --------------------------
-    // Deleted when Agent de-templates onto pro::proxy<ProviderFacade>; the
-    // facade methods above are the real interface.
-
-    using History = provider::History;
-    using Response = provider::TurnResponse;
-
-    lighter::Task<provider::TurnResponse, Error> create_message(std::string model, u32 max_tokens, const History &history,
-                                                                const std::vector<provider::ToolDefinition> &tools,
-                                                                const provider::StreamCallbacks &callbacks = {}) {
-        options.model = std::move(model);
-        options.max_tokens = max_tokens;
-        co_return co_await complete(history, tools, callbacks).or_fail();
-    }
-
-    lighter::Task<void, Error> compact_history(std::string model, History &history, std::string instructions) {
-        options.model = std::move(model);
-        co_return co_await compact(history, instructions).or_fail();
-    }
-
-    static void append_user(History &history, std::string prompt) { provider::append_user(history, std::move(prompt)); }
-    static std::vector<const provider::ToolCall *> tool_calls(const Response &response) { return provider::tool_calls(response); }
-    static bool is_terminal(const Response &response) { return response.stop == provider::StopKind::DONE; }
-    static bool requires_tool_results(const Response &response) { return response.stop == provider::StopKind::NEEDS_TOOL_RESULTS; }
-    static void append_response(History &history, Response response) { provider::append_response(history, std::move(response)); }
-    static void append_tool_results(History &history, std::vector<provider::ToolResult> results) {
-        provider::append_tool_results(history, std::move(results));
-    }
 };
 
 } // namespace liminal::anthropic

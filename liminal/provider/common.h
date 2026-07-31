@@ -44,7 +44,10 @@ struct ToolDefinition {
 };
 
 struct StreamCallbacks {
+    /// Streamed text as it arrives; may be empty.
     std::function<void(std::string_view)> on_text_delta;
+    /// A tool call is about to run (argument: tool name). UI feedback only.
+    std::function<void(std::string_view)> on_tool_start;
 };
 
 } // namespace liminal::provider

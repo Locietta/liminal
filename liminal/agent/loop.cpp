@@ -5,16 +5,12 @@
 #include <optional>
 #include <string>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include <lighter/async/io/stream.h>
 #include <lighter/async/runtime/interrupt.h>
 #include <lighter/async/runtime/when.h>
 #include <lighter/async/vocab/cancellation.h>
-
-#include "liminal/provider/anthropic.h"
-#include "liminal/provider/openai.h"
 
 namespace liminal {
 
@@ -47,49 +43,58 @@ Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::Too
 
 } // namespace
 
-template <typename Client>
-Task<void, Error> Agent<Client>::run_turn(std::string prompt, const provider::StreamCallbacks &callbacks) {
+Task<void, Error> Agent::run_turn(std::string prompt, const provider::StreamCallbacks &callbacks) {
     // Transactional: staged history only replaces the committed history after
     // a complete terminal response, so cancellation and errors can simply
-    // drop the partial turn without leaving tool_use/tool_result imbalances.
+    // drop the partial turn without leaving tool_call/tool_result imbalances.
     auto staged = history;
-    Client::append_user(staged, std::move(prompt));
+    provider::append_user(staged, std::move(prompt));
 
     constexpr i32 k_max_iterations = 32;
     for (i32 iteration = 0; iteration < k_max_iterations; ++iteration) {
-        auto response = co_await client->create_message(model, max_tokens, staged, tools->definitions(), callbacks).or_fail();
-        auto calls = Client::tool_calls(response);
+        auto response = co_await provider.handle->complete(staged, tools->definitions(), callbacks).or_fail();
+        auto calls = provider::tool_calls(response);
 
-        if (Client::is_terminal(response)) {
-            Client::append_response(staged, std::move(response));
-            history = std::move(staged);
-            co_return;
-        }
-        if (!Client::requires_tool_results(response)) {
-            co_await fail(Error::protocol("provider returned an unsupported non-terminal response"));
+        switch (response.stop) {
+            case provider::StopKind::DONE:
+                provider::append_response(staged, std::move(response));
+                history = std::move(staged);
+                co_return;
+            case provider::StopKind::NEEDS_TOOL_RESULTS: break;
+            case provider::StopKind::TRUNCATED:
+                co_await fail(Error::protocol("response truncated (" + response.stop_detail + "); raise max_tokens"));
+            case provider::StopKind::CONTEXT_EXHAUSTED: co_await fail(Error::protocol("context window exhausted; try /compact"));
+            case provider::StopKind::REFUSED: co_await fail(Error::protocol("the model refused to continue this conversation"));
+            case provider::StopKind::OTHER: co_await fail(Error::protocol("unsupported stop reason: " + response.stop_detail));
         }
         if (calls.empty()) {
-            co_await fail(Error::protocol("provider requested continuation without any tool calls"));
+            co_await fail(Error::protocol("provider requested tool results without any tool calls"));
         }
 
         std::vector<Task<provider::ToolResult>> pending;
         pending.reserve(calls.size());
         for (const auto *call : calls) {
-            std::printf("\n[running tool: %s]\n", call->name.c_str());
+            if (callbacks.on_tool_start) {
+                callbacks.on_tool_start(call->name);
+            }
             pending.push_back(execute_one(*tools, *call));
         }
         auto joined = co_await WhenAll(std::move(pending));
 
         // Preserve the complete provider response before its tool outputs.
-        Client::append_response(staged, std::move(response));
+        provider::append_response(staged, std::move(response));
         std::vector<provider::ToolResult> results;
         results.reserve(joined.size());
         for (auto &result : joined) {
             results.push_back(std::move(result));
         }
-        Client::append_tool_results(staged, std::move(results));
+        provider::append_tool_results(staged, std::move(results));
     }
     co_await fail(Error::protocol("exceeded " + std::to_string(k_max_iterations) + " tool iterations in one turn"));
+}
+
+Task<void, Error> Agent::compact(std::string_view instructions) {
+    co_return co_await provider.handle->compact(history, instructions).or_fail();
 }
 
 namespace {
@@ -170,21 +175,33 @@ Task<void> signal_monitor(InterruptSource &interrupts, TurnControl &control) {
     }
 }
 
-template <typename Client>
-Task<i32> repl_body(Agent<Client> &agent, LineReader &reader, TurnControl &control) {
+/// Runs `work` guarded by a fresh per-operation cancellation source that the
+/// signal monitor can fire. Every awaited REPL operation (turns, compaction)
+/// goes through here so Ctrl-C always has a target.
+template <typename T, typename E>
+Task<lighter::Outcome<T, E, lighter::Cancellation>> guard_turn(Task<T, E> work, TurnControl &control) {
+    CancellationSource source;
+    control.active_turn = &source;
+    auto outcome = co_await with_token(std::move(work), source.token());
+    control.active_turn = nullptr;
+    co_return outcome;
+}
+
+Task<i32> repl_body(Agent &agent, LineReader &reader, TurnControl &control, const ProviderFactory &factory) {
     provider::StreamCallbacks callbacks{
         .on_text_delta = [](std::string_view text) { std::fwrite(text.data(), 1, text.size(), stdout); },
+        .on_tool_start = [](std::string_view name) { std::printf("\n[running tool: %.*s]\n", static_cast<int>(name.size()), name.data()); },
     };
 
     while (true) {
-        std::fputs("\n> ", stdout);
+        std::printf("\n%s:%s > ", agent.provider.name.c_str(), agent.provider.model.c_str());
         std::fflush(stdout);
 
         auto line = co_await reader.next_line();
         if (!line || !line->has_value()) {
             co_return 0; // read error or EOF: quit cleanly
         }
-        auto &prompt = **line;
+        auto prompt = *std::move(*line);
         if (prompt.empty()) {
             continue;
         }
@@ -192,26 +209,36 @@ Task<i32> repl_body(Agent<Client> &agent, LineReader &reader, TurnControl &contr
             co_return 0;
         }
         if (prompt == "/compact" || prompt.starts_with("/compact ")) {
-            if constexpr (requires { agent.client->compact_history(agent.model, agent.history, std::string{}); }) {
-                auto instructions = prompt == "/compact" ? std::string(k_default_compact_instructions) :
-                                                           prompt.substr(std::string_view("/compact ").size());
-                auto compacted = co_await agent.client->compact_history(agent.model, agent.history, std::move(instructions));
-                if (compacted) {
-                    std::fputs("[history compacted]\n", stdout);
-                } else {
-                    std::fprintf(stdout, "[compact error: %s]\n", compacted.error().message().c_str());
-                }
+            auto instructions =
+                prompt == "/compact" ? std::string(k_default_compact_instructions) : prompt.substr(std::string_view("/compact ").size());
+            auto outcome = co_await guard_turn(agent.compact(instructions), control);
+            if (outcome.is_cancelled()) {
+                std::fputs("[compact cancelled; history unchanged]\n", stdout);
+            } else if (outcome.has_error()) {
+                std::fprintf(stdout, "[compact error: %s]\n", outcome.error().message().c_str());
             } else {
-                std::fputs("[this provider does not support remote compaction]\n", stdout);
+                std::fputs("[history compacted]\n", stdout);
             }
             continue;
         }
+        if (prompt.starts_with("/switch")) {
+            auto name = prompt == "/switch" ? std::string_view{} : std::string_view(prompt).substr(std::string_view("/switch ").size());
+            if (name.empty()) {
+                std::fputs("usage: /switch <anthropic|openai>\n", stdout);
+                continue;
+            }
+            auto next = factory(name);
+            if (!next) {
+                std::fprintf(stdout, "[switch error: %s]\n", next.error().message().c_str());
+                continue;
+            }
+            agent.switch_provider(*std::move(next));
+            std::fprintf(stdout, "[switched to %s:%s; private provider state from other providers is dropped]\n",
+                         agent.provider.name.c_str(), agent.provider.model.c_str());
+            continue;
+        }
 
-        CancellationSource turn_source;
-        control.active_turn = &turn_source;
-        auto outcome = co_await with_token(agent.run_turn(std::move(prompt), callbacks), turn_source.token());
-        control.active_turn = nullptr;
-
+        auto outcome = co_await guard_turn(agent.run_turn(std::move(prompt), callbacks), control);
         if (outcome.is_cancelled()) {
             std::fputs("\n[turn cancelled; discarded from history - command side effects may remain]\n", stdout);
         } else if (outcome.has_error()) {
@@ -224,8 +251,7 @@ Task<i32> repl_body(Agent<Client> &agent, LineReader &reader, TurnControl &contr
 
 } // namespace
 
-template <typename Client>
-Task<i32> run_repl(Agent<Client> &agent, InterruptSource &interrupts) {
+Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, const ProviderFactory &factory) {
     LineReader reader;
     Console console;
     Pipe pipe;
@@ -248,16 +274,11 @@ Task<i32> run_repl(Agent<Client> &agent, InterruptSource &interrupts) {
     }
 
     TurnControl control;
-    auto raced = co_await WhenAny(repl_body(agent, reader, control), signal_monitor(interrupts, control));
+    auto raced = co_await WhenAny(repl_body(agent, reader, control, factory), signal_monitor(interrupts, control));
     if (raced.index() == 0) {
         co_return std::get<0>(raced);
     }
     co_return 130; // idle Ctrl-C
 }
-
-template struct Agent<anthropic::Client>;
-template struct Agent<openai::Client>;
-template Task<i32> run_repl(Agent<anthropic::Client> &, InterruptSource &);
-template Task<i32> run_repl(Agent<openai::Client> &, InterruptSource &);
 
 } // namespace liminal
