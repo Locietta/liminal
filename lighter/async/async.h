@@ -1,12 +1,14 @@
 #pragma once
 
 #include <lighter/utils/config.h>
+#include <lighter/async/io/control.h>
 #include <lighter/async/io/fs.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/io/process.h>
 #include <lighter/async/io/request.h>
 #include <lighter/async/io/stream.h>
 #include <lighter/async/io/system.h>
+#include <lighter/async/io/terminal.h>
 #include <lighter/async/io/udp.h>
 #include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/debug.h>

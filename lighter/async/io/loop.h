@@ -22,8 +22,9 @@ struct Task;
 
 /// A thread-safe Relay for posting callbacks to an Event loop.
 ///
-/// Creating a Relay keeps the Event loop alive until the Relay is
-/// destroyed.
+/// A normal Relay keeps the Event loop alive until it is destroyed. A
+/// background Relay does not; it can use explicit nested holds while a caller
+/// is actively waiting for native work.
 ///
 /// A default-constructed or moved-from Relay is inert: send() is a
 /// safe no-op, and destruction has no effect.
@@ -57,6 +58,8 @@ struct Task;
 ///     that were already enqueued are still delivered, unless the
 ///     EventLoop itself is being destroyed (which clears the queue).
 struct Relay {
+    enum class KeepAlive { NO, YES };
+
     Relay() noexcept = default;
 
     Relay(const Relay &) = delete;
@@ -75,15 +78,30 @@ struct Relay {
     /// Mutex acquisition order.
     void send(Function<void()> callback);
 
+    /// Keeps the Event loop alive while work outside libuv is expected to
+    /// deliver through this Relay. Holds nest and must be balanced.
+    ///
+    /// Loop-affine: call hold()/release() only from the Event-loop thread.
+    void hold() noexcept;
+
+    /// Releasing an inert Relay is a safe no-op. Live Relay holds must still
+    /// be balanced.
+    void release() noexcept pre(!self || holds > 0);
+
+    bool holding_loop() const noexcept { return holds > 0; }
+
     /// Opaque implementation detail. Defined in loop.cpp.
     struct Self;
 
 private:
     friend struct EventLoop;
 
-    explicit Relay(Self *p) noexcept;
+    explicit Relay(Self *p, KeepAlive keep_alive) noexcept;
+
+    void release_hold() noexcept;
 
     Self *self = nullptr;
+    usize holds = 0;
 };
 
 /// Runs an Event loop backed by libuv.
@@ -119,12 +137,13 @@ struct EventLoop {
 
     void stop();
 
-    /// Creates a Relay that keeps this Event loop alive until destroyed.
+    /// Creates a Relay. The default keeps this Event loop alive until the
+    /// Relay is destroyed; KeepAlive::NO is for background native sources.
     ///
     /// NOT thread-safe: must be called on the loop thread. The returned Relay
     /// object can then be moved to another thread or captured in a system API
     /// callback, where Relay::send() can be called thread-safely.
-    Relay create_relay();
+    Relay create_relay(Relay::KeepAlive keep_alive = Relay::KeepAlive::YES);
 
     /// Registers a callback to run during EventLoop destruction, before the
     /// underlying uv loop is closed.

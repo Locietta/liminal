@@ -89,7 +89,7 @@ int main() {
 
     auto interrupts = lighter::InterruptSource::create(loop);
     if (!interrupts) {
-        std::fprintf(stderr, "error: cannot watch signals: %s\n", std::string(interrupts.error().message()).c_str());
+        std::fprintf(stderr, "error: cannot watch process controls: %s\n", std::string(interrupts.error().message()).c_str());
         return 1;
     }
 

@@ -4,8 +4,8 @@
 #include <span>
 
 #include <lighter/types.hpp>
+#include <lighter/async/io/control.h>
 #include <lighter/async/io/loop.h>
-#include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/task.h>
 #include <lighter/async/vocab/cancellation.h>
 #include <lighter/async/vocab/error.h>
@@ -15,12 +15,9 @@ namespace lighter {
 
 /// Turns "the user wants us to stop" into Cancellation.
 ///
-/// A long-running program has two different reactions to a signal. Some signals
-/// mean stop - the whole Task tree should unwind - and some are just news, like
-/// a terminal resize. InterruptSource handles both without making callers poll:
-/// fatal signals fire a CancellationToken, so every Task already wrapped in
-/// with_token() unwinds through the ordinary Cancellation path, while every
-/// signal (fatal or not) also stays observable through next().
+/// A long-running program has two different reactions to process-control
+/// events. Some mean stop and some are merely observable. Fatal events fire a
+/// CancellationToken, while every event also stays observable through next().
 ///
 /// Typical use:
 ///
@@ -39,9 +36,9 @@ namespace lighter {
 ///
 ///   if (interrupts.interrupt_count() >= 2) std::exit(130);
 ///
-/// Platform note: on Windows the deliverable set is Ctrl+C, Ctrl+Break,
-/// console-close and an emulated resize - see SignalKind. TERM is silently
-/// absent there, and Task Manager's "End task" cannot be observed by any means.
+/// Platform note: Windows console controls are represented directly rather
+/// than disguised as POSIX signals. Terminal resize is a TerminalEvent, not a
+/// process interrupt.
 struct InterruptSource {
     InterruptSource() noexcept;
 
@@ -60,15 +57,13 @@ struct InterruptSource {
     /// platform cannot deliver.
     static Result<InterruptSource> create(EventLoop &loop = EventLoop::current());
 
-    /// Watches `fatal` plus `observed`. Signals in `fatal` cancel the token;
-    /// signals in `observed` only surface through next(), which is how a
-    /// resize (WINCH) is watched without tearing the program down.
-    /// Unsupported signals are skipped rather than rejected, so the same call
-    /// compiles and runs on every platform.
-    static Result<InterruptSource> create(std::span<const SignalKind> fatal, std::span<const SignalKind> observed,
+    /// Watches `fatal` plus `observed`. Fatal controls cancel the token;
+    /// observed controls only surface through next(). Unsupported controls are
+    /// skipped so the same ideal set can be named on every platform.
+    static Result<InterruptSource> create(std::span<const ControlEventKind> fatal, std::span<const ControlEventKind> observed,
                                           EventLoop &loop = EventLoop::current());
 
-    static Result<InterruptSource> create(std::initializer_list<SignalKind> fatal, std::initializer_list<SignalKind> observed,
+    static Result<InterruptSource> create(std::initializer_list<ControlEventKind> fatal, std::initializer_list<ControlEventKind> observed,
                                           EventLoop &loop = EventLoop::current());
 
     /// Fires when the first fatal signal arrives. Safe to copy and to hand to
@@ -85,7 +80,7 @@ struct InterruptSource {
     /// usual setup it lives for the loop's whole run, with EventLoop outliving
     /// the source. Single-consumer: overlapping calls fail with
     /// k_connection_already_in_progress.
-    Task<SignalKind, Error> next();
+    Task<ControlEventKind, Error> next();
 
     /// Number of fatal signals delivered so far. A value of 2 or more means the
     /// user asked twice and the caller should consider exiting hard.

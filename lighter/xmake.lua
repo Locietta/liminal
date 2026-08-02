@@ -14,6 +14,8 @@ target("lighter")
     add_packages("glaze", {public = true})
     if is_os("windows") then
         add_syslinks("psapi", "user32", "advapi32", "iphlpapi", "userenv", "ws2_32", "dbghelp", "ole32", "shell32", {public = true})
+    elseif is_os("linux") then
+        add_syslinks("pthread", {public = true})
     end
 
 includes("tests/xmake.lua")

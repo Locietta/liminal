@@ -4,10 +4,12 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <lighter/async/io/stream.h>
+#include <lighter/async/io/terminal.h>
 #include <lighter/async/runtime/interrupt.h>
 #include <lighter/async/runtime/when.h>
 #include <lighter/async/vocab/cancellation.h>
@@ -15,12 +17,14 @@
 namespace liminal {
 
 using lighter::CancellationSource;
-using lighter::Console;
 using lighter::fail;
 using lighter::InterruptSource;
 using lighter::Pipe;
 using lighter::Stream;
 using lighter::Task;
+using lighter::TerminalEventKind;
+using lighter::TerminalKey;
+using lighter::TerminalSession;
 using lighter::WhenAll;
 using lighter::WhenAny;
 
@@ -99,13 +103,20 @@ Task<void, Error> Agent::compact(std::string_view instructions) {
 
 namespace {
 
-/// Splits raw stdin chunks into lines. No editing, no history - v1.
+/// Splits piped stdin on LF. Interactive bracketed paste deliberately keeps
+/// embedded LF bytes in one prompt so the composer can support multiline
+/// input; only an Enter key event submits it. No editing or history yet.
 struct LineReader {
     Stream *input = nullptr;
+    TerminalSession *terminal = nullptr;
     std::string buffered;
     bool eof = false;
 
     Task<std::optional<std::string>, lighter::Error> next_line() {
+        if (terminal) {
+            co_return co_await next_terminal_line();
+        }
+
         while (true) {
             if (auto pos = buffered.find('\n'); pos != std::string::npos) {
                 auto line = buffered.substr(0, pos);
@@ -137,6 +148,83 @@ struct LineReader {
     }
 
 private:
+    Task<std::optional<std::string>, lighter::Error> next_terminal_line() {
+        while (true) {
+            auto event = co_await terminal->next_event().or_fail();
+            switch (event.kind) {
+                case TerminalEventKind::TEXT:
+                case TerminalEventKind::PASTE:
+                    buffered += event.text;
+                    if (auto err = echo_terminal(event.text)) {
+                        co_await fail(err);
+                    }
+                    break;
+                case TerminalEventKind::KEY: {
+                    if (!event.pressed) {
+                        break;
+                    }
+                    if (event.key == TerminalKey::ENTER) {
+                        if (auto err = terminal->write("\r\n")) {
+                            co_await fail(err);
+                        }
+                        co_return finish_line(std::exchange(buffered, {}));
+                    }
+                    if (event.key == TerminalKey::BACKSPACE) {
+                        if (!buffered.empty()) {
+                            auto start = buffered.size() - 1;
+                            while (start > 0 && (static_cast<unsigned char>(buffered[start]) & 0xc0) == 0x80) {
+                                --start;
+                            }
+                            buffered.erase(start);
+                            if (auto err = terminal->write("\b \b")) {
+                                co_await fail(err);
+                            }
+                        }
+                        break;
+                    }
+                    if (event.key == TerminalKey::TAB) {
+                        buffered.push_back('\t');
+                        if (auto err = terminal->write("\t")) {
+                            co_await fail(err);
+                        }
+                        break;
+                    }
+                    const bool control = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::CONTROL);
+                    const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
+                    if (event.key == TerminalKey::CHARACTER && !event.text.empty() && (!control || alt_gr)) {
+                        buffered += event.text;
+                        if (auto err = echo_terminal(event.text)) {
+                            co_await fail(err);
+                        }
+                    }
+                    break;
+                }
+                case TerminalEventKind::CLOSED: co_return std::nullopt;
+                case TerminalEventKind::RESIZE:
+                case TerminalEventKind::FOCUS:
+                case TerminalEventKind::MOUSE: break;
+            }
+        }
+    }
+
+    lighter::Error echo_terminal(std::string_view text) {
+        if (!text.contains('\n')) {
+            return terminal->write(text);
+        }
+
+        std::string output;
+        output.reserve(text.size() + 8);
+        char previous = 0;
+        for (const char current : text) {
+            if (current == '\n' && previous != '\r') {
+                output.push_back('\r');
+            }
+            output.push_back(current);
+            previous = current;
+        }
+        return terminal->write(output);
+    }
+
     static std::string finish_line(std::string line) {
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
@@ -253,16 +341,16 @@ Task<i32> repl_body(Agent &agent, LineReader &reader, TurnControl &control, cons
 
 Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, const ProviderFactory &factory) {
     LineReader reader;
-    Console console;
+    TerminalSession terminal;
     Pipe pipe;
-    if (lighter::guess_handle(0) == lighter::HandleType::TTY) {
-        auto opened = Console::open(0, Console::Options(/*readable=*/true));
+    if (TerminalSession::attached(0)) {
+        auto opened = TerminalSession::open();
         if (!opened) {
-            std::fprintf(stderr, "cannot open stdin console: %s\n", std::string(opened.error().message()).c_str());
+            std::fprintf(stderr, "cannot open terminal: %s\n", std::string(opened.error().message()).c_str());
             co_return 1;
         }
-        console = *std::move(opened);
-        reader.input = &console;
+        terminal = *std::move(opened);
+        reader.terminal = &terminal;
     } else {
         auto opened = Pipe::open(0);
         if (!opened) {

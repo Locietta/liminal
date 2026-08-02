@@ -9,8 +9,10 @@ output; tests skip with a clear message if it has not been built.
 """
 
 import os
+import select
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -147,3 +149,52 @@ def test_unknown_provider_switch_is_recoverable(anthropic_mock):
     )
     assert "[switch error:" in out
     check(state, ["429", "tools-turn", "continuation"])  # session stayed usable
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX PTY test; Windows needs the planned ConPTY driver")
+def test_posix_terminal_session_restores_mode():
+    """The interactive backend accepts native input and restores exact termios state."""
+    import pty
+    import termios
+
+    master, slave = pty.openpty()
+    original = termios.tcgetattr(slave)
+    env = os.environ.copy()
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    env["LIMINAL_PROVIDER"] = "openai"
+    env["OPENAI_API_KEY"] = "fake-terminal-test-key"
+
+    process = subprocess.Popen(
+        [str(BINARY)], stdin=slave, stdout=slave, stderr=slave, env=env, cwd=REPO_ROOT,
+        close_fds=True,
+    )
+    output = bytearray()
+    try:
+        deadline = time.monotonic() + 10
+        while b" > " not in output:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"prompt did not appear: {output!r}"
+            readable, _, _ = select.select([master], [], [], remaining)
+            assert readable, f"prompt did not appear: {output!r}"
+            output.extend(os.read(master, 4096))
+
+        os.write(master, b"\x1b[200~a\nb\x1b[201~")
+        deadline = time.monotonic() + 5
+        while b"a\r\nb" not in output:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"multiline paste was not echoed with CRLF: {output!r}"
+            readable, _, _ = select.select([master], [], [], remaining)
+            assert readable, f"multiline paste was not echoed with CRLF: {output!r}"
+            output.extend(os.read(master, 4096))
+
+        # Clear the three pasted code points, then exit normally.
+        os.write(master, b"\x7f\x7f\x7f/quit\r")
+        assert process.wait(timeout=10) == 0
+        assert termios.tcgetattr(slave) == original
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        os.close(master)
+        os.close(slave)

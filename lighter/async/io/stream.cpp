@@ -307,17 +307,6 @@ void *Stream::handle() noexcept { return self ? &self->stream : nullptr; }
 
 const void *Stream::handle() const noexcept { return self ? &self->stream : nullptr; }
 
-HandleType guess_handle(i32 fd) {
-    switch (uv::guess_handle(fd)) {
-        case UV_FILE: return HandleType::FILE;
-        case UV_TTY: return HandleType::TTY;
-        case UV_NAMED_PIPE: return HandleType::PIPE;
-        case UV_TCP: return HandleType::TCP;
-        case UV_UDP: return HandleType::UDP;
-        default: return HandleType::UNKNOWN;
-    }
-}
-
 Task<std::string, Error> Stream::read() {
     if (!self) {
         co_await fail(Error::k_invalid_argument);

@@ -1,0 +1,680 @@
+#include "terminal.h"
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <utility>
+
+#include <lighter/async/detail/native_event_queue.h>
+#include <lighter/async/detail/terminal_input_decoder.h>
+
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#else
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#include <unistd.h>
+#endif
+
+namespace lighter {
+
+struct TerminalSession::Self {
+    std::shared_ptr<detail::NativeEventQueue<TerminalEvent>> delivery = std::make_shared<detail::NativeEventQueue<TerminalEvent>>();
+    Relay relay;
+    Options options;
+    i32 input_fd = -1;
+    i32 output_fd = -1;
+    std::thread worker;
+    bool running = false;
+    bool owns_process_terminal = false;
+    bool modes_captured = false;
+    bool modes_applied = false;
+
+#ifdef _WIN32
+    HANDLE input = INVALID_HANDLE_VALUE;
+    HANDLE output = INVALID_HANDLE_VALUE;
+    HANDLE stop = nullptr;
+    DWORD original_input_mode = 0;
+    DWORD original_output_mode = 0;
+    UINT original_input_codepage = 0;
+    UINT original_output_codepage = 0;
+#else
+    termios original_mode{};
+    i32 stop_read = -1;
+    i32 stop_write = -1;
+    i32 resize_read = -1;
+    i32 resize_write = -1;
+    struct sigaction original_winch{};
+    bool winch_installed = false;
+#endif
+
+    void post(TerminalEvent event) {
+        auto queue = delivery;
+        relay.send([queue = std::move(queue), event = std::move(event)]() mutable { queue->push(std::move(event)); });
+    }
+
+    Error write_native(std::string_view bytes);
+    Error apply_modes();
+    Error restore_modes();
+    Error start_worker();
+    void stop_worker() noexcept;
+    void shutdown() noexcept;
+
+    static void destroy(Self *self) noexcept {
+        if (self) {
+            self->shutdown();
+            delete self;
+        }
+    }
+};
+
+namespace {
+
+std::atomic<TerminalSession::Self *> g_terminal_owner{nullptr};
+
+TerminalEvent key_event(TerminalKey key, TerminalModifiers modifiers = TerminalModifiers::NONE, std::string text = {}, i32 repeat = 1,
+                        bool pressed = true) {
+    return TerminalEvent{
+        .kind = TerminalEventKind::KEY,
+        .key = key,
+        .modifiers = modifiers,
+        .text = std::move(text),
+        .repeat = repeat,
+        .pressed = pressed,
+    };
+}
+
+TerminalEvent text_event(std::string text) { return TerminalEvent{.kind = TerminalEventKind::TEXT, .text = std::move(text)}; }
+
+TerminalEvent resize_event(TerminalSize size) { return TerminalEvent{.kind = TerminalEventKind::RESIZE, .size = size}; }
+
+std::string terminal_modes(const TerminalSession::Options &options, bool enable) {
+    std::string result;
+#ifndef _WIN32
+    if (options.bracketed_paste) {
+        result += enable ? "\x1b[?2004h" : "\x1b[?2004l";
+    }
+    if (options.focus_events) {
+        result += enable ? "\x1b[?1004h" : "\x1b[?1004l";
+    }
+    if (options.mouse_events) {
+        result += enable ? "\x1b[?1000h\x1b[?1006h" : "\x1b[?1006l\x1b[?1000l";
+    }
+#else
+    // The Win32 backend consumes INPUT_RECORD values, not VT input bytes.
+    // Input modes are configured with SetConsoleMode instead.
+    static_cast<void>(options);
+    static_cast<void>(enable);
+#endif
+    return result;
+}
+
+#ifdef _WIN32
+
+TerminalModifiers windows_modifiers(DWORD state) noexcept {
+    auto result = TerminalModifiers::NONE;
+    if ((state & SHIFT_PRESSED) != 0) {
+        result = result | TerminalModifiers::SHIFT;
+    }
+    if ((state & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED)) != 0) {
+        result = result | TerminalModifiers::ALT;
+    }
+    if ((state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0) {
+        result = result | TerminalModifiers::CONTROL;
+    }
+    return result;
+}
+
+TerminalKey windows_key(WORD value) noexcept {
+    switch (value) {
+        case VK_RETURN: return TerminalKey::ENTER;
+        case VK_BACK: return TerminalKey::BACKSPACE;
+        case VK_TAB: return TerminalKey::TAB;
+        case VK_ESCAPE: return TerminalKey::ESCAPE;
+        case VK_INSERT: return TerminalKey::INSERT;
+        case VK_DELETE: return TerminalKey::DELETE_KEY;
+        case VK_HOME: return TerminalKey::HOME;
+        case VK_END: return TerminalKey::END;
+        case VK_PRIOR: return TerminalKey::PAGE_UP;
+        case VK_NEXT: return TerminalKey::PAGE_DOWN;
+        case VK_UP: return TerminalKey::ARROW_UP;
+        case VK_DOWN: return TerminalKey::ARROW_DOWN;
+        case VK_LEFT: return TerminalKey::ARROW_LEFT;
+        case VK_RIGHT: return TerminalKey::ARROW_RIGHT;
+        case VK_F1: return TerminalKey::F1;
+        case VK_F2: return TerminalKey::F2;
+        case VK_F3: return TerminalKey::F3;
+        case VK_F4: return TerminalKey::F4;
+        case VK_F5: return TerminalKey::F5;
+        case VK_F6: return TerminalKey::F6;
+        case VK_F7: return TerminalKey::F7;
+        case VK_F8: return TerminalKey::F8;
+        case VK_F9: return TerminalKey::F9;
+        case VK_F10: return TerminalKey::F10;
+        case VK_F11: return TerminalKey::F11;
+        case VK_F12: return TerminalKey::F12;
+        default: return TerminalKey::CHARACTER;
+    }
+}
+
+std::string utf16_to_utf8(const WCHAR *text, i32 size) {
+    if (size <= 0) {
+        return {};
+    }
+    const i32 required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, size, nullptr, 0, nullptr, nullptr);
+    if (required <= 0) {
+        return {};
+    }
+    std::string result(static_cast<usize>(required), '\0');
+    WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, size, result.data(), required, nullptr, nullptr);
+    return result;
+}
+
+TerminalSize windows_size(HANDLE output) {
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(output, &info)) {
+        return {};
+    }
+    return {
+        .columns = static_cast<i32>(info.srWindow.Right - info.srWindow.Left + 1),
+        .rows = static_cast<i32>(info.srWindow.Bottom - info.srWindow.Top + 1),
+    };
+}
+
+void run_terminal_worker(TerminalSession::Self *self) {
+    const HANDLE handles[] = {self->stop, self->input};
+    std::array<INPUT_RECORD, 64> records{};
+    WCHAR high_surrogate = 0;
+
+    while (true) {
+        const DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+        if (wait == WAIT_OBJECT_0) {
+            return;
+        }
+        if (wait == WAIT_FAILED) {
+            self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+            return;
+        }
+        if (wait != WAIT_OBJECT_0 + 1) {
+            continue;
+        }
+
+        DWORD count = 0;
+        if (!ReadConsoleInputW(self->input, records.data(), static_cast<DWORD>(records.size()), &count)) {
+            self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+            return;
+        }
+
+        for (DWORD i = 0; i < count; ++i) {
+            const auto &record = records[i];
+            if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+                self->post(resize_event(windows_size(self->output)));
+                continue;
+            }
+            if (record.EventType == FOCUS_EVENT) {
+                self->post(TerminalEvent{.kind = TerminalEventKind::FOCUS, .focused = record.Event.FocusEvent.bSetFocus != FALSE});
+                continue;
+            }
+            if (record.EventType == MOUSE_EVENT && self->options.mouse_events) {
+                const auto &mouse = record.Event.MouseEvent;
+                const auto wheel = (mouse.dwEventFlags & MOUSE_WHEELED) != 0 ? static_cast<i16>(HIWORD(mouse.dwButtonState)) : 0;
+                self->post(TerminalEvent{
+                    .kind = TerminalEventKind::MOUSE,
+                    .modifiers = windows_modifiers(mouse.dwControlKeyState),
+                    .x = mouse.dwMousePosition.X,
+                    .y = mouse.dwMousePosition.Y,
+                    .mouse_buttons = static_cast<i32>(mouse.dwButtonState & 0xffff),
+                    .wheel_delta = wheel,
+                });
+                continue;
+            }
+            if (record.EventType != KEY_EVENT) {
+                continue;
+            }
+
+            const auto &key = record.Event.KeyEvent;
+            std::string text;
+            const WCHAR character = key.uChar.UnicodeChar;
+            if (character >= 0xd800 && character <= 0xdbff) {
+                high_surrogate = character;
+            } else if (character >= 0xdc00 && character <= 0xdfff && high_surrogate != 0) {
+                const WCHAR pair[] = {high_surrogate, character};
+                text = utf16_to_utf8(pair, 2);
+                high_surrogate = 0;
+            } else {
+                high_surrogate = 0;
+                if (character != 0 && (character >= 0x20 || character == L'\t')) {
+                    text = utf16_to_utf8(&character, 1);
+                }
+            }
+
+            const auto mapped = windows_key(key.wVirtualKeyCode);
+            const auto modifiers = windows_modifiers(key.dwControlKeyState);
+            if (mapped == TerminalKey::CHARACTER && !text.empty() && modifiers == TerminalModifiers::NONE && key.bKeyDown) {
+                if (key.wRepeatCount > 1) {
+                    const auto unit = text;
+                    for (WORD repeat = 1; repeat < key.wRepeatCount; ++repeat) {
+                        text += unit;
+                    }
+                }
+                self->post(text_event(std::move(text)));
+            } else {
+                self->post(key_event(mapped, modifiers, std::move(text), key.wRepeatCount, key.bKeyDown != FALSE));
+            }
+        }
+    }
+}
+
+#else
+
+std::atomic<u32> g_winch_handlers{0};
+static_assert(std::atomic<TerminalSession::Self *>::is_always_lock_free);
+static_assert(std::atomic<u32>::is_always_lock_free);
+
+extern "C" void terminal_winch_handler(i32) {
+    const i32 saved_errno = errno;
+    g_winch_handlers.fetch_add(1, std::memory_order_acquire);
+    if (auto *owner = g_terminal_owner.load(std::memory_order_acquire)) {
+        const u8 byte = 1;
+        [[maybe_unused]] const auto written = ::write(owner->resize_write, &byte, sizeof(byte));
+    }
+    g_winch_handlers.fetch_sub(1, std::memory_order_release);
+    errno = saved_errno;
+}
+
+Error make_pipe(i32 &read_fd, i32 &write_fd) {
+    i32 fds[2] = {-1, -1};
+    if (::pipe(fds) != 0) {
+        return Error::k_io_error;
+    }
+    for (auto fd : fds) {
+        const auto status = ::fcntl(fd, F_GETFL, 0);
+        const auto descriptor = ::fcntl(fd, F_GETFD, 0);
+        if (status < 0 || descriptor < 0 || ::fcntl(fd, F_SETFL, status | O_NONBLOCK) != 0 ||
+            ::fcntl(fd, F_SETFD, descriptor | FD_CLOEXEC) != 0) {
+            ::close(fds[0]);
+            ::close(fds[1]);
+            return Error::k_io_error;
+        }
+    }
+    read_fd = fds[0];
+    write_fd = fds[1];
+    return {};
+}
+
+TerminalSize posix_size(i32 fd) {
+    struct winsize size{};
+    if (::ioctl(fd, TIOCGWINSZ, &size) != 0) {
+        return {};
+    }
+    return {.columns = size.ws_col, .rows = size.ws_row};
+}
+
+void run_terminal_worker(TerminalSession::Self *self) {
+    struct pollfd fds[] = {
+        {self->stop_read, POLLIN, 0},
+        {self->resize_read, POLLIN, 0},
+        {self->input_fd, POLLIN, 0},
+    };
+    std::array<char, 4096> buffer{};
+    detail::TerminalInputDecoder decoder;
+    auto emit = [self](TerminalEvent event) { self->post(std::move(event)); };
+
+    while (true) {
+        const i32 timeout = decoder.escape_pending() ? 25 : -1;
+        const i32 result = ::poll(fds, 3, timeout);
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+            return;
+        }
+        if (result == 0) {
+            decoder.flush_escape(emit);
+            continue;
+        }
+        if ((fds[0].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+            return;
+        }
+        if ((fds[1].revents & POLLIN) != 0) {
+            while (::read(self->resize_read, buffer.data(), buffer.size()) > 0) {}
+            self->post(resize_event(posix_size(self->output_fd)));
+        }
+        if ((fds[2].revents & (POLLHUP | POLLERR)) != 0) {
+            self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+            return;
+        }
+        if ((fds[2].revents & POLLIN) != 0) {
+            const auto count = ::read(self->input_fd, buffer.data(), buffer.size());
+            if (count <= 0) {
+                if (count == 0 || errno != EAGAIN) {
+                    self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+                    return;
+                }
+            } else {
+                decoder.feed(std::string_view(buffer.data(), static_cast<usize>(count)), emit);
+            }
+        }
+    }
+}
+
+#endif
+
+} // namespace
+
+TerminalSession::TerminalSession() noexcept = default;
+
+TerminalSession::TerminalSession(UniqueHandle<Self> self) noexcept : self(std::move(self)) {}
+
+TerminalSession::~TerminalSession() = default;
+
+TerminalSession::TerminalSession(TerminalSession &&other) noexcept = default;
+
+TerminalSession &TerminalSession::operator=(TerminalSession &&other) noexcept = default;
+
+TerminalSession::Self *TerminalSession::operator->() noexcept { return self.get(); }
+
+bool TerminalSession::attached(i32 fd) noexcept {
+#ifdef _WIN32
+    const auto raw = _get_osfhandle(fd);
+    if (raw == -1) {
+        return false;
+    }
+    DWORD mode = 0;
+    return GetConsoleMode(reinterpret_cast<HANDLE>(raw), &mode) != FALSE;
+#else
+    return ::isatty(fd) == 1;
+#endif
+}
+
+Result<TerminalSession> TerminalSession::open(i32 input_fd, i32 output_fd, Options options, EventLoop &loop) {
+    if (!attached(input_fd) || !attached(output_fd)) {
+        return outcome_error(Error::k_inappropriate_ioctl_for_device);
+    }
+
+    auto self = UniqueHandle<Self>(new Self());
+    self->relay = loop.create_relay();
+    self->options = options;
+    self->input_fd = input_fd;
+    self->output_fd = output_fd;
+
+    Self *expected = nullptr;
+    if (!g_terminal_owner.compare_exchange_strong(expected, self.get(), std::memory_order_acq_rel)) {
+        return outcome_error(Error::k_resource_busy_or_locked);
+    }
+    self->owns_process_terminal = true;
+
+#ifdef _WIN32
+    self->input = reinterpret_cast<HANDLE>(_get_osfhandle(input_fd));
+    self->output = reinterpret_cast<HANDLE>(_get_osfhandle(output_fd));
+    if (!GetConsoleMode(self->input, &self->original_input_mode) || !GetConsoleMode(self->output, &self->original_output_mode)) {
+        return outcome_error(Error::k_io_error);
+    }
+    self->modes_captured = true;
+    self->original_input_codepage = GetConsoleCP();
+    self->original_output_codepage = GetConsoleOutputCP();
+    self->stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!self->stop) {
+        return outcome_error(Error::k_io_error);
+    }
+#else
+    if (::tcgetattr(input_fd, &self->original_mode) != 0) {
+        return outcome_error(Error::k_io_error);
+    }
+    self->modes_captured = true;
+    if (auto err = make_pipe(self->stop_read, self->stop_write)) {
+        return outcome_error(err);
+    }
+    if (auto err = make_pipe(self->resize_read, self->resize_write)) {
+        return outcome_error(err);
+    }
+
+    struct sigaction action{};
+    action.sa_handler = terminal_winch_handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    if (::sigaction(SIGWINCH, &action, &self->original_winch) != 0) {
+        return outcome_error(Error::k_io_error);
+    }
+    self->winch_installed = true;
+#endif
+
+    if (auto err = self->apply_modes()) {
+        return outcome_error(err);
+    }
+    if (auto err = self->start_worker()) {
+        self->restore_modes();
+        return outcome_error(err);
+    }
+    return TerminalSession(std::move(self));
+}
+
+Task<TerminalEvent, Error> TerminalSession::next_event() {
+    if (!self) {
+        co_await fail(Error::k_invalid_argument);
+    }
+    co_return co_await self->delivery->next(self->relay, true).or_fail();
+}
+
+Result<TerminalSize> TerminalSession::size() const {
+    if (!self) {
+        return outcome_error(Error::k_invalid_argument);
+    }
+#ifdef _WIN32
+    auto value = windows_size(self->output);
+#else
+    auto value = posix_size(self->output_fd);
+#endif
+    if (value.columns <= 0 || value.rows <= 0) {
+        return outcome_error(Error::k_io_error);
+    }
+    return value;
+}
+
+Error TerminalSession::write(std::string_view bytes) {
+    if (!self || !self->running) {
+        return Error::k_invalid_argument;
+    }
+    return self->write_native(bytes);
+}
+
+Error TerminalSession::suspend() {
+    if (!self || !self->running) {
+        return Error::k_invalid_argument;
+    }
+    self->stop_worker();
+    return self->restore_modes();
+}
+
+Error TerminalSession::resume() {
+    if (!self || self->running) {
+        return Error::k_invalid_argument;
+    }
+    if (auto err = self->apply_modes()) {
+        return err;
+    }
+    if (auto err = self->start_worker()) {
+        self->restore_modes();
+        return err;
+    }
+    return {};
+}
+
+bool TerminalSession::active() const noexcept { return self && self->running; }
+
+Error TerminalSession::Self::write_native(std::string_view bytes) {
+#ifdef _WIN32
+    while (!bytes.empty()) {
+        DWORD written = 0;
+        const DWORD requested = static_cast<DWORD>(std::min<usize>(bytes.size(), 0x7fffffff));
+        if (!WriteFile(output, bytes.data(), requested, &written, nullptr)) {
+            return Error::k_io_error;
+        }
+        if (written == 0) {
+            return Error::k_io_error;
+        }
+        bytes.remove_prefix(written);
+    }
+#else
+    while (!bytes.empty()) {
+        const auto written = ::write(output_fd, bytes.data(), bytes.size());
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return Error::k_io_error;
+        }
+        if (written == 0) {
+            return Error::k_io_error;
+        }
+        bytes.remove_prefix(static_cast<usize>(written));
+    }
+#endif
+    return {};
+}
+
+Error TerminalSession::Self::apply_modes() {
+    if (!modes_captured) {
+        return Error::k_invalid_argument;
+    }
+#ifdef _WIN32
+    DWORD input_mode = original_input_mode;
+    if (options.raw) {
+        input_mode &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_QUICK_EDIT_MODE);
+        // Keep processed input so Ctrl+C remains a process-control event even
+        // while a provider turn, rather than input reading, owns the loop.
+        input_mode |= ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT | ENABLE_PROCESSED_INPUT;
+        if (options.mouse_events) {
+            input_mode |= ENABLE_MOUSE_INPUT;
+        } else {
+            input_mode &= ~ENABLE_MOUSE_INPUT;
+        }
+    }
+    const DWORD output_mode = original_output_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    if (!SetConsoleMode(input, input_mode)) {
+        return Error::k_io_error;
+    }
+    if (!SetConsoleMode(output, output_mode)) {
+        SetConsoleMode(input, original_input_mode);
+        return Error::k_io_error;
+    }
+    if (!SetConsoleCP(CP_UTF8) || !SetConsoleOutputCP(CP_UTF8)) {
+        SetConsoleCP(original_input_codepage);
+        SetConsoleOutputCP(original_output_codepage);
+        SetConsoleMode(input, original_input_mode);
+        SetConsoleMode(output, original_output_mode);
+        return Error::k_io_error;
+    }
+#else
+    if (options.raw) {
+        auto raw = original_mode;
+        cfmakeraw(&raw);
+        // Keep ISIG for the same reason as ENABLE_PROCESSED_INPUT on Windows:
+        // Ctrl+C must interrupt work even when nobody is awaiting terminal input.
+        raw.c_lflag |= ISIG;
+        raw.c_cc[VMIN] = 1;
+        raw.c_cc[VTIME] = 0;
+        if (::tcsetattr(input_fd, TCSAFLUSH, &raw) != 0) {
+            return Error::k_io_error;
+        }
+    }
+#endif
+    modes_applied = true;
+    return write_native(terminal_modes(options, true));
+}
+
+Error TerminalSession::Self::restore_modes() {
+    if (!modes_applied) {
+        return {};
+    }
+    const auto sequence_error = write_native(terminal_modes(options, false));
+#ifdef _WIN32
+    const bool modes_ok = SetConsoleMode(input, original_input_mode) && SetConsoleMode(output, original_output_mode);
+    const bool codepages_ok = SetConsoleCP(original_input_codepage) && SetConsoleOutputCP(original_output_codepage);
+    if (!modes_ok || !codepages_ok) {
+        return Error::k_io_error;
+    }
+#else
+    if (options.raw && ::tcsetattr(input_fd, TCSAFLUSH, &original_mode) != 0) {
+        return Error::k_io_error;
+    }
+#endif
+    modes_applied = false;
+    return sequence_error;
+}
+
+Error TerminalSession::Self::start_worker() {
+#ifdef _WIN32
+    ResetEvent(stop);
+#else
+    std::array<char, 64> buffer{};
+    while (::read(stop_read, buffer.data(), buffer.size()) > 0) {}
+#endif
+    try {
+        worker = std::thread(run_terminal_worker, this);
+    } catch (...) {
+        return Error::k_resource_temporarily_unavailable;
+    }
+    running = true;
+    return {};
+}
+
+void TerminalSession::Self::stop_worker() noexcept {
+    if (!running) {
+        return;
+    }
+#ifdef _WIN32
+    SetEvent(stop);
+#else
+    const u8 byte = 1;
+    [[maybe_unused]] const auto written = ::write(stop_write, &byte, sizeof(byte));
+#endif
+    if (worker.joinable()) {
+        worker.join();
+    }
+    running = false;
+}
+
+void TerminalSession::Self::shutdown() noexcept {
+    stop_worker();
+    restore_modes();
+
+    if (owns_process_terminal) {
+        g_terminal_owner.store(nullptr, std::memory_order_release);
+        owns_process_terminal = false;
+    }
+
+#ifdef _WIN32
+    if (stop) {
+        CloseHandle(stop);
+        stop = nullptr;
+    }
+#else
+    while (g_winch_handlers.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
+    if (winch_installed) {
+        ::sigaction(SIGWINCH, &original_winch, nullptr);
+        winch_installed = false;
+    }
+    for (auto *fd : {&stop_read, &stop_write, &resize_read, &resize_write}) {
+        if (*fd >= 0) {
+            ::close(*fd);
+            *fd = -1;
+        }
+    }
+#endif
+}
+
+} // namespace lighter

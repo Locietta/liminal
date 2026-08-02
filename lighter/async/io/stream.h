@@ -16,13 +16,7 @@ struct EventLoop;
 template <typename Stream>
 struct Acceptor;
 
-/// Stream handle classification for file descriptors.
-enum class HandleType { UNKNOWN, FILE, TTY, PIPE, TCP, UDP };
-
-/// Guess the handle type for a file descriptor.
-HandleType guess_handle(i32 fd);
-
-/// Base Stream wrapper for PIPE, TCP, and Console handles.
+/// Base Stream wrapper for pipe and TCP handles.
 struct Stream {
     Stream() noexcept;
 
@@ -183,51 +177,6 @@ struct Tcp : Stream {
 
     /// Query the local address/port of a listening Acceptor.
     static Result<i32> local_port(Acceptor &acc);
-};
-
-/// TTY/Console wrapper.
-struct Console : Stream {
-    Console() noexcept = default;
-
-    struct Winsize {
-        /// Console width in columns.
-        i32 width = 0;
-
-        /// Console height in rows.
-        i32 height = 0;
-    };
-
-    enum class Mode { NORMAL, RAW, IO, RAW_VT };
-
-    enum class VtermState { SUPPORTED, UNSUPPORTED };
-
-    struct Options {
-        /// Whether the TTY is readable (stdin).
-        bool readable = false;
-
-        constexpr Options(bool readable = false) : readable(readable) {}
-    };
-
-    /// Wrap a Console file descriptor.
-    static Result<Console> open(i32 fd, Options opts = Options(), EventLoop &loop = EventLoop::current());
-
-    /// Set TTY/Console mode.
-    Error set_mode(Mode value);
-
-    /// Reset TTY/Console mode.
-    static Error reset_mode();
-
-    /// Fetch terminal dimensions.
-    Result<Winsize> get_winsize() const;
-
-    /// Set global virtual terminal processing state.
-    static void set_vterm_state(VtermState state);
-
-    /// Query global virtual terminal processing state.
-    static Result<VtermState> get_vterm_state();
-
-private:
-    explicit Console(UniqueHandle<Self> self) noexcept;
 };
 
 } // namespace lighter

@@ -64,26 +64,32 @@ static void on_relay(uv_async_t *handle) {
     }
 }
 
-Relay::Relay(Relay::Self *p) noexcept : self(p) {}
+Relay::Relay(Relay::Self *p, KeepAlive keep_alive) noexcept : self(p) {
+    if (keep_alive == KeepAlive::YES) {
+        hold();
+    }
+}
 
-Relay::Relay(Relay &&other) noexcept : self(std::exchange(other.self, nullptr)) {}
+Relay::Relay(Relay &&other) noexcept : self(std::exchange(other.self, nullptr)), holds(std::exchange(other.holds, 0)) {}
 
 Relay &Relay::operator=(Relay &&other) noexcept {
     if (this != &other) {
-        auto *old = std::exchange(self, std::exchange(other.self, nullptr));
-        if (old) {
-            old->count.fetch_sub(1, std::memory_order_release);
-            uv::async_send(old->async);
-        }
+        release_hold();
+        self = std::exchange(other.self, nullptr);
+        holds = std::exchange(other.holds, 0);
     }
     return *this;
 }
 
-Relay::~Relay() {
-    if (self) {
+Relay::~Relay() { release_hold(); }
+
+void Relay::release_hold() noexcept {
+    if (self && holds > 0) {
+        holds = 0;
         self->count.fetch_sub(1, std::memory_order_release);
         uv::async_send(self->async);
     }
+    self = nullptr;
 }
 
 void Relay::send(Function<void()> callback) {
@@ -95,12 +101,27 @@ void Relay::send(Function<void()> callback) {
     uv::async_send(self->async);
 }
 
-Relay EventLoop::create_relay() {
+void Relay::hold() noexcept {
+    if (!self || holds++ > 0) {
+        return;
+    }
     if (self->count.fetch_add(1, std::memory_order_relaxed) == 0) {
         uv::ref(self->async);
     }
-    return Relay(self.get());
 }
+
+void Relay::release() noexcept {
+    if (!self || holds == 0) {
+        return;
+    }
+    if (--holds > 0) {
+        return;
+    }
+    self->count.fetch_sub(1, std::memory_order_release);
+    uv::async_send(self->async);
+}
+
+Relay EventLoop::create_relay(Relay::KeepAlive keep_alive) { return Relay(self.get(), keep_alive); }
 
 static thread_local EventLoop *current_loop = nullptr;
 

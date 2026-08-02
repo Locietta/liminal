@@ -198,7 +198,6 @@ struct StreamHandle {
         uv_stream_t stream;
         uv_pipe_t pipe;
         uv_tcp_t tcp;
-        uv_tty_t tty;
     };
 };
 

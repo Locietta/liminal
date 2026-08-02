@@ -43,11 +43,11 @@ template <typename T>
 using bare_t = std::remove_cv_t<std::remove_reference_t<T>>;
 
 template <typename T>
-concept handle_like = is_one_of<bare_t<T>, uv_handle_t, uv_stream_t, uv_tcp_t, uv_pipe_t, uv_tty_t, uv_udp_t, uv_poll_t, uv_timer_t,
-                                uv_idle_t, uv_prepare_t, uv_check_t, uv_signal_t, uv_process_t, uv_async_t>;
+concept handle_like = is_one_of<bare_t<T>, uv_handle_t, uv_stream_t, uv_tcp_t, uv_pipe_t, uv_udp_t, uv_poll_t, uv_timer_t, uv_idle_t,
+                                uv_prepare_t, uv_check_t, uv_process_t, uv_async_t>;
 
 template <typename T>
-concept stream_like = is_one_of<bare_t<T>, uv_stream_t, uv_tcp_t, uv_pipe_t, uv_tty_t>;
+concept stream_like = is_one_of<bare_t<T>, uv_stream_t, uv_tcp_t, uv_pipe_t>;
 
 template <typename T>
 concept req_like = is_one_of<bare_t<T>, uv_req_t, uv_fs_t, uv_work_t, uv_write_t, uv_udp_send_t, uv_connect_t>;
@@ -87,11 +87,6 @@ ALWAYS_INLINE const uv_stream_t *as_stream(const S &stream) noexcept {
         return reinterpret_cast<const uv_stream_t *>(&stream);
     }
 }
-
-struct TtyWinsize {
-    i32 width = 0;
-    i32 height = 0;
-};
 
 template <typename StatusT>
 ALWAYS_INLINE Error status_to_error(StatusT status) noexcept {
@@ -223,18 +218,6 @@ ALWAYS_INLINE Error poll_start(uv_poll_t &handle, i32 events, uv_poll_cb cb) noe
 
 ALWAYS_INLINE Error poll_stop(uv_poll_t &handle) noexcept { return status_to_error(::uv_poll_stop(&handle)); }
 
-ALWAYS_INLINE Error signal_init(uv_loop_t &loop, uv_signal_t &handle) noexcept {
-    // Errors: backend Signal-loop init failures.
-    return status_to_error(::uv_signal_init(&loop, &handle));
-}
-
-ALWAYS_INLINE Error signal_start(uv_signal_t &handle, uv_signal_cb cb, i32 signum) noexcept pre(cb != nullptr) {
-    // Errors: UV_EINVAL for invalid signum/cb and backend register failures.
-    return status_to_error(::uv_signal_start(&handle, cb, signum));
-}
-
-ALWAYS_INLINE Error signal_stop(uv_signal_t &handle) noexcept { return status_to_error(::uv_signal_stop(&handle)); }
-
 ALWAYS_INLINE Error queue_work(uv_loop_t &loop, uv_work_t &req, uv_work_cb work_cb, uv_after_work_cb after_work_cb) noexcept
     pre(work_cb != nullptr) {
     // Errors: UV_EINVAL for invalid arguments.
@@ -299,8 +282,6 @@ ALWAYS_INLINE Error tcp_connect(uv_connect_t &req, uv_tcp_t &handle, const socka
     return status_to_error(::uv_tcp_connect(&req, &handle, addr, cb));
 }
 
-ALWAYS_INLINE uv_handle_type guess_handle(uv_file file) noexcept { return ::uv_guess_handle(file); }
-
 template <stream_like S>
 ALWAYS_INLINE Result<usize> try_write(S &stream, std::span<const uv_buf_t> bufs) noexcept pre(!bufs.empty()) {
     [[maybe_unused]] i32 rc = ::uv_try_write(as_stream(stream), bufs.data(), static_cast<u32>(bufs.size()));
@@ -313,36 +294,6 @@ ALWAYS_INLINE Result<usize> try_write(S &stream, std::span<const uv_buf_t> bufs)
 template <stream_like S>
 ALWAYS_INLINE Error stream_set_blocking(S &stream, bool enabled) noexcept {
     return status_to_error(::uv_stream_set_blocking(as_stream(stream), enabled ? 1 : 0));
-}
-
-ALWAYS_INLINE Error tty_init(uv_loop_t &loop, uv_tty_t &handle, uv_file fd, bool readable) noexcept {
-    return status_to_error(::uv_tty_init(&loop, &handle, fd, readable ? 1 : 0));
-}
-
-ALWAYS_INLINE Error tty_set_mode(uv_tty_t &handle, uv_tty_mode_t mode) noexcept {
-    return status_to_error(::uv_tty_set_mode(&handle, mode));
-}
-
-ALWAYS_INLINE Error tty_reset_mode() noexcept { return status_to_error(::uv_tty_reset_mode()); }
-
-ALWAYS_INLINE Result<TtyWinsize> tty_get_winsize(uv_tty_t &handle) noexcept {
-    TtyWinsize out{};
-    [[maybe_unused]] i32 rc = ::uv_tty_get_winsize(&handle, &out.width, &out.height);
-    if (rc != 0) {
-        return outcome_error(Error(rc));
-    }
-    return out;
-}
-
-ALWAYS_INLINE void tty_set_vterm_state(uv_tty_vtermstate_t state) noexcept { ::uv_tty_set_vterm_state(state); }
-
-ALWAYS_INLINE Result<uv_tty_vtermstate_t> tty_get_vterm_state() noexcept {
-    uv_tty_vtermstate_t out = UV_TTY_UNSUPPORTED;
-    [[maybe_unused]] i32 rc = ::uv_tty_get_vterm_state(&out);
-    if (rc != 0) {
-        return outcome_error(Error(rc));
-    }
-    return out;
 }
 
 ALWAYS_INLINE Error udp_init(uv_loop_t &loop, uv_udp_t &handle) noexcept { return status_to_error(::uv_udp_init(&loop, &handle)); }
