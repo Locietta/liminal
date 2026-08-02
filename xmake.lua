@@ -18,66 +18,46 @@ add_cxxflags(
     "-fcontract-evaluation-semantic=" .. contract_semantic,
     {tools = {"gcc", "gxx"}, force = true})
 
+-- The toolchain and the C dependencies both come from the Pixi environment, so
+-- every xmake invocation has to happen under `pixi run`. The script scope has no
+-- error primitives, hence the option below rather than a plain check here.
+local conda_prefix = os.getenv("CONDA_PREFIX") or ""
+
+option("__pixi_environment")
+    set_showmenu(false)
+    on_check(function (option)
+        if not os.getenv("CONDA_PREFIX") then
+            raise("this project builds inside its Pixi environment: use `pixi run build`, or `pixi run xmake ...`")
+        end
+        option:enable(true)
+    end)
+option_end()
+
+if is_host("windows") then
+    -- Force GCC until static reflection is available on the native Windows
+    -- toolchains. That means Xmake's `mingw` platform rather than `windows`:
+    -- the latter assumes MSVC library naming (foo.lib), so link detection fails
+    -- for any C++ package Xmake builds from source (libfoo.a). This is only a
+    -- default -- `xmake f -p windows` still overrides it.
+    set_defaultplat("mingw")
+
+    -- conda-forge lays the mingw sysroot out under <prefix>/Library.
+    local mingw_root = path.join(conda_prefix, "Library")
+    set_toolchains("mingw", {mingw = mingw_root})
+    set_config("mingw", mingw_root)
+end
+
 if is_os("windows") then
-    local msys2_root = os.getenv("MSYS2")
-    if not msys2_root then
-        raise("Please set %MSYS2% to the root of your MSYS2 installation.")
-    end
-    local ucrt64_root = path.join(msys2_root, "ucrt64")
-    if not os.isdir(ucrt64_root) then
-        raise("MSYS2 does not contain the ucrt64 environment: " .. ucrt64_root)
-    end
-
-    -- Force GCC until static reflection is available on the native Windows toolchains.
-    set_toolchains("mingw", {mingw = ucrt64_root})
-    set_config("mingw", ucrt64_root)  -- for those who use git bash on windows...
-
     add_defines("_CRT_SECURE_NO_WARNINGS")
     add_defines("WIN32_LEAN_AND_MEAN", "UNICODE", "_UNICODE", "NOMINMAX", "_WINDOWS")
     -- set_policy("build.optimization.lto", true)
-
-    option("__msys2_package_manager")
-        set_showmenu(false)
-        on_check(function (option)
-            import("package.manager.msys2.register")()
-            option:enable(true)
-        end)
-    option_end()
-
+else
+    -- The shared libraries resolved out of the Pixi environment are not on the
+    -- system loader path, so record it in the binary the way conda's own
+    -- activation scripts do. Windows has no rpath; it finds the DLLs through
+    -- the PATH entry Pixi activation adds.
+    add_rpathdirs(path.join(conda_prefix, "lib"))
 end
-
--- Binaries built with the ucrt64 toolchain need its DLLs (gcc runtime, libuv,
--- fmt, curl, ...) at load time. `xmake run/test` injects the toolchain runenv,
--- but anything launching the exe directly (integration tests, a plain shell)
--- would need %MSYS2%\ucrt64\bin on PATH. Instead, walk the import table with
--- objdump and copy the ucrt64 DLLs next to the binary.
-rule("mingw.bundle-dlls")
-    after_build(function (target)
-        if not target:is_plat("windows") then
-            return
-        end
-        local bindir = path.join(os.getenv("MSYS2"), "ucrt64", "bin")
-        local objdump = path.join(bindir, "objdump.exe")
-        local seen = {}
-        local function bundle(file)
-            for name in os.iorunv(objdump, {"-p", file}):gmatch("DLL Name: (%S+)") do
-                if not seen[name] then
-                    seen[name] = true
-                    -- System DLLs (kernel32, ...) don't live in ucrt64/bin.
-                    local src = path.join(bindir, name)
-                    if os.isfile(src) then
-                        local dst = path.join(target:targetdir(), name)
-                        if not os.isfile(dst) or os.mtime(src) > os.mtime(dst) then
-                            os.cp(src, dst)
-                        end
-                        bundle(src)
-                    end
-                end
-            end
-        end
-        bundle(target:targetfile())
-    end)
-rule_end()
 
 add_repositories("loia-pinned xmake", {rootdir = os.scriptdir()})
 add_moduledirs("xmake/modules")

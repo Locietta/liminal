@@ -1,6 +1,6 @@
 [workspace]
 authors = ["Locietta <locietta@gmail.com>"]
-channels = ["https://prefix.dev/locietta-toolchains", "conda-forge"]
+channels = ["conda-forge"]
 name = "liminal"
 platforms = ["win-64", "linux-64"]
 version = "0.1.0"
@@ -18,3 +18,19 @@ ninja = "*"
 cmake = ">=4.4.0"
 clang-format = "==22.1.8"
 pytest = ">=8"
+# C dependencies. These are C ABI only, so the MSVC-built Windows builds link
+# fine from GCC; see lighter/xmake.lua for the libuv import-library caveat.
+libuv = ">=1.52.1,<2"
+libcurl = ">=8.21.0,<9"
+
+# GCC 16 is the only toolchain currently shipping P2996 static reflection
+# (-freflection) and P2900 contracts, which this project depends on.
+[target.win-64.dependencies]
+gcc_win-64 = "16.1.*"
+gxx_win-64 = "16.1.*"
+# glibc provides iconv in libc itself; only the MinGW build needs it separately.
+libiconv = ">=1.18,<2"
+
+[target.linux-64.dependencies]
+gcc = "16.1.*"
+gxx = "16.1.*"

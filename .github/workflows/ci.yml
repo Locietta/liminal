@@ -12,109 +12,54 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  linux:
-    name: Linux (gcc)
-    runs-on: ubuntu-latest
-    # Arch is the only distro currently shipping a gcc with P2996 static
-    # reflection (-freflection), which lighter/utils/enum.h requires. Upstream
-    # clang cannot build this project at all - it rejects -freflection and
-    # cannot parse `template for`.
-    container: archlinux:latest
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (gcc)
+            os: ubuntu-latest
+            cache: ~/.xmake/packages
+          - name: Windows (mingw)
+            os: windows-latest
+            cache: ~/AppData/Local/.xmake/packages
     steps:
-      - name: Install toolchain and dependencies
-        run: |
-          pacman -Syu --noconfirm --needed \
-            gcc git xmake cmake ninja make pkgconf \
-            libuv fmt curl unzip
-
       # xmake/ is a submodule holding the pinned package recipes, the custom
       # package managers and the build rules; without it xmake cannot configure.
       - uses: actions/checkout@main
         with:
           submodules: true
 
-      # xmake refuses to run as root unless told the risk is understood; CI
-      # containers have no other user.
-      - name: Allow xmake to run as root
-        run: echo "XMAKE_ROOT=y" >> "$GITHUB_ENV"
-
-      # pixi provides python/pytest for the integration tests and the
-      # test-all task that wraps unit + integration testing.
+      # pixi provides everything the build needs: the GCC 16 toolchain (the only
+      # one shipping -freflection and contracts), the C dependencies, and
+      # python/pytest for the integration tests. xmake is deliberately NOT a pixi
+      # dependency - it writes a global config that the system xmake shares, so a
+      # second copy inside the environment would clash with it for no gain.
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           cache: true
-
-      # Only glaze is built from source; the rest come from pacman.
-      - name: Cache xmake packages
-        uses: actions/cache@main
-        with:
-          path: ~/.xmake/packages
-          key: xmake-linux-${{ hashFiles('xmake/packages/**/xmake.lua') }}
-          restore-keys: xmake-linux-
-
-      - name: Configure
-        run: xmake f -m releasedbg -y
-
-      - name: Build
-        run: xmake -j$(nproc)
-
-      - name: Test
-        run: pixi run test-all
-
-  windows:
-    name: Windows (ucrt64)
-    runs-on: windows-latest
-    steps:
-      # xmake/ is a submodule holding the pinned package recipes, the custom
-      # package managers and the build rules; without it xmake cannot configure.
-      - uses: actions/checkout@main
-        with:
-          submodules: true
-
-      # MSYS2 is the toolchain and library provider only - the steps below
-      # deliberately do NOT run in an msys2 shell. Running xmake from inside one
-      # makes it detect the `msys` platform, which takes a different code path
-      # from the `windows` platform developers build locally; the msys2::
-      # package manager then fails to resolve libiconv. Native xmake plus an
-      # MSYS2 toolchain is the combination the root xmake.lua is written for.
-      - uses: msys2/setup-msys2@v2
-        id: msys2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-libuv
-            mingw-w64-ucrt-x86_64-fmt
-            mingw-w64-ucrt-x86_64-curl
-            mingw-w64-ucrt-x86_64-libiconv
 
       - uses: xmake-io/github-action-setup-xmake@v1
 
-      # pixi provides python/pytest for the integration tests and the
-      # test-all task that wraps unit + integration testing.
-      - uses: prefix-dev/setup-pixi@v0.10.0
-        with:
-          cache: true
-
-      # The root xmake.lua resolves the toolchain from %MSYS2%, refusing to
-      # configure without it, and the msys2:: package manager locates pacman
-      # under the same root.
-      - name: Export MSYS2 root
-        run: echo "MSYS2=${{ steps.msys2.outputs.msys2-location }}" >> $env:GITHUB_ENV
-
+      # Only the header-only packages (glaze, ...) are built from source; the
+      # rest come from the pixi environment.
       - name: Cache xmake packages
         uses: actions/cache@main
         with:
-          path: ~/AppData/Local/.xmake/packages
-          key: xmake-windows-${{ hashFiles('xmake/packages/**/xmake.lua') }}
-          restore-keys: xmake-windows-
+          path: ${{ matrix.cache }}
+          key: xmake-${{ runner.os }}-${{ hashFiles('xmake/packages/**/xmake.lua') }}
+          restore-keys: xmake-${{ runner.os }}-
 
+      # The toolchain and the C dependencies both live in the pixi environment,
+      # so every xmake invocation has to run under `pixi run`. On Windows this
+      # also selects xmake's `mingw` platform (see the root xmake.lua).
       - name: Configure
-        run: xmake f -m releasedbg -y
+        run: pixi run xmake f -m releasedbg -y
 
       - name: Build
-        run: xmake
+        run: pixi run build
 
       - name: Test
         run: pixi run test-all
