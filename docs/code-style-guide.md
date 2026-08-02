@@ -2,6 +2,10 @@ This is a concise code style guide for the Liminal project. Contributors or agen
 
 If not specified here, just follow the code style of the existing code around the code you are writing.
 
+## Formatting
+
+Use clang-format to format your code. 
+
 ## Identifier Naming
 
 See [.clang-tidy](../.clang-tidy).
