@@ -22,14 +22,13 @@ pytest = ">=8"
 # fine from GCC; see lighter/xmake.lua for the libuv import-library caveat.
 libuv = ">=1.52.1,<2"
 libcurl = ">=8.21.0,<9"
+libiconv = ">=1.18,<2"
 
 # GCC 16 is the only toolchain currently shipping P2996 static reflection
 # (-freflection) and P2900 contracts, which this project depends on.
 [target.win-64.dependencies]
 gcc_win-64 = "16.1.*"
 gxx_win-64 = "16.1.*"
-# glibc provides iconv in libc itself; only the MinGW build needs it separately.
-libiconv = ">=1.18,<2"
 
 [target.linux-64.dependencies]
 gcc = "16.1.*"
