@@ -12,7 +12,7 @@
 namespace lighter {
 
 template <typename T, typename E = void, typename C = void>
-struct Outcome;
+struct [[nodiscard]] Outcome;
 
 template <typename T>
 constexpr bool is_outcome_v = false;
@@ -22,7 +22,7 @@ constexpr bool is_outcome_v<Outcome<T, E, C>> = true;
 
 struct OutcomeOkTag {};
 
-inline OutcomeOkTag outcome_value() { return {}; }
+[[nodiscard]] inline OutcomeOkTag outcome_value() { return {}; }
 
 template <typename E>
 struct OutcomeError {
@@ -30,6 +30,7 @@ struct OutcomeError {
 };
 
 template <typename E>
+[[nodiscard]]
 OutcomeError<std::decay_t<E>> outcome_error(E &&e) {
     return {std::forward<E>(e)};
 }
@@ -40,6 +41,7 @@ struct OutcomeCancel {
 };
 
 template <typename C>
+[[nodiscard]]
 OutcomeCancel<std::decay_t<C>> outcome_cancel(C &&c) {
     return {std::forward<C>(c)};
 }
@@ -85,25 +87,26 @@ public:
         requires std::is_void_v<T>
         : variant(std::in_place_index<0>) {}
 
-    State state() const noexcept { return State(variant.index()); }
+    [[nodiscard]] State state() const noexcept { return State(variant.index()); }
 
-    bool has_value() const noexcept { return variant.index() == 0; }
+    [[nodiscard]] bool has_value() const noexcept { return variant.index() == 0; }
 
-    bool has_error() const noexcept
+    [[nodiscard]] bool has_error() const noexcept
         requires(!std::is_void_v<E>)
     {
         return variant.index() == 1;
     }
 
-    bool is_cancelled() const noexcept
+    [[nodiscard]] bool is_cancelled() const noexcept
         requires(!std::is_void_v<C>)
     {
         return variant.index() == 2;
     }
 
-    explicit operator bool() const noexcept { return has_value(); }
+    [[nodiscard]] explicit operator bool() const noexcept { return has_value(); }
 
     template <typename Self>
+    [[nodiscard]]
     member_ref_t<0, Self> value(this Self &&self)
         requires(!std::is_void_v<T>)
     pre(self.has_value()) {
@@ -111,25 +114,27 @@ public:
     }
 
     template <typename Self>
+    [[nodiscard]]
     decltype(auto) operator*(this Self &&self)
         requires(!std::is_void_v<T>)
     {
         return std::forward<Self>(self).value();
     }
 
-    auto *operator->()
+    [[nodiscard]] auto *operator->()
         requires(!std::is_void_v<T>)
     {
         return std::addressof(value());
     }
 
-    const auto *operator->() const
+    [[nodiscard]] const auto *operator->() const
         requires(!std::is_void_v<T>)
     {
         return std::addressof(value());
     }
 
     template <typename Self>
+    [[nodiscard]]
     member_ref_t<1, Self> error(this Self &&self)
         requires(!std::is_void_v<E>)
     pre(self.has_error()) {
@@ -137,6 +142,7 @@ public:
     }
 
     template <typename Self>
+    [[nodiscard]]
     member_ref_t<2, Self> cancellation(this Self &&self)
         requires(!std::is_void_v<C>)
     pre(self.is_cancelled()) {
@@ -170,11 +176,12 @@ public:
         requires std::is_void_v<T>
     {}
 
-    constexpr bool has_value() const noexcept { return true; }
+    [[nodiscard]] constexpr bool has_value() const noexcept { return true; }
 
-    constexpr explicit operator bool() const noexcept { return true; }
+    [[nodiscard]] constexpr explicit operator bool() const noexcept { return true; }
 
     template <typename Self>
+    [[nodiscard]]
     decltype(auto) value(this Self &&self)
         requires(!std::is_void_v<T>)
     {
@@ -182,19 +189,20 @@ public:
     }
 
     template <typename Self>
+    [[nodiscard]]
     decltype(auto) operator*(this Self &&self)
         requires(!std::is_void_v<T>)
     {
         return std::forward<Self>(self).value();
     }
 
-    auto *operator->()
+    [[nodiscard]] auto *operator->()
         requires(!std::is_void_v<T>)
     {
         return std::addressof(value());
     }
 
-    const auto *operator->() const
+    [[nodiscard]] const auto *operator->() const
         requires(!std::is_void_v<T>)
     {
         return std::addressof(value());

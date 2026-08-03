@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -294,8 +295,8 @@ int main() {
         loop.schedule(server);
         loop.schedule(client);
         loop.run();
-        server.value();
-        client.value();
+        std::ignore = server.value();
+        std::ignore = client.value();
     }
 
     // scenario 2
@@ -309,8 +310,8 @@ int main() {
         loop.schedule(server);
         loop.schedule(client);
         loop.run();
-        server.value();
-        client.value();
+        std::ignore = server.value();
+        std::ignore = client.value();
         require(disconnected, "dropping the 429 stream must abort the transfer");
     }
 
@@ -329,9 +330,9 @@ int main() {
         loop.schedule(client);
         loop.schedule(trigger);
         loop.run();
-        server.value();
-        client.value();
-        trigger.value();
+        std::ignore = server.value();
+        std::ignore = client.value();
+        std::ignore = trigger.value();
         require(events_seen == 1, "one event should arrive before the interrupt");
         require(disconnected, "cancelling the consumer must abort the transfer");
     }
@@ -347,8 +348,8 @@ int main() {
         loop.schedule(server);
         loop.schedule(client);
         loop.run();
-        server.value();
-        client.value();
+        std::ignore = server.value();
+        std::ignore = client.value();
         require(disconnected, "dropping after the timeout must abort the transfer");
     }
 
@@ -367,8 +368,8 @@ int main() {
         loop.schedule(server);
         loop.schedule(client);
         loop.run();
-        server.value();
-        client.value();
+        std::ignore = server.value();
+        std::ignore = client.value();
     }
 
     std::printf("all scenarios passed\n");

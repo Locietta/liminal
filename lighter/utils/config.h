@@ -73,10 +73,10 @@
 #define LIGHTER_CATCH_ALL() catch (...)
 #define LIGHTER_RETHROW() throw
 #else
-#define LIGHTER_THROW(exception_expr)              \
-    do {                                           \
-        static_cast<void>(sizeof(exception_expr)); \
-        std::abort();                              \
+#define LIGHTER_THROW(exception_expr)                                                               \
+    do {                                                                                            \
+        [[maybe_unused]] constexpr auto lighter_exception_expression_size = sizeof(exception_expr); \
+        std::abort();                                                                               \
     } while (false)
 #define LIGHTER_TRY if (true)
 #define LIGHTER_CATCH_ALL() else

@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 #include <lighter/async/vocab/outcome.h>
@@ -56,7 +57,7 @@ void test_cancellation() {
 int main(int argc, char **argv) {
     if (argc > 1 && std::string_view(argv[1]) == "--violate") {
         TestOutcome outcome(outcome_error(42));
-        static_cast<void>(outcome.value());
+        std::ignore = outcome.value();
         return 1;
     }
 

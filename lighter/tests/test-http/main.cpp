@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 #include <lighter/async/io/loop.h>
@@ -70,7 +71,7 @@ int main() {
     loop.schedule(client);
     loop.run();
 
-    server.value();
-    client.value();
+    std::ignore = server.value();
+    std::ignore = client.value();
     return 0;
 }

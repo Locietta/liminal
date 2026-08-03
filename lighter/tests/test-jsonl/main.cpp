@@ -87,8 +87,7 @@ void test_lines_edge_cases() {
     require(events[0].payload == "a" && events[1].payload == "b", "messy input payload mismatch");
 
     usize none = 0;
-    for (auto line : codec::jsonl::lines("\n\r\n\n")) {
-        (void) line;
+    for ([[maybe_unused]] auto line : codec::jsonl::lines("\n\r\n\n")) {
         ++none;
     }
     require(none == 0, "blank-only input should yield no lines");

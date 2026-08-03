@@ -259,7 +259,7 @@ struct OrFailTaskAwait {
             auto result = inner.await_resume();
             return typename ChildTask::value_type(std::move(*result));
         } else {
-            inner.await_resume();
+            std::ignore = inner.await_resume();
         }
     }
 };
@@ -460,7 +460,8 @@ struct Task {
         }
     }
 
-    result_type result() pre(h != nullptr && h.promise().is_terminal() && (!h.promise().is_cancelled() || !std::is_void_v<C>) ) {
+    [[nodiscard]] result_type result()
+        pre(h != nullptr && h.promise().is_terminal() && (!h.promise().is_cancelled() || !std::is_void_v<C>) ) {
         auto &&promise = h.promise();
         promise.rethrow_if_exception();
         if constexpr (std::is_void_v<E> && std::is_void_v<C>) {
@@ -478,7 +479,7 @@ struct Task {
         }
     }
 
-    value_result_type value() pre(h != nullptr && h.promise().is_terminal()) {
+    [[nodiscard]] value_result_type value() pre(h != nullptr && h.promise().is_terminal()) {
         auto &&promise = h.promise();
         promise.rethrow_if_exception();
         if constexpr (std::is_void_v<E>) {

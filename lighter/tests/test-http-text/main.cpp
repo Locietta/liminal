@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 #include <lighter/async/async.h>
@@ -141,8 +142,8 @@ int main() {
         loop.schedule(server);
         loop.schedule(client);
         loop.run();
-        server.value();
-        client.value();
+        std::ignore = server.value();
+        std::ignore = client.value();
     }
 
     std::printf("scenario 2\n");
@@ -154,8 +155,8 @@ int main() {
         loop.schedule(server);
         loop.schedule(client);
         loop.run();
-        server.value();
-        client.value();
+        std::ignore = server.value();
+        std::ignore = client.value();
     }
 
     return 0;
