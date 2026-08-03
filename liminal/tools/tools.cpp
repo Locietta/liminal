@@ -157,16 +157,25 @@ Task<BoundedCapture, lighter::Error> drain(Stream &stream) {
 }
 
 Task<std::string, Error> tool_run_command(const ToolSet &tools, RunCommandInput input) {
+#ifdef _WIN32
     Process::Options options{
         .file = "pwsh",
         .args = {"pwsh", "-NoProfile", "-NonInteractive", "-Command", std::move(input.command)},
         .cwd = tools.working_directory,
         .streams = {Process::Stdio::ignore(), Process::Stdio::pipe(false, true), Process::Stdio::pipe(false, true)},
     };
+#else
+    Process::Options options{
+        .file = "/bin/sh",
+        .args = {"sh", "-lc", std::move(input.command)},
+        .cwd = tools.working_directory,
+        .streams = {Process::Stdio::ignore(), Process::Stdio::pipe(false, true), Process::Stdio::pipe(false, true)},
+    };
+#endif
 
     auto spawned = Process::spawn(options);
     if (!spawned) {
-        co_await fail(Error::tool("failed to spawn pwsh: " + std::string(spawned.error().message())));
+        co_await fail(Error::tool("failed to spawn command shell: " + std::string(spawned.error().message())));
     }
     auto child = *std::move(spawned);
 
@@ -205,6 +214,7 @@ std::vector<provider::ToolDefinition> ToolSet::definitions() const {
         },
         {
             .name = "run_command",
+#ifdef _WIN32
             .description = "Run a PowerShell (pwsh) command in the working directory. Use this to "
                            "inspect the environment, build, test, or perform actions.",
             .input_schema = {.properties = {{"command",
@@ -212,6 +222,15 @@ std::vector<provider::ToolDefinition> ToolSet::definitions() const {
                                               .description = "PowerShell command text, passed as a "
                                                              "single argument to pwsh -Command."}}},
                              .required = {"command"}},
+#else
+            .description = "Run a POSIX sh command in the working directory. Use this to inspect "
+                           "the environment, build, test, or perform actions.",
+            .input_schema = {.properties = {{"command",
+                                             {.type = "string",
+                                              .description = "POSIX shell command text, passed as a "
+                                                             "single argument to /bin/sh -lc."}}},
+                             .required = {"command"}},
+#endif
         },
     };
 }

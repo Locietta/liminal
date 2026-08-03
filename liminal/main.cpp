@@ -9,10 +9,11 @@
 #include <lighter/async/io/loop.h>
 #include <lighter/async/runtime/interrupt.h>
 
-#include "liminal/agent/loop.h"
+#include "liminal/agent/agent.h"
 #include "liminal/provider/anthropic.h"
 #include "liminal/provider/openai.h"
 #include "liminal/tools/tools.h"
+#include "liminal/tui/repl.h"
 
 namespace {
 
@@ -95,13 +96,14 @@ int main() {
 
     std::error_code cwd_error;
     auto cwd = std::filesystem::current_path(cwd_error);
-    ToolSet tools(cwd_error ? std::string(".") : cwd.string());
+    if (cwd_error) {
+        std::fprintf(stderr, "error: cannot resolve working directory: %s\n", cwd_error.message().c_str());
+        return 1;
+    }
+    ToolSet tools(cwd.string());
 
     Agent agent(*std::move(choice), tools);
-    std::printf("liminal - provider: %s, model: %s (tools run unsandboxed with your privileges)\n", agent.provider.name.c_str(),
-                agent.provider.model.c_str());
-
-    auto app = run_repl(agent, *interrupts, make_provider);
+    auto app = tui::run_repl(agent, *interrupts, make_provider);
     loop.schedule(app);
     loop.run();
     return static_cast<int>(app.result());

@@ -10,7 +10,8 @@
 
 namespace liminal {
 
-/// The v1 built-in tools: read_file and run_command (PowerShell).
+/// The v1 built-in tools: read_file and run_command (PowerShell on Windows,
+/// POSIX sh on Linux).
 /// Deliberately not a generic registry - two tools need two branches.
 struct ToolSet {
     explicit ToolSet(std::string working_directory);

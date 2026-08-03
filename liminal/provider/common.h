@@ -44,10 +44,9 @@ struct ToolDefinition {
 };
 
 struct StreamCallbacks {
-    /// Streamed text as it arrives; may be empty.
+    /// Provider-neutral streamed text as it arrives; may be empty. Agent and
+    /// UI lifecycle events are intentionally outside the provider boundary.
     std::function<void(std::string_view)> on_text_delta;
-    /// A tool call is about to run (argument: tool name). UI feedback only.
-    std::function<void(std::string_view)> on_tool_start;
 };
 
 } // namespace liminal::provider

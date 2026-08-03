@@ -39,13 +39,16 @@ def find_binary():
 
 
 BINARY = find_binary()
-pytestmark = pytest.mark.skipif(BINARY is None, reason="liminal binary not built (run `xmake build liminal`)")
+pytestmark = pytest.mark.skipif(
+    BINARY is None, reason="liminal binary not built (run `xmake build liminal`)"
+)
 
 
 @pytest.fixture
 def anthropic_mock():
     server, state = mock_anthropic.make_server()
     import threading
+
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_port}", state
     server.shutdown()
@@ -56,9 +59,11 @@ def openai_mock_fixture(**kwargs):
     def fixture():
         server, state = mock_openai.make_server(**kwargs)
         import threading
+
         threading.Thread(target=server.serve_forever, daemon=True).start()
         yield f"http://127.0.0.1:{server.server_port}/v1", state
         server.shutdown()
+
     return fixture
 
 
@@ -75,10 +80,18 @@ def run_liminal(stdin, env_extra):
     env["LIMINAL_MODEL"] = "test-model"
     env.update(env_extra)
     result = subprocess.run(
-        [str(BINARY)], input=stdin, env=env, cwd=REPO_ROOT,
-        capture_output=True, text=True, timeout=TIMEOUT,
+        [str(BINARY)],
+        input=stdin,
+        env=env,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT,
+        check=False,
     )
-    assert result.returncode == 0, f"liminal exited {result.returncode}\nstderr: {result.stderr}\nstdout: {result.stdout}"
+    assert result.returncode == 0, (
+        f"liminal exited {result.returncode}\nstderr: {result.stderr}\nstdout: {result.stdout}"
+    )
     return result.stdout
 
 
@@ -92,10 +105,16 @@ def test_anthropic_full_cycle(anthropic_mock):
     url, state = anthropic_mock
     out = run_liminal(
         "what directory are we in?\n/compact\nwhat did we find so far?\n/quit\n",
-        {"LIMINAL_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": mock_anthropic.API_KEY,
-         "ANTHROPIC_BASE_URL": url},
+        {
+            "LIMINAL_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": mock_anthropic.API_KEY,
+            "ANTHROPIC_BASE_URL": url,
+        },
     )
-    check(state, ["429", "tools-turn", "continuation", "compact-summarizer", "post-compact"])
+    check(
+        state,
+        ["429", "tools-turn", "continuation", "compact-summarizer", "post-compact"],
+    )
     assert "Let me check the current directory." in out  # streamed text reached stdout
     assert "[history compacted]" in out
     assert "Continuing from the compacted context." in out
@@ -106,10 +125,15 @@ def test_openai_full_cycle_remote_compact(openai_mock):
     url, state = openai_mock
     out = run_liminal(
         "check the working directory and readme\n/compact\nwhat did we find?\n/quit\n",
-        {"LIMINAL_PROVIDER": "openai", "OPENAI_API_KEY": mock_openai.API_KEY,
-         "OPENAI_BASE_URL": url},
+        {
+            "LIMINAL_PROVIDER": "openai",
+            "OPENAI_API_KEY": mock_openai.API_KEY,
+            "OPENAI_BASE_URL": url,
+        },
     )
-    check(state, ["429", "tools-turn", "continuation", "compact-remote", "post-compact"])
+    check(
+        state, ["429", "tools-turn", "continuation", "compact-remote", "post-compact"]
+    )
     assert "[history compacted]" in out
     assert "Continuing from the compacted context." in out  # encrypted item replayed
 
@@ -119,10 +143,16 @@ def test_openai_gateway_compact_fallback(openai_mock_no_compact):
     url, state = openai_mock_no_compact
     out = run_liminal(
         "check the working directory and readme\n/compact\n/quit\n",
-        {"LIMINAL_PROVIDER": "openai", "OPENAI_API_KEY": mock_openai.API_KEY,
-         "OPENAI_BASE_URL": url},
+        {
+            "LIMINAL_PROVIDER": "openai",
+            "OPENAI_API_KEY": mock_openai.API_KEY,
+            "OPENAI_BASE_URL": url,
+        },
     )
-    check(state, ["429", "tools-turn", "continuation", "compact-404", "compact-summarizer"])
+    check(
+        state,
+        ["429", "tools-turn", "continuation", "compact-404", "compact-summarizer"],
+    )
     assert "[history compacted]" in out
 
 
@@ -132,9 +162,13 @@ def test_provider_switch_carries_history(anthropic_mock, openai_mock):
     openai_url, openai_state = openai_mock
     out = run_liminal(
         "what directory are we in?\n/switch openai\ncheck the working directory and readme\n/quit\n",
-        {"LIMINAL_PROVIDER": "anthropic",
-         "ANTHROPIC_API_KEY": mock_anthropic.API_KEY, "ANTHROPIC_BASE_URL": anthropic_url,
-         "OPENAI_API_KEY": mock_openai.API_KEY, "OPENAI_BASE_URL": openai_url},
+        {
+            "LIMINAL_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": mock_anthropic.API_KEY,
+            "ANTHROPIC_BASE_URL": anthropic_url,
+            "OPENAI_API_KEY": mock_openai.API_KEY,
+            "OPENAI_BASE_URL": openai_url,
+        },
     )
     check(anthropic_state, ["429", "tools-turn", "continuation"])
     check(openai_state, ["429", "tools-turn", "continuation"])
@@ -145,14 +179,19 @@ def test_unknown_provider_switch_is_recoverable(anthropic_mock):
     url, state = anthropic_mock
     out = run_liminal(
         "/switch nonexistent\nwhat directory are we in?\n/quit\n",
-        {"LIMINAL_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": mock_anthropic.API_KEY,
-         "ANTHROPIC_BASE_URL": url},
+        {
+            "LIMINAL_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": mock_anthropic.API_KEY,
+            "ANTHROPIC_BASE_URL": url,
+        },
     )
     assert "[switch error:" in out
     check(state, ["429", "tools-turn", "continuation"])  # session stayed usable
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX PTY test; Windows needs the planned ConPTY driver")
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX PTY test; Windows needs the planned ConPTY driver"
+)
 def test_posix_terminal_session_restores_state():
     """The interactive backend uses and restores an alternate terminal screen."""
     import pty
@@ -167,7 +206,12 @@ def test_posix_terminal_session_restores_state():
     env["OPENAI_API_KEY"] = "fake-terminal-test-key"
 
     process = subprocess.Popen(
-        [str(BINARY)], stdin=slave, stdout=slave, stderr=slave, env=env, cwd=REPO_ROOT,
+        [str(BINARY)],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+        cwd=REPO_ROOT,
         close_fds=True,
     )
     output = bytearray()
@@ -187,7 +231,9 @@ def test_posix_terminal_session_restores_state():
         deadline = time.monotonic() + 5
         while b"a\r\nb" not in output:
             remaining = deadline - time.monotonic()
-            assert remaining > 0, f"multiline paste was not echoed with CRLF: {output!r}"
+            assert remaining > 0, (
+                f"multiline paste was not echoed with CRLF: {output!r}"
+            )
             readable, _, _ = select.select([master], [], [], remaining)
             assert readable, f"multiline paste was not echoed with CRLF: {output!r}"
             output.extend(os.read(master, 4096))
