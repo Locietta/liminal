@@ -36,8 +36,12 @@ struct TurnFailed {
     std::string message;
 };
 
+struct SessionNotice {
+    std::string text;
+};
+
 using Event = std::variant<PromptSubmitted, AssistantTextDelta, AssistantSegmentCompleted, ToolStarted, ToolCompleted, TurnCompleted,
-                           TurnCancelled, TurnFailed>;
+                           TurnCancelled, TurnFailed, SessionNotice>;
 using EventSink = std::copyable_function<void(const Event &) const>;
 
 } // namespace liminal

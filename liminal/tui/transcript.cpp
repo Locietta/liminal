@@ -62,6 +62,10 @@ void Transcript::apply_one(const TurnFailed &event) {
     append({.kind = BlockKind::NOTICE, .state = BlockState::FAILED, .text = event.message});
 }
 
+void Transcript::apply_one(const SessionNotice &event) {
+    append({.kind = BlockKind::NOTICE, .state = BlockState::COMPLETED, .text = event.text});
+}
+
 void Transcript::finish_streaming(BlockState state) {
     if (!blocks.empty() && blocks.back().kind == BlockKind::ASSISTANT && blocks.back().state == BlockState::STREAMING) {
         blocks.back().state = state;

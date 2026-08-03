@@ -50,6 +50,7 @@ private:
     void apply_one(const TurnCompleted &event);
     void apply_one(const TurnCancelled &event);
     void apply_one(const TurnFailed &event);
+    void apply_one(const SessionNotice &event);
     void finish_streaming(BlockState state);
     Block &append(Block block);
 

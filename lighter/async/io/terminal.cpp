@@ -106,7 +106,7 @@ TerminalEvent resize_event(TerminalSize size) { return TerminalEvent{.kind = Ter
 std::string terminal_features([[maybe_unused]] const TerminalSession::Options &options, bool enable) {
     std::string result;
     if (!enable) {
-        result += "\x1b[?1049l";
+        result += "\x1b[0m\x1b[?25h\x1b[?1049l";
     }
 #ifndef _WIN32
     if (enable) {

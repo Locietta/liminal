@@ -1,7 +1,6 @@
 #include "repl.h"
 
 #include <cstdio>
-#include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -14,7 +13,6 @@
 #include <lighter/async/vocab/cancellation.h>
 
 #include "liminal/tui/console_renderer.h"
-#include "liminal/tui/transcript.h"
 
 namespace liminal::tui {
 
@@ -32,7 +30,7 @@ using lighter::WhenAny;
 
 namespace {
 
-/// Splits redirected stdin on LF and owns the temporary one-line interactive
+/// Splits redirected stdin on LF and routes native input into the interactive
 /// composer. Multiline paste remains a single prompt until Enter submits it.
 struct PromptReader {
     Stream *input = nullptr;
@@ -82,8 +80,7 @@ private:
             switch (event.kind) {
                 case TerminalEventKind::TEXT:
                 case TerminalEventKind::PASTE:
-                    buffered += event.text;
-                    if (auto error = renderer->echo(event.text)) {
+                    if (auto error = renderer->insert(event.text)) {
                         co_await fail(error);
                     }
                     break;
@@ -92,43 +89,55 @@ private:
                         break;
                     }
                     if (event.key == TerminalKey::ENTER) {
-                        if (auto error = renderer->write("\r\n")) {
+                        auto prompt = renderer->take_prompt();
+                        if (auto error = renderer->redraw()) {
                             co_await fail(error);
                         }
-                        co_return finish(std::exchange(buffered, {}));
+                        co_return finish(std::move(prompt));
                     }
                     if (event.key == TerminalKey::BACKSPACE) {
-                        if (!buffered.empty()) {
-                            auto start = buffered.size() - 1;
-                            while (start > 0 && (static_cast<unsigned char>(buffered[start]) & 0xc0) == 0x80) {
-                                --start;
-                            }
-                            buffered.erase(start);
-                            if (auto error = renderer->write("\b \b")) {
-                                co_await fail(error);
-                            }
-                        }
+                        if (auto error = renderer->backspace()) co_await fail(error);
                         break;
                     }
                     if (event.key == TerminalKey::TAB) {
-                        buffered.push_back('\t');
-                        if (auto error = renderer->write("\t")) {
-                            co_await fail(error);
-                        }
+                        if (auto error = renderer->insert("\t")) co_await fail(error);
+                        break;
+                    }
+                    if (event.key == TerminalKey::DELETE_KEY) {
+                        if (auto error = renderer->erase()) co_await fail(error);
+                        break;
+                    }
+                    if (event.key == TerminalKey::ARROW_LEFT) {
+                        if (auto error = renderer->move_left()) co_await fail(error);
+                        break;
+                    }
+                    if (event.key == TerminalKey::ARROW_RIGHT) {
+                        if (auto error = renderer->move_right()) co_await fail(error);
+                        break;
+                    }
+                    if (event.key == TerminalKey::HOME) {
+                        if (auto error = renderer->move_home()) co_await fail(error);
+                        break;
+                    }
+                    if (event.key == TerminalKey::END) {
+                        if (auto error = renderer->move_end()) co_await fail(error);
+                        break;
+                    }
+                    if (event.key == TerminalKey::PAGE_UP || event.key == TerminalKey::PAGE_DOWN) {
+                        if (auto error = renderer->page(event.key == TerminalKey::PAGE_UP ? -1 : 1)) co_await fail(error);
                         break;
                     }
                     const bool control = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::CONTROL);
                     const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
                     if (event.key == TerminalKey::CHARACTER && !event.text.empty() && (!control || alt_gr)) {
-                        buffered += event.text;
-                        if (auto error = renderer->echo(event.text)) {
-                            co_await fail(error);
-                        }
+                        if (auto error = renderer->insert(event.text)) co_await fail(error);
                     }
                     break;
                 }
                 case TerminalEventKind::CLOSED: co_return std::nullopt;
                 case TerminalEventKind::RESIZE:
+                    if (auto error = renderer->resize(event.size)) co_await fail(error);
+                    break;
                 case TerminalEventKind::FOCUS:
                 case TerminalEventKind::MOUSE: break;
             }
@@ -147,21 +156,6 @@ struct TurnControl {
     CancellationSource *active_turn = nullptr;
 };
 
-struct UiSession {
-    explicit UiSession(ConsoleRenderer &renderer) : renderer(&renderer) {}
-
-    void apply(const Event &event) {
-        transcript.apply(event);
-        if (!render_error) {
-            render_error = renderer->render(event);
-        }
-    }
-
-    Transcript transcript;
-    ConsoleRenderer *renderer;
-    lighter::Error render_error;
-};
-
 constexpr std::string_view k_default_compact_instructions =
     "Compact the conversation while preserving the user's goals, constraints, decisions, "
     "important tool results, modified files, unresolved issues, and the context needed to continue.";
@@ -173,8 +167,7 @@ Task<void> signal_monitor(InterruptSource &interrupts, TurnControl &control) {
             co_return;
         }
         if (interrupts.interrupt_count() >= 2) {
-            std::fputs("\n[force exit]\n", stderr);
-            std::exit(130);
+            co_return;
         }
         if (control.active_turn) {
             control.active_turn->cancel();
@@ -194,8 +187,10 @@ Task<lighter::Outcome<T, E, lighter::Cancellation>> guard_turn(Task<T, E> work, 
 }
 
 Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &renderer, TurnControl &control, model::Catalog &models) {
-    UiSession ui(renderer);
-    EventSink events = [&ui](const Event &event) { ui.apply(event); };
+    lighter::Error render_error;
+    EventSink events = [&renderer, &render_error](const Event &event) {
+        if (!render_error) render_error = renderer.render(event);
+    };
 
     while (true) {
         if (auto error = renderer.prompt(agent.model.entry.id, agent.model.reasoning_effort)) {
@@ -302,15 +297,15 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
             continue;
         }
 
-        ui.apply(PromptSubmitted{.text = prompt});
+        render_error = renderer.render(PromptSubmitted{.text = prompt});
         auto outcome = co_await guard_turn(agent.run_turn(std::move(prompt), events), control);
         if (outcome.is_cancelled()) {
-            ui.apply(TurnCancelled{});
+            if (!render_error) render_error = renderer.render(TurnCancelled{});
         } else if (outcome.has_error()) {
-            ui.apply(TurnFailed{.message = outcome.error().message()});
+            if (!render_error) render_error = renderer.render(TurnFailed{.message = outcome.error().message()});
         }
-        if (ui.render_error) {
-            std::fprintf(stderr, "cannot render session: %s\n", std::string(ui.render_error.message()).c_str());
+        if (render_error) {
+            std::fprintf(stderr, "cannot render session: %s\n", std::string(render_error.message()).c_str());
             co_return 1;
         }
     }

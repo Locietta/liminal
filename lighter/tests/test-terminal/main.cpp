@@ -6,6 +6,12 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#endif
+
 #include <lighter/async/async.h>
 #include <lighter/async/detail/terminal_input_decoder.h>
 #include <lighter/types.hpp>
@@ -144,6 +150,54 @@ void check_focus_sequences() {
             "focus sequences must retain their state");
 }
 
+#ifdef _WIN32
+void check_windows_console_restoration() {
+    bool allocated = false;
+    auto input =
+        CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (input == INVALID_HANDLE_VALUE) {
+        require(AllocConsole(), "test process could not allocate a Windows console");
+        allocated = true;
+        input =
+            CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    }
+    auto output =
+        CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    require(input != INVALID_HANDLE_VALUE && output != INVALID_HANDLE_VALUE, "Windows console handles could not be opened");
+
+    DWORD original_input_mode = 0;
+    DWORD original_output_mode = 0;
+    require(GetConsoleMode(input, &original_input_mode) && GetConsoleMode(output, &original_output_mode),
+            "Windows console modes could not be captured");
+    const auto original_input_codepage = GetConsoleCP();
+    const auto original_output_codepage = GetConsoleOutputCP();
+
+    const auto input_fd = _open_osfhandle(reinterpret_cast<intptr_t>(input), _O_RDONLY);
+    const auto output_fd = _open_osfhandle(reinterpret_cast<intptr_t>(output), _O_WRONLY);
+    require(input_fd >= 0 && output_fd >= 0, "Windows console handles could not be exposed as file descriptors");
+    {
+        EventLoop loop;
+        auto opened = TerminalSession::open(input_fd, output_fd, TerminalSession::Options(), loop);
+        require(opened.has_value(), "Windows terminal session could not be opened");
+        auto session = *std::move(opened);
+        require(session.active(), "Windows terminal session must become active");
+    }
+
+    DWORD restored_input_mode = 0;
+    DWORD restored_output_mode = 0;
+    require(GetConsoleMode(input, &restored_input_mode) && GetConsoleMode(output, &restored_output_mode),
+            "restored Windows console modes could not be read");
+    require(restored_input_mode == original_input_mode && restored_output_mode == original_output_mode,
+            "Windows terminal session must restore exact console modes");
+    require(GetConsoleCP() == original_input_codepage && GetConsoleOutputCP() == original_output_codepage,
+            "Windows terminal session must restore exact code pages");
+
+    _close(input_fd);
+    _close(output_fd);
+    if (allocated) FreeConsole();
+}
+#endif
+
 i32 run_all() {
     check_terminal_basics();
     check_text_and_utf8_chunking();
@@ -152,6 +206,9 @@ i32 run_all() {
     check_control_bytes();
     check_paste_chunking();
     check_focus_sequences();
+#ifdef _WIN32
+    check_windows_console_restoration();
+#endif
     return 0;
 }
 
