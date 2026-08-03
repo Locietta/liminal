@@ -13,6 +13,11 @@ namespace liminal::provider {
 // Provider-neutral agent vocabulary only. Concrete clients intentionally keep
 // their own history and wire types so provider-specific APIs remain available.
 
+struct DiscoveredModel {
+    std::string id;
+    std::string name;
+};
+
 struct ToolCall {
     std::string id;
     std::string name;

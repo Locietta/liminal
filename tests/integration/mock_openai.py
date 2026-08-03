@@ -26,9 +26,16 @@ def sse(events):
     ).encode()
 
 
-def make_server(port=0, compact_404=False):
+def make_server(port=0, compact_404=False, models_status=200, models=None):
     """Returns (server, state). state: calls, log[], errors[]."""
-    state = {"calls": 0, "log": [], "errors": []}
+    models = models or ["test-model", "discovered-openai-model"]
+    state = {
+        "calls": 0,
+        "log": [],
+        "errors": [],
+        "model_requests": 0,
+        "request_bodies": [],
+    }
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -37,6 +44,40 @@ def make_server(port=0, compact_404=False):
         def do_POST(self):
             try:
                 self.handle_post()
+            except AssertionError as error:
+                state["errors"].append(f"openai mock: {error}")
+                self.send_error(500, str(error))
+
+        def do_GET(self):
+            try:
+                assert self.path == "/v1/models", f"unexpected path {self.path}"
+                assert self.headers["Authorization"] == f"Bearer {API_KEY}", (
+                    "missing/wrong bearer token"
+                )
+                state["model_requests"] += 1
+                if models_status != 200:
+                    self.send_json(
+                        models_status,
+                        {
+                            "error": {
+                                "message": "models unavailable",
+                                "type": "not_found",
+                            }
+                        },
+                        "req_models_error",
+                    )
+                    return
+                self.send_json(
+                    200,
+                    {
+                        "object": "list",
+                        "data": [
+                            {"id": model, "object": "model", "owned_by": "test"}
+                            for model in models
+                        ],
+                    },
+                    "req_models",
+                )
             except AssertionError as error:
                 state["errors"].append(f"openai mock: {error}")
                 self.send_error(500, str(error))
@@ -100,6 +141,7 @@ def make_server(port=0, compact_404=False):
 
         def handle_post(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            state["request_bodies"].append(body)
             assert self.headers["Authorization"] == f"Bearer {API_KEY}", (
                 "missing/wrong bearer token"
             )
@@ -282,7 +324,7 @@ def make_server(port=0, compact_404=False):
             )
             calls = [item for item in items if item["type"] == "function_call"]
             outputs = [item for item in items if item["type"] == "function_call_output"]
-            # Tail-match: a /switch may have carried earlier neutral rounds in.
+            # Tail-match: model changes may have carried earlier neutral rounds in.
             assert [item["call_id"] for item in calls][-2:] == ["call_1", "call_2"]
             assert [item["call_id"] for item in outputs][-2:] == ["call_1", "call_2"]
             outputs = outputs[-2:]

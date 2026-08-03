@@ -59,10 +59,9 @@ struct FakeProvider {
 
 i32 run_all() {
     ToolSet tools(std::filesystem::current_path().string());
-    ProviderChoice choice{
+    model::Choice choice{
         .handle = pro::make_proxy<provider::ProviderFacade, FakeProvider>(),
-        .name = "fake",
-        .model = "test",
+        .entry = {.provider = "fake", .id = "test"},
     };
     Agent agent(std::move(choice), tools);
 

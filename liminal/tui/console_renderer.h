@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+#include <string>
 #include <string_view>
 
 #include <lighter/async/io/terminal.h>
@@ -17,8 +19,8 @@ struct ConsoleRenderer {
     lighter::Error write(std::string_view text);
     lighter::Error echo(std::string_view text);
     lighter::Error render(const Event &event);
-    lighter::Error banner(std::string_view provider, std::string_view model);
-    lighter::Error prompt(std::string_view provider, std::string_view model);
+    lighter::Error banner(std::string_view model, const std::optional<std::string> &effort);
+    lighter::Error prompt(std::string_view model, const std::optional<std::string> &effort);
     lighter::Error notice(std::string_view text);
 
     lighter::TerminalSession *terminal;

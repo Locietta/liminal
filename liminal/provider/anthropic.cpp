@@ -54,11 +54,32 @@ struct Message {
 };
 
 struct MessageRequest {
+    struct Thinking {
+        std::string type = "adaptive";
+    };
+
+    struct OutputConfig {
+        std::string effort;
+    };
+
     std::string model;
     u32 max_tokens = 8192;
     std::vector<Message> messages;
     std::optional<std::vector<provider::ToolDefinition>> tools; // omitted when nullopt
     bool stream = true;
+    std::optional<Thinking> thinking;
+    std::optional<OutputConfig> output_config;
+};
+
+struct Model {
+    std::string id;
+    std::string display_name;
+};
+
+struct ModelsResponse {
+    std::vector<Model> data;
+    bool has_more = false;
+    std::optional<std::string> last_id;
 };
 
 struct Usage {
@@ -588,11 +609,18 @@ Task<wire::AssistantMessage, Error> attempt_stream(http::Client &http_client, co
                                                    const provider::StreamCallbacks &callbacks, bool &text_emitted) {
     auto request = http_client.on().post(options.base_url + "/v1/messages");
     request.header("anthropic-version", "2023-06-01").header("accept", "text/event-stream").json_text(body);
-    if (!options.api_key.empty()) {
-        request.header("x-api-key", options.api_key);
+    if (!options.auth) {
+        co_await fail(Error::config("provider has no authentication resolver"));
     }
-    if (!options.auth_token.empty()) {
-        request.bearer_auth(options.auth_token);
+    auto auth = co_await options.auth().or_fail();
+    if (!auth.api_key.empty()) {
+        request.header("x-api-key", auth.api_key);
+    }
+    if (!auth.bearer_token.empty()) {
+        request.bearer_auth(auth.bearer_token);
+    }
+    for (const auto &header : auth.headers) {
+        request.header(header.name, header.value);
     }
 
     auto streamed = co_await std::move(request).stream();
@@ -663,6 +691,10 @@ Task<provider::TurnResponse, Error> Client::complete(const provider::History &hi
     if (!tools.empty()) {
         request.tools = tools;
     }
+    if (options.reasoning_effort) {
+        request.thinking = wire::MessageRequest::Thinking{};
+        request.output_config = wire::MessageRequest::OutputConfig{.effort = *options.reasoning_effort};
+    }
 
     auto encoded = json::to_string(request);
     if (!encoded) {
@@ -693,6 +725,63 @@ Task<provider::TurnResponse, Error> Client::complete(const provider::History &hi
 Task<void, Error> Client::compact(provider::History &history, std::string_view instructions) {
     // No native compaction endpoint; summarize through our own complete().
     co_return co_await provider::local_compact(this, history, instructions).or_fail();
+}
+
+Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options) {
+    while (!options.base_url.empty() && options.base_url.back() == '/') {
+        options.base_url.pop_back();
+    }
+
+    http::Client client;
+    std::vector<provider::DiscoveredModel> models;
+    std::optional<std::string> after_id;
+    do {
+        auto request = client.on().get(options.base_url + "/v1/models");
+        request.header("anthropic-version", "2023-06-01").query("limit", "1000");
+        if (after_id) {
+            request.query("after_id", *after_id);
+        }
+        if (!options.auth) {
+            co_await fail(Error::config("provider has no authentication resolver"));
+        }
+        auto auth = co_await options.auth().or_fail();
+        if (!auth.api_key.empty()) {
+            request.header("x-api-key", auth.api_key);
+        }
+        if (!auth.bearer_token.empty()) {
+            request.bearer_auth(auth.bearer_token);
+        }
+        for (const auto &header : auth.headers) {
+            request.header(header.name, header.value);
+        }
+
+        auto sent = co_await std::move(request).send();
+        if (!sent) {
+            co_await fail(Error::http(std::move(sent).error()));
+        }
+        if (!sent->ok()) {
+            auto request_id = std::string(sent->header_value("request-id").value_or(""));
+            co_await fail(Error::http_status(sent->status, {}, sent->text_copy(), std::move(request_id)));
+        }
+        auto response = parse_wire<wire::ModelsResponse>(sent->text(), "models response");
+        if (!response) {
+            co_await fail(std::move(response).error());
+        }
+        for (auto &entry : response->data) {
+            if (!entry.id.empty()) {
+                models.push_back({.id = std::move(entry.id), .name = std::move(entry.display_name)});
+            }
+        }
+        if (!response->has_more) {
+            break;
+        }
+        if (!response->last_id || response->last_id->empty() || response->last_id == after_id) {
+            co_await fail(Error::protocol("models response pagination did not advance"));
+        }
+        after_id = std::move(response->last_id);
+    } while (true);
+
+    co_return models;
 }
 
 } // namespace liminal::anthropic

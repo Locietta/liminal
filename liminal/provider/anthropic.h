@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,7 @@
 #include <lighter/types.hpp>
 
 #include "liminal/error.h"
+#include "liminal/provider/auth.h"
 #include "liminal/provider/common.h"
 #include "liminal/provider/history.h"
 
@@ -21,13 +23,10 @@ using namespace lighter::types;
 inline constexpr std::string_view k_provider_tag = "anthropic";
 
 struct ClientOptions {
-    /// Sent as `x-api-key` (direct Anthropic API convention).
-    std::string api_key;
-    /// Sent as `Authorization: Bearer` (proxy/gateway convention). Either
-    /// this or api_key must be set; both may be.
-    std::string auth_token;
+    provider::AuthResolver auth;
     std::string base_url = "https://api.anthropic.com";
     std::string model;
+    std::optional<std::string> reasoning_effort;
     u32 max_tokens = 8192;
     usize max_retries = 2;
     std::chrono::milliseconds initial_retry_delay{500};
@@ -53,5 +52,8 @@ struct Client {
     ClientOptions options;
     lighter::http::Client http_client;
 };
+
+/// Lists every page from the configured Anthropic-compatible Models API.
+lighter::Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options);
 
 } // namespace liminal::anthropic

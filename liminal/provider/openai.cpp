@@ -94,8 +94,13 @@ struct FunctionTool {
 
 using Tool = std::variant<FunctionTool>;
 
+struct Reasoning {
+    std::string effort;
+};
+
 struct ResponseRequest {
     std::string model;
+    std::string instructions = "You are a helpful coding assistant.";
     u32 max_output_tokens = 8192;
     std::vector<ResponseItem> input;
     std::optional<std::vector<Tool>> tools;
@@ -103,12 +108,24 @@ struct ResponseRequest {
     bool stream = true;
     bool store = false;
     std::vector<std::string> include = {"reasoning.encrypted_content"};
+    std::optional<Reasoning> reasoning;
 };
 
 struct CompactRequest {
     std::string model;
     std::vector<ResponseItem> input;
     std::string instructions;
+};
+
+struct Model {
+    std::string id;
+    std::string slug;
+    std::string display_name;
+};
+
+struct ModelsResponse {
+    std::vector<Model> data;
+    std::vector<Model> models;
 };
 
 } // namespace liminal::openai::wire
@@ -545,14 +562,23 @@ std::optional<std::chrono::milliseconds> parse_retry_after(const ResponseType &r
 }
 
 template <typename RequestType>
-void apply_auth_headers(RequestType &request, const ClientOptions &options) {
-    request.bearer_auth(options.api_key);
-    if (!options.organization.empty()) {
-        request.header("OpenAI-Organization", options.organization);
+void apply_auth_headers(RequestType &request, const provider::ResolvedAuth &auth) {
+    if (!auth.bearer_token.empty()) {
+        request.bearer_auth(auth.bearer_token);
     }
-    if (!options.project.empty()) {
-        request.header("OpenAI-Project", options.project);
+    if (!auth.api_key.empty()) {
+        request.header("x-api-key", auth.api_key);
     }
+    for (const auto &header : auth.headers) {
+        request.header(header.name, header.value);
+    }
+}
+
+Task<provider::ResolvedAuth, Error> resolve_auth(const ClientOptions &options) {
+    if (!options.auth) {
+        co_await fail(Error::config("provider has no authentication resolver"));
+    }
+    co_return co_await options.auth().or_fail();
 }
 
 Error parse_status_error(int status, std::string_view body, std::string request_id, std::optional<std::chrono::milliseconds> retry_after) {
@@ -569,7 +595,7 @@ Task<provider::TurnResponse, Error> attempt_stream(http::Client &http_client, co
                                                    const provider::StreamCallbacks &callbacks, bool &text_emitted) {
     auto request = http_client.on().post(options.base_url + "/responses");
     request.header("accept", "text/event-stream").json_text(body);
-    apply_auth_headers(request, options);
+    apply_auth_headers(request, co_await resolve_auth(options).or_fail());
 
     auto streamed = co_await std::move(request).stream();
     if (!streamed) {
@@ -637,7 +663,7 @@ Task<std::vector<wire::ResponseItem>, Error> attempt_remote_compact(http::Client
                                                                     const std::string &body) {
     auto request = http_client.on().post(options.base_url + "/responses/compact");
     request.json_text(body);
-    apply_auth_headers(request, options);
+    apply_auth_headers(request, co_await resolve_auth(options).or_fail());
 
     auto sent = co_await std::move(request).send();
     if (!sent) {
@@ -688,6 +714,9 @@ Task<provider::TurnResponse, Error> Client::complete(const provider::History &hi
         .input = co_await or_fail(to_wire(history)),
         .tools = make_tools(tools),
     };
+    if (options.reasoning_effort) {
+        request.reasoning = wire::Reasoning{.effort = *options.reasoning_effort};
+    }
 
     auto encoded = json::to_string(request);
     if (!encoded) {
@@ -753,6 +782,45 @@ Task<void, Error> Client::compact(provider::History &history, std::string_view i
         auto delay = error.retry_after.value_or(options.initial_retry_delay * (1 << attempt));
         co_await lighter::sleep(delay);
     }
+}
+
+Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options) {
+    while (!options.base_url.empty() && options.base_url.back() == '/') {
+        options.base_url.pop_back();
+    }
+
+    http::Client client;
+    auto request = client.on().get(options.base_url + "/models");
+    if (options.models_client_version) {
+        request.query("client_version", *options.models_client_version);
+    }
+    apply_auth_headers(request, co_await resolve_auth(options).or_fail());
+    auto sent = co_await std::move(request).send();
+    if (!sent) {
+        co_await fail(Error::http(std::move(sent).error()));
+    }
+    if (!sent->ok()) {
+        auto request_id = std::string(sent->header_value("x-request-id").value_or(""));
+        co_await fail(parse_status_error(sent->status, sent->text(), std::move(request_id), {}));
+    }
+
+    auto response = parse_wire<wire::ModelsResponse>(sent->text(), "models response");
+    if (!response) {
+        co_await fail(std::move(response).error());
+    }
+    std::vector<provider::DiscoveredModel> models;
+    models.reserve(response->data.size() + response->models.size());
+    for (auto &entry : response->data) {
+        if (!entry.id.empty()) {
+            models.push_back({.id = std::move(entry.id), .name = {}});
+        }
+    }
+    for (auto &entry : response->models) {
+        if (!entry.slug.empty()) {
+            models.push_back({.id = std::move(entry.slug), .name = std::move(entry.display_name)});
+        }
+    }
+    co_return models;
 }
 
 } // namespace liminal::openai

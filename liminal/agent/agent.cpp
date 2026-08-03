@@ -53,7 +53,7 @@ Task<void, Error> Agent::run_turn(std::string prompt, const EventSink &events) {
 
     constexpr i32 k_max_iterations = 32;
     for (i32 iteration = 0; iteration < k_max_iterations; ++iteration) {
-        auto response = co_await provider.handle->complete(staged, tools->definitions(), stream).or_fail();
+        auto response = co_await model.handle->complete(staged, tools->definitions(), stream).or_fail();
         auto calls = provider::tool_calls(response);
         emit(events, AssistantSegmentCompleted{});
 
@@ -94,7 +94,7 @@ Task<void, Error> Agent::run_turn(std::string prompt, const EventSink &events) {
 }
 
 Task<void, Error> Agent::compact(std::string_view instructions) {
-    co_return co_await provider.handle->compact(history, instructions).or_fail();
+    co_return co_await model.handle->compact(history, instructions).or_fail();
 }
 
 } // namespace liminal

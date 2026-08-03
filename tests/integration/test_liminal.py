@@ -9,10 +9,13 @@ output; tests skip with a clear message if it has not been built.
 """
 
 import errno
+import json
 import os
 import select
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -20,6 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 import mock_anthropic
+import mock_codex_auth
 import mock_openai
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -69,16 +73,36 @@ def openai_mock_fixture(**kwargs):
 
 openai_mock = openai_mock_fixture()
 openai_mock_no_compact = openai_mock_fixture(compact_404=True)
+openai_mock_no_models = openai_mock_fixture(models_status=404)
 
 
-def run_liminal(stdin, env_extra):
+@pytest.fixture
+def codex_auth_mock():
+    server, state = mock_codex_auth.make_server()
+    import threading
+
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}", state
+    server.shutdown()
+
+
+def configured_provider(api, base_url, api_key, models, discover_models=False):
+    return {
+        "api": api,
+        "base_url": base_url,
+        "api_key": api_key,
+        "discover_models": discover_models,
+        "models": models,
+    }
+
+
+def run_liminal(stdin, providers, tmp_path, selector="test-model"):
+    providers_file = tmp_path / "providers.json"
+    providers_file.write_text(json.dumps({"providers": providers}))
     env = os.environ.copy()
-    # Fake credentials only - never real keys.
-    env.pop("ANTHROPIC_API_KEY", None)
-    env.pop("ANTHROPIC_AUTH_TOKEN", None)
-    env.pop("OPENAI_API_KEY", None)
-    env["LIMINAL_MODEL"] = "test-model"
-    env.update(env_extra)
+    env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
+    env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
+    env["LIMINAL_MODEL"] = selector
     result = subprocess.run(
         [str(BINARY)],
         input=stdin,
@@ -86,6 +110,8 @@ def run_liminal(stdin, env_extra):
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=TIMEOUT,
         check=False,
     )
@@ -100,16 +126,20 @@ def check(state, expected_log):
     assert state["log"] == expected_log, f"scenario order mismatch: {state['log']}"
 
 
-def test_anthropic_full_cycle(anthropic_mock):
+def test_anthropic_full_cycle(anthropic_mock, tmp_path):
     """429 retry, SSE reassembly, thinking replay, parallel tools, compaction."""
     url, state = anthropic_mock
     out = run_liminal(
         "what directory are we in?\n/compact\nwhat did we find so far?\n/quit\n",
         {
-            "LIMINAL_PROVIDER": "anthropic",
-            "ANTHROPIC_API_KEY": mock_anthropic.API_KEY,
-            "ANTHROPIC_BASE_URL": url,
+            "anthropic": configured_provider(
+                "anthropic-messages",
+                url,
+                mock_anthropic.API_KEY,
+                [{"id": "test-model"}],
+            )
         },
+        tmp_path,
     )
     check(
         state,
@@ -120,16 +150,47 @@ def test_anthropic_full_cycle(anthropic_mock):
     assert "Continuing from the compacted context." in out
 
 
-def test_openai_full_cycle_remote_compact(openai_mock):
+def test_anthropic_model_effort_uses_adaptive_thinking(anthropic_mock, tmp_path):
+    url, state = anthropic_mock
+    out = run_liminal(
+        "/model adaptive-model@high\nwhat directory are we in?\n/quit\n",
+        {
+            "anthropic": configured_provider(
+                "anthropic-messages",
+                url,
+                mock_anthropic.API_KEY,
+                [
+                    {"id": "test-model"},
+                    {
+                        "id": "adaptive-model",
+                        "reasoning_efforts": ["low", "high"],
+                    },
+                ],
+            )
+        },
+        tmp_path,
+    )
+    assert "[model: adaptive-model@high]" in out
+    check(state, ["429", "tools-turn", "continuation"])
+    assert all(body["model"] == "adaptive-model" for body in state["request_bodies"])
+    assert all(
+        body["thinking"] == {"type": "adaptive"}
+        and body["output_config"] == {"effort": "high"}
+        for body in state["request_bodies"]
+    )
+
+
+def test_openai_full_cycle_remote_compact(openai_mock, tmp_path):
     """429 retry, encrypted reasoning replay, parallel tools, native /responses/compact."""
     url, state = openai_mock
     out = run_liminal(
         "check the working directory and readme\n/compact\nwhat did we find?\n/quit\n",
         {
-            "LIMINAL_PROVIDER": "openai",
-            "OPENAI_API_KEY": mock_openai.API_KEY,
-            "OPENAI_BASE_URL": url,
+            "openai": configured_provider(
+                "openai-responses", url, mock_openai.API_KEY, [{"id": "test-model"}]
+            )
         },
+        tmp_path,
     )
     check(
         state, ["429", "tools-turn", "continuation", "compact-remote", "post-compact"]
@@ -138,16 +199,17 @@ def test_openai_full_cycle_remote_compact(openai_mock):
     assert "Continuing from the compacted context." in out  # encrypted item replayed
 
 
-def test_openai_gateway_compact_fallback(openai_mock_no_compact):
+def test_openai_gateway_compact_fallback(openai_mock_no_compact, tmp_path):
     """A gateway without /responses/compact pushes onto local summarization."""
     url, state = openai_mock_no_compact
     out = run_liminal(
         "check the working directory and readme\n/compact\n/quit\n",
         {
-            "LIMINAL_PROVIDER": "openai",
-            "OPENAI_API_KEY": mock_openai.API_KEY,
-            "OPENAI_BASE_URL": url,
+            "openai": configured_provider(
+                "openai-responses", url, mock_openai.API_KEY, [{"id": "test-model"}]
+            )
         },
+        tmp_path,
     )
     check(
         state,
@@ -156,37 +218,177 @@ def test_openai_gateway_compact_fallback(openai_mock_no_compact):
     assert "[history compacted]" in out
 
 
-def test_provider_switch_carries_history(anthropic_mock, openai_mock):
-    """/switch keeps neutral history; foreign private state drops silently."""
+def test_model_catalog_discovers_only_opted_in_providers(
+    anthropic_mock, openai_mock, tmp_path
+):
     anthropic_url, anthropic_state = anthropic_mock
     openai_url, openai_state = openai_mock
     out = run_liminal(
-        "what directory are we in?\n/switch openai\ncheck the working directory and readme\n/quit\n",
+        "/model\n/quit\n",
         {
-            "LIMINAL_PROVIDER": "anthropic",
-            "ANTHROPIC_API_KEY": mock_anthropic.API_KEY,
-            "ANTHROPIC_BASE_URL": anthropic_url,
-            "OPENAI_API_KEY": mock_openai.API_KEY,
-            "OPENAI_BASE_URL": openai_url,
+            "anthropic": configured_provider(
+                "anthropic-messages",
+                anthropic_url,
+                mock_anthropic.API_KEY,
+                [{"id": "test-model"}],
+                discover_models=True,
+            ),
+            "openai": configured_provider(
+                "openai-responses",
+                openai_url,
+                mock_openai.API_KEY,
+                [{"id": "configured-openai-model"}],
+                discover_models=False,
+            ),
         },
+        tmp_path,
+    )
+    assert "anthropic/discovered-anthropic-model - Discovered Anthropic Model" in out
+    assert "openai/configured-openai-model" in out
+    assert "openai/discovered-openai-model" not in out
+    assert anthropic_state["model_requests"] == 2  # startup and explicit /model refresh
+    assert openai_state["model_requests"] == 0
+    check(anthropic_state, [])
+    check(openai_state, [])
+
+
+def test_model_selection_carries_history_and_applies_effort(
+    anthropic_mock, openai_mock, tmp_path
+):
+    """A model selection may change internal routing without provider UI state."""
+    anthropic_url, anthropic_state = anthropic_mock
+    openai_url, openai_state = openai_mock
+    out = run_liminal(
+        "what directory are we in?\n/model manual-model@high\ncheck the working directory and readme\n/quit\n",
+        {
+            "anthropic": configured_provider(
+                "anthropic-messages",
+                anthropic_url,
+                mock_anthropic.API_KEY,
+                [{"id": "test-model"}],
+            ),
+            "openai": configured_provider(
+                "openai-responses",
+                openai_url,
+                mock_openai.API_KEY,
+                [
+                    {
+                        "id": "manual-model",
+                        "name": "Manual Model",
+                        "reasoning_efforts": ["low", "high"],
+                        "default_reasoning_effort": "low",
+                    }
+                ],
+            ),
+        },
+        tmp_path,
     )
     check(anthropic_state, ["429", "tools-turn", "continuation"])
     check(openai_state, ["429", "tools-turn", "continuation"])
-    assert "[switched to openai:test-model" in out
-
-
-def test_unknown_provider_switch_is_recoverable(anthropic_mock):
-    url, state = anthropic_mock
-    out = run_liminal(
-        "/switch nonexistent\nwhat directory are we in?\n/quit\n",
-        {
-            "LIMINAL_PROVIDER": "anthropic",
-            "ANTHROPIC_API_KEY": mock_anthropic.API_KEY,
-            "ANTHROPIC_BASE_URL": url,
-        },
+    assert "[model: manual-model@high]" in out
+    assert "provider:" not in out
+    assert all(
+        body["model"] == "manual-model" for body in openai_state["request_bodies"]
     )
-    assert "[switch error:" in out
-    check(state, ["429", "tools-turn", "continuation"])  # session stayed usable
+    assert all(
+        body["reasoning"]["effort"] == "high" for body in openai_state["request_bodies"]
+    )
+
+
+def test_manual_model_survives_missing_models_endpoint(openai_mock_no_models, tmp_path):
+    url, state = openai_mock_no_models
+    out = run_liminal(
+        "/model gateway-model@medium\n/quit\n",
+        {
+            "openai": configured_provider(
+                "openai-responses",
+                url,
+                mock_openai.API_KEY,
+                [
+                    {"id": "test-model"},
+                    {"id": "gateway-model", "reasoning_efforts": ["medium"]},
+                ],
+                discover_models=True,
+            )
+        },
+        tmp_path,
+    )
+    assert "[model warning: openai: api error (status 404):" in out
+    assert "[model: gateway-model@medium]" in out
+    assert state["model_requests"] == 2
+    check(state, [])
+
+
+def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
+    url, state = codex_auth_mock
+    auth_file = tmp_path / "auth.json"
+    env = os.environ.copy()
+    env["LIMINAL_AUTH_FILE"] = str(auth_file)
+    env["LIMINAL_CODEX_AUTH_BASE_URL"] = url
+    result = subprocess.run(
+        [str(BINARY), "login", "codex"],
+        env=env,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=TIMEOUT,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"Open {url}/codex/device and enter code TEST-CODE" in result.stdout
+    assert "Codex subscription login saved." in result.stdout
+    assert auth_file.exists(), result.stderr
+    stored = json.loads(auth_file.read_text())["codex"]
+    assert stored["type"] == "oauth"
+    assert stored["access_token"] == mock_codex_auth.ACCESS_TOKEN
+    assert stored["refresh_token"] == "refresh-token"
+    assert stored["account_id"] == "account-123"
+    if os.name != "nt":
+        assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+    assert state["log"] == ["start", "poll", "exchange"]
+
+    stored["expires_at"] = 0
+    auth_file.write_text(json.dumps({"codex": stored}))
+
+    providers_file = tmp_path / "providers.json"
+    providers_file.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "codex": {
+                        "discover_models": True,
+                        "models": [
+                            {"id": "gpt-5.6-sol", "name": "Customized Sol"},
+                            {"id": "account-specific-model"},
+                        ],
+                    }
+                }
+            }
+        )
+    )
+    env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
+    env["LIMINAL_CODEX_API_BASE_URL"] = f"{url}/codex"
+    env["LIMINAL_MODEL"] = "codex/gpt-5.6-sol"
+    session = subprocess.run(
+        [str(BINARY)],
+        input="/model\n/quit\n",
+        env=env,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=TIMEOUT,
+        check=False,
+    )
+    assert session.returncode == 0, session.stderr
+    assert "codex/gpt-5.6-sol - Customized Sol" in session.stdout
+    assert "codex/gpt-5.6-terra - GPT-5.6-Terra" in session.stdout
+    assert "codex/account-specific-model" in session.stdout
+    assert "codex/discovered-codex-model - Discovered Codex Model" in session.stdout
+    assert state["log"] == ["start", "poll", "exchange", "refresh", "models", "models"]
 
 
 @pytest.mark.skipif(
@@ -199,11 +401,26 @@ def test_posix_terminal_session_restores_state():
 
     master, slave = pty.openpty()
     original = termios.tcgetattr(slave)
+    temporary = tempfile.TemporaryDirectory()
+    providers_file = Path(temporary.name) / "providers.json"
+    providers_file.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "terminal-test": configured_provider(
+                        "openai-responses",
+                        "http://127.0.0.1:1/v1",
+                        "fake-terminal-test-key",
+                        [{"id": "test-model"}],
+                    )
+                }
+            }
+        )
+    )
     env = os.environ.copy()
-    env.pop("ANTHROPIC_API_KEY", None)
-    env.pop("ANTHROPIC_AUTH_TOKEN", None)
-    env["LIMINAL_PROVIDER"] = "openai"
-    env["OPENAI_API_KEY"] = "fake-terminal-test-key"
+    env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
+    env["LIMINAL_AUTH_FILE"] = str(Path(temporary.name) / "missing-auth.json")
+    env["LIMINAL_MODEL"] = "test-model"
 
     process = subprocess.Popen(
         [str(BINARY)],
@@ -263,3 +480,4 @@ def test_posix_terminal_session_restores_state():
             process.wait(timeout=5)
         os.close(master)
         os.close(slave)
+        temporary.cleanup()

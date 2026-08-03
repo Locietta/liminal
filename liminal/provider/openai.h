@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -10,6 +11,7 @@
 #include <lighter/types.hpp>
 
 #include "liminal/error.h"
+#include "liminal/provider/auth.h"
 #include "liminal/provider/common.h"
 #include "liminal/provider/history.h"
 
@@ -22,11 +24,11 @@ using namespace lighter::types;
 inline constexpr std::string_view k_provider_tag = "openai";
 
 struct ClientOptions {
-    std::string api_key;
-    std::string organization;
-    std::string project;
+    provider::AuthResolver auth;
     std::string base_url = "https://api.openai.com/v1";
+    std::optional<std::string> models_client_version;
     std::string model;
+    std::optional<std::string> reasoning_effort;
     u32 max_output_tokens = 8192;
     usize max_retries = 2;
     std::chrono::milliseconds initial_retry_delay{500};
@@ -53,5 +55,8 @@ struct Client {
     ClientOptions options;
     lighter::http::Client http_client;
 };
+
+/// Lists models exposed by the configured OpenAI-compatible endpoint.
+lighter::Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options);
 
 } // namespace liminal::openai

@@ -7,21 +7,13 @@
 
 #include "liminal/error.h"
 #include "liminal/event.h"
-#include "liminal/provider/provider.h"
+#include "liminal/model/model.h"
 #include "liminal/tools/tools.h"
 
 namespace liminal {
 
-/// A provider selected and configured for use: the facade proxy plus display
-/// metadata owned by the application layer.
-struct ProviderChoice {
-    provider::Provider handle;
-    std::string name;
-    std::string model;
-};
-
 struct Agent {
-    Agent(ProviderChoice provider, ToolSet &tools) : provider(std::move(provider)), tools(&tools) {}
+    Agent(model::Choice model, ToolSet &tools) : model(std::move(model)), tools(&tools) {}
 
     /// One transactional user turn. Partial UI output is emitted as typed
     /// events while provider history commits only after a terminal response.
@@ -29,9 +21,9 @@ struct Agent {
 
     lighter::Task<void, Error> compact(std::string_view instructions);
 
-    void switch_provider(ProviderChoice next) { provider = std::move(next); }
+    void select_model(model::Choice next) { model = std::move(next); }
 
-    ProviderChoice provider;
+    model::Choice model;
     ToolSet *tools;
     provider::History history;
 };

@@ -59,13 +59,20 @@ lighter::Error ConsoleRenderer::render(const Event &event) {
         event);
 }
 
-lighter::Error ConsoleRenderer::banner(std::string_view provider, std::string_view model) {
-    return write("liminal - provider: " + std::string(provider) + ", model: " + std::string(model) +
-                 " (tools run unsandboxed with your privileges)\n");
+lighter::Error ConsoleRenderer::banner(std::string_view model, const std::optional<std::string> &effort) {
+    auto selection = std::string(model);
+    if (effort) {
+        selection += "@" + *effort;
+    }
+    return write("liminal - model: " + selection + " (tools run unsandboxed with your privileges)\n");
 }
 
-lighter::Error ConsoleRenderer::prompt(std::string_view provider, std::string_view model) {
-    return write("\n" + std::string(provider) + ":" + std::string(model) + " > ");
+lighter::Error ConsoleRenderer::prompt(std::string_view model, const std::optional<std::string> &effort) {
+    auto selection = std::string(model);
+    if (effort) {
+        selection += "@" + *effort;
+    }
+    return write("\n" + selection + " > ");
 }
 
 lighter::Error ConsoleRenderer::notice(std::string_view text) { return write(text); }

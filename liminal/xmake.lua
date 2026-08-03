@@ -2,7 +2,7 @@ add_requires("ngcpp-proxy")
 
 target("liminal-core")
     set_kind("static")
-    add_files("agent/*.cpp", "provider/*.cpp", "tools/*.cpp", "tui/*.cpp")
+    add_files("agent/*.cpp", "model/*.cpp", "provider/*.cpp", "tools/*.cpp", "tui/*.cpp")
     add_deps("lighter")
     add_packages("ngcpp-proxy", {public = true})
 

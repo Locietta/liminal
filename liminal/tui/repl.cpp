@@ -27,6 +27,7 @@ using lighter::Task;
 using lighter::TerminalEventKind;
 using lighter::TerminalKey;
 using lighter::TerminalSession;
+using lighter::usize;
 using lighter::WhenAny;
 
 namespace {
@@ -192,12 +193,12 @@ Task<lighter::Outcome<T, E, lighter::Cancellation>> guard_turn(Task<T, E> work, 
     co_return outcome;
 }
 
-Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &renderer, TurnControl &control, const ProviderFactory &factory) {
+Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &renderer, TurnControl &control, model::Catalog &models) {
     UiSession ui(renderer);
     EventSink events = [&ui](const Event &event) { ui.apply(event); };
 
     while (true) {
-        if (auto error = renderer.prompt(agent.provider.name, agent.provider.model)) {
+        if (auto error = renderer.prompt(agent.model.entry.id, agent.model.reasoning_effort)) {
             std::fprintf(stderr, "cannot render prompt: %s\n", std::string(error.message()).c_str());
             co_return 1;
         }
@@ -234,24 +235,68 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
             }
             continue;
         }
-        if (prompt.starts_with("/switch")) {
-            auto name = prompt == "/switch" ? std::string_view{} : std::string_view(prompt).substr(std::string_view("/switch ").size());
-            if (name.empty()) {
-                if (auto error = renderer.notice("usage: /switch <anthropic|openai>\n")) {
+        if (prompt == "/model" || prompt.starts_with("/model ")) {
+            auto refreshed = co_await guard_turn(models.refresh(), control);
+            if (refreshed.is_cancelled()) {
+                if (auto error = renderer.notice("[model refresh cancelled; selection unchanged]\n")) {
                     co_return 1;
                 }
                 continue;
             }
-            auto next = factory(name);
+            if (refreshed.has_error()) {
+                if (auto error = renderer.notice("[model error: " + refreshed.error().message() + "]\n")) {
+                    co_return 1;
+                }
+                continue;
+            }
+            for (const auto &warning : refreshed->warnings) {
+                if (auto error = renderer.notice("[model warning: " + warning + "]\n")) {
+                    co_return 1;
+                }
+            }
+
+            const auto selector =
+                prompt == "/model" ? std::string_view{} : std::string_view(prompt).substr(std::string_view("/model ").size());
+            if (selector.empty()) {
+                std::string listing = "models (configure " + models.providers_file().string() + "):\n";
+                for (const auto &entry : models.entries()) {
+                    const bool selected = entry.provider == agent.model.entry.provider && entry.id == agent.model.entry.id;
+                    listing += selected ? "* " : "  ";
+                    listing += entry.provider + "/" + entry.id;
+                    if (!entry.name.empty() && entry.name != entry.id) {
+                        listing += " - " + entry.name;
+                    }
+                    if (!entry.reasoning_efforts.empty()) {
+                        listing += " [effort: ";
+                        for (usize index = 0; index < entry.reasoning_efforts.size(); ++index) {
+                            if (index != 0) listing += ", ";
+                            listing += entry.reasoning_efforts[index];
+                        }
+                        listing += "]";
+                    }
+                    listing += "\n";
+                }
+                listing += "select with /model <id>, <provider>/<id>, or <selector>@<effort>\n";
+                if (auto error = renderer.notice(listing)) {
+                    co_return 1;
+                }
+                continue;
+            }
+
+            auto next = models.select(selector);
             if (!next) {
-                if (auto error = renderer.notice("[switch error: " + next.error().message() + "]\n")) {
+                if (auto error = renderer.notice("[model error: " + next.error().message() + "]\n")) {
                     co_return 1;
                 }
                 continue;
             }
-            agent.switch_provider(*std::move(next));
-            if (auto error = renderer.notice("[switched to " + agent.provider.name + ":" + agent.provider.model +
-                                             "; private provider state from other providers is dropped]\n")) {
+            agent.select_model(*std::move(next));
+            auto notice = "[model: " + agent.model.entry.id;
+            if (agent.model.reasoning_effort) {
+                notice += "@" + *agent.model.reasoning_effort;
+            }
+            notice += "]\n";
+            if (auto error = renderer.notice(notice)) {
                 co_return 1;
             }
             continue;
@@ -273,7 +318,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
 
 } // namespace
 
-Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, ProviderFactory factory) {
+Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &models) {
     TerminalSession terminal;
     Pipe pipe;
     if (TerminalSession::attached(0)) {
@@ -294,7 +339,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, ProviderFactory fa
 
     const bool interactive = terminal.active();
     ConsoleRenderer renderer(interactive ? &terminal : nullptr);
-    if (auto error = renderer.banner(agent.provider.name, agent.provider.model)) {
+    if (auto error = renderer.banner(agent.model.entry.id, agent.model.reasoning_effort)) {
         std::fprintf(stderr, "cannot render banner: %s\n", std::string(error.message()).c_str());
         co_return 1;
     }
@@ -305,7 +350,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, ProviderFactory fa
         .renderer = &renderer,
     };
     TurnControl control;
-    auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, factory), signal_monitor(interrupts, control));
+    auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models), signal_monitor(interrupts, control));
     if (raced.index() == 0) {
         co_return std::get<0>(raced);
     }

@@ -23,9 +23,19 @@ def sse(events):
     ).encode()
 
 
-def make_server(port=0):
+def make_server(port=0, models_status=200, models=None):
     """Returns (server, state). state: calls, log[], errors[]."""
-    state = {"calls": 0, "log": [], "errors": []}
+    models = models or [
+        ("test-model", "Test Model"),
+        ("discovered-anthropic-model", "Discovered Anthropic Model"),
+    ]
+    state = {
+        "calls": 0,
+        "log": [],
+        "errors": [],
+        "model_requests": 0,
+        "request_bodies": [],
+    }
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -34,6 +44,46 @@ def make_server(port=0):
         def do_POST(self):
             try:
                 self.handle_post()
+            except AssertionError as error:
+                state["errors"].append(f"anthropic mock: {error}")
+                self.send_error(500, str(error))
+
+        def do_GET(self):
+            try:
+                assert self.path.startswith("/v1/models?"), (
+                    f"unexpected path {self.path}"
+                )
+                assert self.headers["x-api-key"] == API_KEY, "missing/wrong x-api-key"
+                assert self.headers["anthropic-version"], (
+                    "missing anthropic-version header"
+                )
+                state["model_requests"] += 1
+                if models_status != 200:
+                    data = json.dumps(
+                        {"type": "error", "error": {"message": "models unavailable"}}
+                    ).encode()
+                    self.send_response(models_status)
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                data = json.dumps(
+                    {
+                        "data": [
+                            {"id": model, "display_name": name, "type": "model"}
+                            for model, name in models
+                        ],
+                        "has_more": False,
+                        "first_id": models[0][0] if models else None,
+                        "last_id": models[-1][0] if models else None,
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
             except AssertionError as error:
                 state["errors"].append(f"anthropic mock: {error}")
                 self.send_error(500, str(error))
@@ -97,6 +147,7 @@ def make_server(port=0):
 
         def handle_post(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            state["request_bodies"].append(body)
             state["calls"] += 1
 
             assert self.headers["x-api-key"] == API_KEY, "missing/wrong x-api-key"
