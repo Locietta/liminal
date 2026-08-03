@@ -7,7 +7,8 @@ version = "0.1.0"
 
 [tasks]
 setup-hooks = "python scripts/setup_hooks.py"
-configure = "xmake f -m releasedbg -y" # we use releasedbg for development and testing
+format = "python scripts/format.py"
+configure = "xmake f -m releasedbg -y"                        # we use releasedbg for development and testing
 configure-release = "xmake f -m release -y"
 build = "xmake build -y"
 test-unit = "xmake test"
@@ -19,6 +20,9 @@ python = ">=3.14"
 ninja = "*"
 cmake = ">=4.4.0"
 clang-format = "==22.1.8"
+ruff = "==0.16.1"
+prettier = "==3.9.3"
+taplo = "==0.10.0"
 pytest = ">=8"
 # C dependencies. These are C ABI only, so the MSVC-built Windows builds link
 # fine from GCC; see lighter/xmake.lua for the libuv import-library caveat.

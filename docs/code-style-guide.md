@@ -4,7 +4,7 @@ If not specified here, just follow the code style of the existing code around th
 
 ## Formatting
 
-Use clang-format to format your code. 
+Run `pixi run format <paths...>` to format specific files or directories. Pass `--language <cpp|python|markdown|json|toml>` to override language detection for every input.
 
 ## Identifier Naming
 
