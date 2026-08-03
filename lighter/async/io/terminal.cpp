@@ -29,16 +29,21 @@
 namespace lighter {
 
 struct TerminalSession::Self {
+    enum class Lifecycle : u8 {
+        EMPTY,
+        CAPTURED,
+        ACTIVE,
+        RUNNING,
+    };
+
     std::shared_ptr<detail::NativeEventQueue<TerminalEvent>> delivery = std::make_shared<detail::NativeEventQueue<TerminalEvent>>();
     Relay relay;
     Options options;
     i32 input_fd = -1;
     i32 output_fd = -1;
     std::thread worker;
-    bool running = false;
+    Lifecycle lifecycle = Lifecycle::EMPTY;
     bool owns_process_terminal = false;
-    bool modes_captured = false;
-    bool modes_applied = false;
 
 #ifdef _WIN32
     HANDLE input = INVALID_HANDLE_VALUE;
@@ -64,8 +69,8 @@ struct TerminalSession::Self {
     }
 
     Error write_native(std::string_view bytes);
-    Error apply_modes();
-    Error restore_modes();
+    Error apply_terminal_state();
+    Error restore_terminal_state();
     Error start_worker();
     void stop_worker() noexcept;
     void shutdown() noexcept;
@@ -98,24 +103,33 @@ TerminalEvent text_event(std::string text) { return TerminalEvent{.kind = Termin
 
 TerminalEvent resize_event(TerminalSize size) { return TerminalEvent{.kind = TerminalEventKind::RESIZE, .size = size}; }
 
-std::string terminal_modes(const TerminalSession::Options &options, bool enable) {
+std::string terminal_features([[maybe_unused]] const TerminalSession::Options &options, bool enable) {
     std::string result;
+    if (!enable) {
+        result += "\x1b[?1049l";
+    }
 #ifndef _WIN32
-    if (options.bracketed_paste) {
-        result += enable ? "\x1b[?2004h" : "\x1b[?2004l";
+    if (enable) {
+        result += "\x1b[?2004h";
+        if (options.focus_events) {
+            result += "\x1b[?1004h";
+        }
+        if (options.mouse_events) {
+            result += "\x1b[?1000h\x1b[?1006h";
+        }
+    } else {
+        if (options.mouse_events) {
+            result += "\x1b[?1006l\x1b[?1000l";
+        }
+        if (options.focus_events) {
+            result += "\x1b[?1004l";
+        }
+        result += "\x1b[?2004l";
     }
-    if (options.focus_events) {
-        result += enable ? "\x1b[?1004h" : "\x1b[?1004l";
-    }
-    if (options.mouse_events) {
-        result += enable ? "\x1b[?1000h\x1b[?1006h" : "\x1b[?1006l\x1b[?1000l";
-    }
-#else
-    // The Win32 backend consumes INPUT_RECORD values, not VT input bytes.
-    // Input modes are configured with SetConsoleMode instead.
-    static_cast<void>(options);
-    static_cast<void>(enable);
 #endif
+    if (enable) {
+        result += "\x1b[?1049h";
+    }
     return result;
 }
 
@@ -221,7 +235,7 @@ void run_terminal_worker(TerminalSession::Self *self) {
                 self->post(resize_event(windows_size(self->output)));
                 continue;
             }
-            if (record.EventType == FOCUS_EVENT) {
+            if (record.EventType == FOCUS_EVENT && self->options.focus_events) {
                 self->post(TerminalEvent{.kind = TerminalEventKind::FOCUS, .focused = record.Event.FocusEvent.bSetFocus != FALSE});
                 continue;
             }
@@ -421,7 +435,7 @@ Result<TerminalSession> TerminalSession::open(i32 input_fd, i32 output_fd, Optio
     if (!GetConsoleMode(self->input, &self->original_input_mode) || !GetConsoleMode(self->output, &self->original_output_mode)) {
         return outcome_error(Error::k_io_error);
     }
-    self->modes_captured = true;
+    self->lifecycle = Self::Lifecycle::CAPTURED;
     self->original_input_codepage = GetConsoleCP();
     self->original_output_codepage = GetConsoleOutputCP();
     self->stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -432,7 +446,7 @@ Result<TerminalSession> TerminalSession::open(i32 input_fd, i32 output_fd, Optio
     if (::tcgetattr(input_fd, &self->original_mode) != 0) {
         return outcome_error(Error::k_io_error);
     }
-    self->modes_captured = true;
+    self->lifecycle = Self::Lifecycle::CAPTURED;
     if (auto err = make_pipe(self->stop_read, self->stop_write)) {
         return outcome_error(err);
     }
@@ -450,11 +464,11 @@ Result<TerminalSession> TerminalSession::open(i32 input_fd, i32 output_fd, Optio
     self->winch_installed = true;
 #endif
 
-    if (auto err = self->apply_modes()) {
+    if (auto err = self->apply_terminal_state()) {
         return outcome_error(err);
     }
     if (auto err = self->start_worker()) {
-        self->restore_modes();
+        self->restore_terminal_state();
         return outcome_error(err);
     }
     return TerminalSession(std::move(self));
@@ -483,35 +497,35 @@ Result<TerminalSize> TerminalSession::size() const {
 }
 
 Error TerminalSession::write(std::string_view bytes) {
-    if (!self || !self->running) {
+    if (!self || self->lifecycle != Self::Lifecycle::RUNNING) {
         return Error::k_invalid_argument;
     }
     return self->write_native(bytes);
 }
 
 Error TerminalSession::suspend() {
-    if (!self || !self->running) {
+    if (!self || self->lifecycle != Self::Lifecycle::RUNNING) {
         return Error::k_invalid_argument;
     }
     self->stop_worker();
-    return self->restore_modes();
+    return self->restore_terminal_state();
 }
 
 Error TerminalSession::resume() {
-    if (!self || self->running) {
+    if (!self || self->lifecycle != Self::Lifecycle::CAPTURED) {
         return Error::k_invalid_argument;
     }
-    if (auto err = self->apply_modes()) {
+    if (auto err = self->apply_terminal_state()) {
         return err;
     }
     if (auto err = self->start_worker()) {
-        self->restore_modes();
+        self->restore_terminal_state();
         return err;
     }
     return {};
 }
 
-bool TerminalSession::active() const noexcept { return self && self->running; }
+bool TerminalSession::active() const noexcept { return self && self->lifecycle == Self::Lifecycle::RUNNING; }
 
 Error TerminalSession::Self::write_native(std::string_view bytes) {
 #ifdef _WIN32
@@ -544,22 +558,20 @@ Error TerminalSession::Self::write_native(std::string_view bytes) {
     return {};
 }
 
-Error TerminalSession::Self::apply_modes() {
-    if (!modes_captured) {
+Error TerminalSession::Self::apply_terminal_state() {
+    if (lifecycle != Lifecycle::CAPTURED) {
         return Error::k_invalid_argument;
     }
 #ifdef _WIN32
     DWORD input_mode = original_input_mode;
-    if (options.raw) {
-        input_mode &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_QUICK_EDIT_MODE);
-        // Keep processed input so Ctrl+C remains a process-control event even
-        // while a provider turn, rather than input reading, owns the loop.
-        input_mode |= ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT | ENABLE_PROCESSED_INPUT;
-        if (options.mouse_events) {
-            input_mode |= ENABLE_MOUSE_INPUT;
-        } else {
-            input_mode &= ~ENABLE_MOUSE_INPUT;
-        }
+    input_mode &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_QUICK_EDIT_MODE);
+    // Keep processed input so Ctrl+C remains a process-control event even
+    // while a provider turn, rather than input reading, owns the loop.
+    input_mode |= ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT | ENABLE_PROCESSED_INPUT;
+    if (options.mouse_events) {
+        input_mode |= ENABLE_MOUSE_INPUT;
+    } else {
+        input_mode &= ~ENABLE_MOUSE_INPUT;
     }
     const DWORD output_mode = original_output_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     if (!SetConsoleMode(input, input_mode)) {
@@ -577,28 +589,29 @@ Error TerminalSession::Self::apply_modes() {
         return Error::k_io_error;
     }
 #else
-    if (options.raw) {
-        auto raw = original_mode;
-        cfmakeraw(&raw);
-        // Keep ISIG for the same reason as ENABLE_PROCESSED_INPUT on Windows:
-        // Ctrl+C must interrupt work even when nobody is awaiting terminal input.
-        raw.c_lflag |= ISIG;
-        raw.c_cc[VMIN] = 1;
-        raw.c_cc[VTIME] = 0;
-        if (::tcsetattr(input_fd, TCSAFLUSH, &raw) != 0) {
-            return Error::k_io_error;
-        }
+    auto raw = original_mode;
+    cfmakeraw(&raw);
+    // Keep ISIG for the same reason as ENABLE_PROCESSED_INPUT on Windows:
+    // Ctrl+C must interrupt work even when nobody is awaiting terminal input.
+    raw.c_lflag |= ISIG;
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    if (::tcsetattr(input_fd, TCSAFLUSH, &raw) != 0) {
+        return Error::k_io_error;
     }
 #endif
-    modes_applied = true;
-    return write_native(terminal_modes(options, true));
+    lifecycle = Lifecycle::ACTIVE;
+    return write_native(terminal_features(options, true));
 }
 
-Error TerminalSession::Self::restore_modes() {
-    if (!modes_applied) {
+Error TerminalSession::Self::restore_terminal_state() {
+    if (lifecycle == Lifecycle::EMPTY || lifecycle == Lifecycle::CAPTURED) {
         return {};
     }
-    const auto sequence_error = write_native(terminal_modes(options, false));
+    if (lifecycle != Lifecycle::ACTIVE) {
+        return Error::k_invalid_argument;
+    }
+    const auto sequence_error = write_native(terminal_features(options, false));
 #ifdef _WIN32
     const bool modes_ok = SetConsoleMode(input, original_input_mode) && SetConsoleMode(output, original_output_mode);
     const bool codepages_ok = SetConsoleCP(original_input_codepage) && SetConsoleOutputCP(original_output_codepage);
@@ -606,15 +619,18 @@ Error TerminalSession::Self::restore_modes() {
         return Error::k_io_error;
     }
 #else
-    if (options.raw && ::tcsetattr(input_fd, TCSAFLUSH, &original_mode) != 0) {
+    if (::tcsetattr(input_fd, TCSAFLUSH, &original_mode) != 0) {
         return Error::k_io_error;
     }
 #endif
-    modes_applied = false;
+    lifecycle = Lifecycle::CAPTURED;
     return sequence_error;
 }
 
 Error TerminalSession::Self::start_worker() {
+    if (lifecycle != Lifecycle::ACTIVE) {
+        return Error::k_invalid_argument;
+    }
 #ifdef _WIN32
     ResetEvent(stop);
 #else
@@ -626,12 +642,12 @@ Error TerminalSession::Self::start_worker() {
     } catch (...) {
         return Error::k_resource_temporarily_unavailable;
     }
-    running = true;
+    lifecycle = Lifecycle::RUNNING;
     return {};
 }
 
 void TerminalSession::Self::stop_worker() noexcept {
-    if (!running) {
+    if (lifecycle != Lifecycle::RUNNING) {
         return;
     }
 #ifdef _WIN32
@@ -643,12 +659,12 @@ void TerminalSession::Self::stop_worker() noexcept {
     if (worker.joinable()) {
         worker.join();
     }
-    running = false;
+    lifecycle = Lifecycle::ACTIVE;
 }
 
 void TerminalSession::Self::shutdown() noexcept {
     stop_worker();
-    restore_modes();
+    restore_terminal_state();
 
     if (owns_process_terminal) {
         g_terminal_owner.store(nullptr, std::memory_order_release);

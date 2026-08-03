@@ -8,6 +8,7 @@ The liminal binary is located from LIMINAL_BIN or the default xmake build
 output; tests skip with a clear message if it has not been built.
 """
 
+import errno
 import os
 import select
 import subprocess
@@ -152,8 +153,8 @@ def test_unknown_provider_switch_is_recoverable(anthropic_mock):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX PTY test; Windows needs the planned ConPTY driver")
-def test_posix_terminal_session_restores_mode():
-    """The interactive backend accepts native input and restores exact termios state."""
+def test_posix_terminal_session_restores_state():
+    """The interactive backend uses and restores an alternate terminal screen."""
     import pty
     import termios
 
@@ -179,6 +180,9 @@ def test_posix_terminal_session_restores_mode():
             assert readable, f"prompt did not appear: {output!r}"
             output.extend(os.read(master, 4096))
 
+        assert output.count(b"\x1b[?1049h") == 1
+        assert output.index(b"\x1b[?2004h") < output.index(b"\x1b[?1049h")
+
         os.write(master, b"\x1b[200~a\nb\x1b[201~")
         deadline = time.monotonic() + 5
         while b"a\r\nb" not in output:
@@ -191,6 +195,21 @@ def test_posix_terminal_session_restores_mode():
         # Clear the three pasted code points, then exit normally.
         os.write(master, b"\x7f\x7f\x7f/quit\r")
         assert process.wait(timeout=10) == 0
+        while True:
+            readable, _, _ = select.select([master], [], [], 0.1)
+            if not readable:
+                break
+            try:
+                chunk = os.read(master, 4096)
+            except OSError as error:
+                assert error.errno == errno.EIO
+                break
+            if not chunk:
+                break
+            output.extend(chunk)
+        assert output.count(b"\x1b[?1049l") == 1
+        assert output.index(b"\x1b[?1049h") < output.index(b"\x1b[?1049l")
+        assert output.index(b"\x1b[?1049l") < output.index(b"\x1b[?2004l")
         assert termios.tcgetattr(slave) == original
     finally:
         if process.poll() is None:

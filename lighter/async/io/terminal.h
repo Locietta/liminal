@@ -97,14 +97,10 @@ struct TerminalEvent {
 /// libuv participates only through EventLoop's thread-safe Relay wake bridge.
 struct TerminalSession {
     struct Options {
-        bool raw = true;
-        /// POSIX VT input only. Native Win32 paste currently arrives as text.
-        bool bracketed_paste = true;
         bool focus_events = false;
         bool mouse_events = false;
 
-        constexpr Options(bool raw = true, bool bracketed_paste = true, bool focus_events = false, bool mouse_events = false)
-            : raw(raw), bracketed_paste(bracketed_paste), focus_events(focus_events), mouse_events(mouse_events) {}
+        constexpr Options(bool focus_events = false, bool mouse_events = false) : focus_events(focus_events), mouse_events(mouse_events) {}
     };
 
     TerminalSession() noexcept;
@@ -120,8 +116,9 @@ struct TerminalSession {
     struct Self;
     Self *operator->() noexcept;
 
-    /// Opens and activates a terminal. Only one active session is allowed per
-    /// process. File descriptors default to stdin/stdout.
+    /// Opens and activates the process's interactive alternate-screen
+    /// session. Only one active session is allowed per process. File
+    /// descriptors default to stdin/stdout.
     static Result<TerminalSession> open(i32 input_fd = 0, i32 output_fd = 1, Options options = Options(),
                                         EventLoop &loop = EventLoop::current());
 
@@ -135,10 +132,12 @@ struct TerminalSession {
     /// Writes UTF-8 text and VT control sequences to the terminal.
     Error write(std::string_view bytes);
 
-    /// Restores the exact captured terminal modes and pauses input delivery.
+    /// Leaves the alternate screen, restores captured terminal modes, and
+    /// pauses input delivery.
     Error suspend();
 
-    /// Reapplies requested modes and resumes input delivery.
+    /// Re-enters the alternate screen, reapplies requested modes, and resumes
+    /// input delivery.
     Error resume();
 
     bool active() const noexcept;
