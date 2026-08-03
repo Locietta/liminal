@@ -93,7 +93,8 @@ struct TerminalEvent {
 
 /// Exclusive owner of an interactive terminal session.
 ///
-/// The backend is native: termios/poll on POSIX and Console APIs on Windows.
+/// The backend uses termios/poll on POSIX, native Console input on Windows,
+/// and VT input when attached through ConPTY.
 /// libuv participates only through EventLoop's thread-safe Relay wake bridge.
 struct TerminalSession {
     struct Options {

@@ -15,7 +15,6 @@ import select
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -94,6 +93,121 @@ def configured_provider(api, base_url, api_key, models, discover_models=False):
         "discover_models": discover_models,
         "models": models,
     }
+
+
+def terminal_test_environment(tmp_path, model_count=1):
+    providers_file = tmp_path / "providers.json"
+    providers_file.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "terminal-test": configured_provider(
+                        "openai-responses",
+                        "http://127.0.0.1:1/v1",
+                        "unused-key",
+                        [{"id": "test-model"}]
+                        + [
+                            {"id": f"extra-model-{index}"}
+                            for index in range(model_count - 1)
+                        ],
+                    )
+                }
+            }
+        )
+    )
+    env = os.environ.copy()
+    env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
+    env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
+    env["LIMINAL_MODEL"] = "test-model"
+    return env
+
+
+def read_conpty_until(process, output, marker, timeout):
+    deadline = time.monotonic() + timeout
+    while marker not in output:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"{marker!r} did not appear: {output!r}"
+        chunk = process.read(remaining)
+        assert chunk, (
+            f"ConPTY produced no output before {marker!r}; "
+            f"exit={process.poll()}, output={output!r}"
+        )
+        output.extend(chunk)
+
+
+def check_conpty_terminal_session(tmp_path):
+    from conpty import ConPtyProcess
+
+    process = ConPtyProcess(
+        [BINARY],
+        cwd=REPO_ROOT,
+        env=terminal_test_environment(tmp_path, model_count=13),
+        columns=40,
+        rows=8,
+    )
+    output = bytearray()
+    try:
+        read_conpty_until(process, output, b" > ", 10)
+        assert output.count(b"\x1b[?1049h") == 1
+        assert output.index(b"\x1b[?2004h") < output.index(b"\x1b[?1049h")
+
+        process.write(b"/model\r")
+        read_conpty_until(process, output, b"select with /model", 5)
+
+        process.write(b"\x1b[5~")
+        read_conpty_until(process, output, b"history", 5)
+        process.write(b"\x1b[6~")
+
+        process.write(b"\x1b[200~a\nb\x1b[201~")
+        read_conpty_until(process, output, b"a\\nb", 5)
+
+        redraws = output.count(b"\x1b[H")
+        process.resize(50, 10)
+        deadline = time.monotonic() + 5
+        while output.count(b"\x1b[H") == redraws or b"\x1b[10;" not in output:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"resize did not redraw the ConPTY frame: {output!r}"
+            chunk = process.read(remaining)
+            assert chunk, f"ConPTY output closed during resize: {output!r}"
+            output.extend(chunk)
+
+        process.write(b"\x7f\x7f\x7f/quit\r")
+        assert process.wait(10) == 0
+        while chunk := process.read(0.1):
+            output.extend(chunk)
+        assert output.count(b"\x1b[?1049l") == 1
+        assert output.index(b"\x1b[?1049h") < output.index(b"\x1b[?1049l")
+        assert output.index(b"\x1b[?1049l") < output.index(b"\x1b[?2004l")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(5)
+        process.close()
+
+
+def check_conpty_terminal_restores_after_interrupt(tmp_path):
+    from conpty import ConPtyProcess
+
+    process = ConPtyProcess(
+        [BINARY],
+        cwd=REPO_ROOT,
+        env=terminal_test_environment(tmp_path),
+        columns=40,
+        rows=8,
+    )
+    output = bytearray()
+    try:
+        read_conpty_until(process, output, b" > ", 10)
+        process.write(b"\x03")
+        assert process.wait(10) == 130
+        while chunk := process.read(0.1):
+            output.extend(chunk)
+        assert output.count(b"\x1b[?1049l") == 1
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(5)
+        process.close()
 
 
 def run_liminal(stdin, providers, tmp_path, selector="test-model"):
@@ -410,11 +524,12 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
     assert state["log"] == ["start", "poll", "exchange", "refresh", "models", "models"]
 
 
-@pytest.mark.skipif(
-    os.name == "nt", reason="POSIX PTY test; Windows needs the planned ConPTY driver"
-)
-def test_posix_terminal_session_restores_state():
+def test_terminal_session_restores_state(tmp_path):
     """The interactive backend uses and restores an alternate terminal screen."""
+    if os.name == "nt":
+        check_conpty_terminal_session(tmp_path)
+        return
+
     import fcntl
     import pty
     import signal
@@ -424,27 +539,7 @@ def test_posix_terminal_session_restores_state():
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 8, 40, 0, 0))
     original = termios.tcgetattr(slave)
-    temporary = tempfile.TemporaryDirectory()
-    providers_file = Path(temporary.name) / "providers.json"
-    providers_file.write_text(
-        json.dumps(
-            {
-                "providers": {
-                    "terminal-test": configured_provider(
-                        "openai-responses",
-                        "http://127.0.0.1:1/v1",
-                        "fake-terminal-test-key",
-                        [{"id": "test-model"}]
-                        + [{"id": f"extra-model-{index}"} for index in range(12)],
-                    )
-                }
-            }
-        )
-    )
-    env = os.environ.copy()
-    env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
-    env["LIMINAL_AUTH_FILE"] = str(Path(temporary.name) / "missing-auth.json")
-    env["LIMINAL_MODEL"] = "test-model"
+    env = terminal_test_environment(tmp_path, model_count=13)
 
     process = subprocess.Popen(
         [str(BINARY)],
@@ -542,11 +637,13 @@ def test_posix_terminal_session_restores_state():
             process.wait(timeout=5)
         os.close(master)
         os.close(slave)
-        temporary.cleanup()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX PTY signal test")
-def test_posix_terminal_restores_after_interrupt(tmp_path):
+def test_terminal_restores_after_interrupt(tmp_path):
+    if os.name == "nt":
+        check_conpty_terminal_restores_after_interrupt(tmp_path)
+        return
+
     import fcntl
     import pty
     import signal

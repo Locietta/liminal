@@ -44,11 +44,14 @@ struct TerminalSession::Self {
     std::thread worker;
     Lifecycle lifecycle = Lifecycle::EMPTY;
     bool owns_process_terminal = false;
+    bool virtual_input = true;
 
 #ifdef _WIN32
     HANDLE input = INVALID_HANDLE_VALUE;
     HANDLE output = INVALID_HANDLE_VALUE;
     HANDLE stop = nullptr;
+    bool owns_input = false;
+    bool owns_output = false;
     DWORD original_input_mode = 0;
     DWORD original_output_mode = 0;
     UINT original_input_codepage = 0;
@@ -103,30 +106,30 @@ TerminalEvent text_event(std::string text) { return TerminalEvent{.kind = Termin
 
 TerminalEvent resize_event(TerminalSize size) { return TerminalEvent{.kind = TerminalEventKind::RESIZE, .size = size}; }
 
-std::string terminal_features([[maybe_unused]] const TerminalSession::Options &options, bool enable) {
+std::string terminal_features(const TerminalSession::Options &options, bool enable, bool virtual_input) {
     std::string result;
     if (!enable) {
         result += "\x1b[0m\x1b[?25h\x1b[?1049l";
     }
-#ifndef _WIN32
-    if (enable) {
-        result += "\x1b[?2004h";
-        if (options.focus_events) {
-            result += "\x1b[?1004h";
+    if (virtual_input) {
+        if (enable) {
+            result += "\x1b[?2004h";
+            if (options.focus_events) {
+                result += "\x1b[?1004h";
+            }
+            if (options.mouse_events) {
+                result += "\x1b[?1000h\x1b[?1006h";
+            }
+        } else {
+            if (options.mouse_events) {
+                result += "\x1b[?1006l\x1b[?1000l";
+            }
+            if (options.focus_events) {
+                result += "\x1b[?1004l";
+            }
+            result += "\x1b[?2004l";
         }
-        if (options.mouse_events) {
-            result += "\x1b[?1000h\x1b[?1006h";
-        }
-    } else {
-        if (options.mouse_events) {
-            result += "\x1b[?1006l\x1b[?1000l";
-        }
-        if (options.focus_events) {
-            result += "\x1b[?1004l";
-        }
-        result += "\x1b[?2004l";
     }
-#endif
     if (enable) {
         result += "\x1b[?1049h";
     }
@@ -134,6 +137,42 @@ std::string terminal_features([[maybe_unused]] const TerminalSession::Options &o
 }
 
 #ifdef _WIN32
+
+HANDLE windows_handle(i32 fd, bool &owned, bool force_console = false) noexcept {
+    owned = false;
+    const auto raw = _get_osfhandle(fd);
+    if (raw != -1) {
+        auto handle = reinterpret_cast<HANDLE>(raw);
+        DWORD mode = 0;
+        const auto type = GetFileType(handle);
+        if (GetConsoleMode(handle, &mode) || (!force_console && (type == FILE_TYPE_PIPE || type == FILE_TYPE_DISK))) {
+            return handle;
+        }
+    }
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    switch (fd) {
+        case 0: handle = GetStdHandle(STD_INPUT_HANDLE); break;
+        case 1: handle = GetStdHandle(STD_OUTPUT_HANDLE); break;
+        case 2: handle = GetStdHandle(STD_ERROR_HANDLE); break;
+        default: return INVALID_HANDLE_VALUE;
+    }
+    if (handle && handle != INVALID_HANDLE_VALUE) {
+        DWORD mode = 0;
+        const auto type = GetFileType(handle);
+        if (GetConsoleMode(handle, &mode) || (!force_console && (type == FILE_TYPE_PIPE || type == FILE_TYPE_DISK))) {
+            return handle;
+        }
+    }
+    // MinGW's CRT descriptors can refer to ConPTY's internal character
+    // handles without recognizing them as Console handles. Reopen the
+    // process's attached pseudoconsole through its canonical device names.
+    const auto name = fd == 0 ? L"CONIN$" : L"CONOUT$";
+    handle = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        owned = true;
+    }
+    return handle;
+}
 
 TerminalModifiers windows_modifiers(DWORD state) noexcept {
     auto result = TerminalModifiers::NONE;
@@ -207,6 +246,67 @@ TerminalSize windows_size(HANDLE output) {
 
 void run_terminal_worker(TerminalSession::Self *self) {
     const HANDLE handles[] = {self->stop, self->input};
+    if (self->virtual_input) {
+        std::array<char, 4096> buffer{};
+        detail::TerminalInputDecoder decoder;
+        auto emit = [self](TerminalEvent event) { self->post(std::move(event)); };
+        while (true) {
+            const DWORD timeout = decoder.escape_pending() ? 25 : INFINITE;
+            const DWORD wait = WaitForMultipleObjects(2, handles, FALSE, timeout);
+            if (wait == WAIT_OBJECT_0) {
+                return;
+            }
+            if (wait == WAIT_TIMEOUT) {
+                decoder.flush_escape(emit);
+                continue;
+            }
+            if (wait != WAIT_OBJECT_0 + 1) {
+                self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+                return;
+            }
+
+            INPUT_RECORD record{};
+            DWORD available = 0;
+            if (!PeekConsoleInputW(self->input, &record, 1, &available)) {
+                self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+                return;
+            }
+            if (available != 0 && record.EventType != KEY_EVENT) {
+                DWORD consumed = 0;
+                if (!ReadConsoleInputW(self->input, &record, 1, &consumed)) {
+                    self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+                    return;
+                }
+                if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+                    self->post(resize_event(windows_size(self->output)));
+                }
+                continue;
+            }
+
+            DWORD count = 0;
+            if (!ReadFile(self->input, buffer.data(), static_cast<DWORD>(buffer.size()), &count, nullptr)) {
+                self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+                return;
+            }
+            if (count == 0) {
+                self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+                return;
+            }
+            std::string_view bytes(buffer.data(), count);
+            auto interrupt = bytes.find('\x03');
+            while (interrupt != std::string_view::npos) {
+                decoder.feed(bytes.substr(0, interrupt), emit);
+                if (!GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)) {
+                    self->post(TerminalEvent{.kind = TerminalEventKind::CLOSED});
+                    return;
+                }
+                bytes.remove_prefix(interrupt + 1);
+                interrupt = bytes.find('\x03');
+            }
+            decoder.feed(bytes, emit);
+        }
+    }
+
     std::array<INPUT_RECORD, 64> records{};
     WCHAR high_surrogate = 0;
 
@@ -401,21 +501,28 @@ TerminalSession::Self *TerminalSession::operator->() noexcept { return self.get(
 
 bool TerminalSession::attached(i32 fd) noexcept {
 #ifdef _WIN32
-    const auto raw = _get_osfhandle(fd);
-    if (raw == -1) {
+    bool owned = false;
+    const auto handle = windows_handle(fd, owned);
+    if (!handle || handle == INVALID_HANDLE_VALUE) {
         return false;
     }
     DWORD mode = 0;
-    return GetConsoleMode(reinterpret_cast<HANDLE>(raw), &mode) != FALSE;
+    const bool result = GetConsoleMode(handle, &mode) != FALSE;
+    if (owned) {
+        CloseHandle(handle);
+    }
+    return result;
 #else
     return ::isatty(fd) == 1;
 #endif
 }
 
 Result<TerminalSession> TerminalSession::open(i32 input_fd, i32 output_fd, Options options, EventLoop &loop) {
+#ifndef _WIN32
     if (!attached(input_fd) || !attached(output_fd)) {
         return outcome_error(Error::k_inappropriate_ioctl_for_device);
     }
+#endif
 
     auto self = UniqueHandle<Self>(new Self());
     self->relay = loop.create_relay();
@@ -430,10 +537,11 @@ Result<TerminalSession> TerminalSession::open(i32 input_fd, i32 output_fd, Optio
     self->owns_process_terminal = true;
 
 #ifdef _WIN32
-    self->input = reinterpret_cast<HANDLE>(_get_osfhandle(input_fd));
-    self->output = reinterpret_cast<HANDLE>(_get_osfhandle(output_fd));
+    self->input = windows_handle(input_fd, self->owns_input);
+    self->virtual_input = self->owns_input;
+    self->output = windows_handle(output_fd, self->owns_output, self->virtual_input);
     if (!GetConsoleMode(self->input, &self->original_input_mode) || !GetConsoleMode(self->output, &self->original_output_mode)) {
-        return outcome_error(Error::k_io_error);
+        return outcome_error(Error::k_inappropriate_ioctl_for_device);
     }
     self->lifecycle = Self::Lifecycle::CAPTURED;
     self->original_input_codepage = GetConsoleCP();
@@ -565,9 +673,18 @@ Error TerminalSession::Self::apply_terminal_state() {
 #ifdef _WIN32
     DWORD input_mode = original_input_mode;
     input_mode &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_QUICK_EDIT_MODE);
-    // Keep processed input so Ctrl+C remains a process-control event even
-    // while a provider turn, rather than input reading, owns the loop.
-    input_mode |= ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT | ENABLE_PROCESSED_INPUT;
+    input_mode |= ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT;
+    if (virtual_input) {
+        // ConPTY transports Ctrl+C as byte 0x03. Read it in the VT worker and
+        // turn it back into a console control so the process-wide interrupt
+        // source observes the same event as the native Console backend.
+        input_mode &= ~ENABLE_PROCESSED_INPUT;
+        input_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+    } else {
+        // Keep processed input so Ctrl+C remains a process-control event even
+        // while a provider turn, rather than input reading, owns the loop.
+        input_mode |= ENABLE_PROCESSED_INPUT;
+    }
     if (options.mouse_events) {
         input_mode |= ENABLE_MOUSE_INPUT;
     } else {
@@ -601,7 +718,7 @@ Error TerminalSession::Self::apply_terminal_state() {
     }
 #endif
     lifecycle = Lifecycle::ACTIVE;
-    return write_native(terminal_features(options, true));
+    return write_native(terminal_features(options, true, virtual_input));
 }
 
 Error TerminalSession::Self::restore_terminal_state() {
@@ -611,7 +728,7 @@ Error TerminalSession::Self::restore_terminal_state() {
     if (lifecycle != Lifecycle::ACTIVE) {
         return Error::k_invalid_argument;
     }
-    const auto sequence_error = write_native(terminal_features(options, false));
+    const auto sequence_error = write_native(terminal_features(options, false, virtual_input));
 #ifdef _WIN32
     const bool modes_ok = SetConsoleMode(input, original_input_mode) && SetConsoleMode(output, original_output_mode);
     const bool codepages_ok = SetConsoleCP(original_input_codepage) && SetConsoleOutputCP(original_output_codepage);
@@ -675,6 +792,16 @@ void TerminalSession::Self::shutdown() noexcept {
     if (stop) {
         CloseHandle(stop);
         stop = nullptr;
+    }
+    if (owns_input) {
+        CloseHandle(input);
+        input = INVALID_HANDLE_VALUE;
+        owns_input = false;
+    }
+    if (owns_output) {
+        CloseHandle(output);
+        output = INVALID_HANDLE_VALUE;
+        owns_output = false;
     }
 #else
     while (g_winch_handlers.load(std::memory_order_acquire) != 0) {
