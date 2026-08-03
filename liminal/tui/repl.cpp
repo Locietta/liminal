@@ -273,7 +273,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
 
 } // namespace
 
-Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, const ProviderFactory &factory) {
+Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, ProviderFactory factory) {
     TerminalSession terminal;
     Pipe pipe;
     if (TerminalSession::attached(0)) {

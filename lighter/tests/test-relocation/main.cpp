@@ -7,7 +7,6 @@
 #include <vector>
 
 #include <lighter/types.hpp>
-#include <lighter/utils/functional.h>
 #include <lighter/utils/relocation.h>
 #include <lighter/utils/small_vector.h>
 
@@ -193,43 +192,11 @@ void test_leak_free() {
     require(leak_free, "relocation paths leaked or double-freed");
 }
 
-// --- runtime: Function SBO admits move-only relocatable callables -----------
-
-void test_function_sbo_unique_ptr_capture() {
-    auto payload = std::make_unique<i32>(42);
-
-    const auto total_before_capture = total_allocations;
-    // the capture itself was allocated above; constructing the Function must
-    // add nothing (SBO), where it previously heap-allocated the closure
-    Function<i32()> fn = [p = std::move(payload)]() { return *p; };
-    const auto function_allocs = total_allocations - total_before_capture;
-    require(function_allocs == 0, "unique_ptr-capturing lambda was heap-allocated instead of using SBO");
-
-    require(fn() == 42, "Function SBO callable returned wrong value");
-
-    // moving the Function relocates the closure bytewise; ownership must follow
-    Function<i32()> moved = std::move(fn);
-    require(moved() == 42, "moved Function lost its captured state");
-}
-
-void test_function_sbo_still_rejects_oversized() {
-    struct Big {
-        byte blob[64];
-        i32 tag;
-    };
-    const auto total_before = total_allocations;
-    Function<i32()> fn = [big = Big{.blob = {}, .tag = 7}]() { return big.tag; };
-    require(total_allocations > total_before, "oversized callable unexpectedly fit in SBO");
-    require(fn() == 7, "heap-allocated callable returned wrong value");
-}
-
 } // namespace
 
 int main() {
     test_small_vector_unique_ptr_growth();
     test_small_vector_shrink_to_fit_inline();
     test_leak_free();
-    test_function_sbo_unique_ptr_capture();
-    test_function_sbo_still_rejects_oversized();
     return 0;
 }

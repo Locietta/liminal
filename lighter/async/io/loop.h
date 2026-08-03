@@ -1,6 +1,7 @@
 #pragma once
 
 #include <contracts>
+#include <functional>
 #include <memory>
 #include <source_location>
 #include <tuple>
@@ -10,7 +11,6 @@
 #include <uv.h>
 
 #include <lighter/types.hpp>
-#include <lighter/utils/functional.h>
 #include <lighter/async/runtime/node.h>
 
 namespace lighter {
@@ -76,7 +76,7 @@ struct Relay {
     /// on the loop thread in FIFO enqueue order. Concurrent producers
     /// are serialized by a Mutex, so cross-thread ordering follows
     /// Mutex acquisition order.
-    void send(Function<void()> callback);
+    void send(std::move_only_function<void()> callback);
 
     /// Keeps the Event loop alive while work outside libuv is expected to
     /// deliver through this Relay. Holds nest and must be balanced.
@@ -150,7 +150,7 @@ struct EventLoop {
     ///
     /// NOT thread-safe: intended for loop-affine subsystems that need to
     /// release handles tied to this loop.
-    void on_destroy(Function<void()> callback);
+    void on_destroy(std::move_only_function<void()> callback);
 
     /// Schedules a Task for execution on this Event loop.
     /// If the Task is passed by rvalue (temporary), the loop takes ownership

@@ -85,6 +85,14 @@ void render_dynamic(
 
 This way we can keep the main structs in our codebase as plain non virtual structs, with better memory layout and data locality, and still have polymorphism when needed.
 
+## Callable Wrappers
+
+Use the standard callable wrappers according to ownership:
+
+- Use `std::copyable_function` for owning callbacks that are copied.
+- Use `std::move_only_function` for owning callbacks that are transferred or may capture move-only state.
+- Use `std::function_ref` only for synchronous, non-storing callback parameters whose target is guaranteed to outlive the call.
+
 ## Basic Types
 
 We have some short convenience types defined in `lighter/types.hpp`, use them over the standard types. (e.g. use `usize` instead of `std::size_t`).

@@ -46,7 +46,7 @@ struct ToolDefinition {
 struct StreamCallbacks {
     /// Provider-neutral streamed text as it arrives; may be empty. Agent and
     /// UI lifecycle events are intentionally outside the provider boundary.
-    std::function<void(std::string_view)> on_text_delta;
+    std::copyable_function<void(std::string_view) const> on_text_delta;
 };
 
 } // namespace liminal::provider

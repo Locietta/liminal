@@ -1,6 +1,7 @@
 #include "request.h"
 
 #include <contracts>
+#include <functional>
 
 #include <lighter/types.hpp>
 #include <lighter/async/io/awaiter.h>
@@ -17,16 +18,17 @@ struct WorkOp : uv::AwaitOp<WorkOp> {
 
     // libuv request object; req.data points back to this Awaiter.
     uv_work_t req{};
-    // User-supplied Function executed on libuv's worker thread.
-    Function<void()> fn;
+    // User-supplied callback executed on libuv's worker thread.
+    std::move_only_function<void()> fn;
     // Invoked on the loop thread when the awaiting Task is cancelled, so an
     // already-running fn can observe Cancellation and return early. Always
     // set; the hook-less overload passes a no-op.
-    Function<void()> cancel_hook;
+    std::move_only_function<void()> cancel_hook;
     // Completion status consumed by await_resume().
     Error result;
 
-    WorkOp(Function<void()> fn, Function<void()> cancel_hook) : fn(std::move(fn)), cancel_hook(std::move(cancel_hook)) {}
+    WorkOp(std::move_only_function<void()> fn, std::move_only_function<void()> cancel_hook)
+        : fn(std::move(fn)), cancel_hook(std::move(cancel_hook)) {}
 
     static void on_cancel(IoOp *op) {
         auto *self = static_cast<WorkOp *>(op);
@@ -51,7 +53,7 @@ struct WorkOp : uv::AwaitOp<WorkOp> {
 
 } // namespace
 
-Task<void, Error> queue(Function<void()> fn, Function<void()> on_cancel, EventLoop &loop) {
+Task<void, Error> queue(std::move_only_function<void()> fn, std::move_only_function<void()> on_cancel, EventLoop &loop) {
     WorkOp op(std::move(fn), std::move(on_cancel));
 
     auto work_cb = [](uv_work_t *req) {
@@ -81,8 +83,8 @@ Task<void, Error> queue(Function<void()> fn, Function<void()> on_cancel, EventLo
     }
 }
 
-Task<void, Error> queue(Function<void()> fn, EventLoop &loop) {
-    return queue(std::move(fn), Function<void()>([] {}), loop);
+Task<void, Error> queue(std::move_only_function<void()> fn, EventLoop &loop) {
+    return queue(std::move(fn), std::move_only_function<void()>([] {}), loop);
 }
 
 } // namespace lighter

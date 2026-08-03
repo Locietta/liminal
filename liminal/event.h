@@ -38,6 +38,6 @@ struct TurnFailed {
 
 using Event = std::variant<PromptSubmitted, AssistantTextDelta, AssistantSegmentCompleted, ToolStarted, ToolCompleted, TurnCompleted,
                            TurnCancelled, TurnFailed>;
-using EventSink = std::function<void(const Event &)>;
+using EventSink = std::copyable_function<void(const Event &) const>;
 
 } // namespace liminal

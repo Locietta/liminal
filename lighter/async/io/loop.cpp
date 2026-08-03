@@ -3,12 +3,12 @@
 #include <atomic>
 #include <contracts>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <vector>
 
 #include <lighter/types.hpp>
 #include <lighter/async/detail/libuv_helper.h>
-#include <lighter/utils/functional.h>
 #include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/node.h>
 
@@ -17,7 +17,7 @@ namespace lighter {
 struct Relay::Self {
     uv_async_t async = {};
     std::mutex mutex;
-    std::vector<Function<void()>> queue;
+    std::vector<std::move_only_function<void()>> queue;
     std::atomic<i32> count{0};
 };
 
@@ -36,12 +36,12 @@ struct EventLoop::Self : Relay::Self {
     /// callback phase (Timer, Idle, poll, Check) it was enqueued from.
     std::deque<IoOp *> yields_staged;
     std::deque<IoOp *> yields_ready;
-    std::vector<Function<void()>> destroy_callbacks;
+    std::vector<std::move_only_function<void()>> destroy_callbacks;
 };
 
 static void on_relay(uv_async_t *handle) {
     auto *self = static_cast<EventLoop::Self *>(handle->data);
-    std::vector<Function<void()>> batch;
+    std::vector<std::move_only_function<void()>> batch;
     {
         std::lock_guard lock(self->mutex);
         batch = std::move(self->queue);
@@ -92,7 +92,7 @@ void Relay::release_hold() noexcept {
     self = nullptr;
 }
 
-void Relay::send(Function<void()> callback) {
+void Relay::send(std::move_only_function<void()> callback) {
     if (!self) {
         return;
     }
@@ -209,7 +209,7 @@ void EventLoop::defer_resume(AsyncNode &node) {
 
 void EventLoop::drain_deferred() { drain_deferred_queue(self.get()); }
 
-void EventLoop::on_destroy(Function<void()> callback) { self->destroy_callbacks.push_back(std::move(callback)); }
+void EventLoop::on_destroy(std::move_only_function<void()> callback) { self->destroy_callbacks.push_back(std::move(callback)); }
 
 YieldAwaiter::YieldAwaiter(EventLoop &loop) noexcept : loop(&loop) {
     // Cancellation needs no action: the op is intentionally left queued, and

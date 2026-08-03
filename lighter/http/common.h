@@ -69,7 +69,7 @@ struct QueryParam {
     std::string value;
 };
 
-using curl_option_hook = std::function<curl::EasyError(CURL *)>;
+using curl_option_hook = std::copyable_function<curl::EasyError(CURL *) const>;
 
 struct Proxy {
     std::string url;

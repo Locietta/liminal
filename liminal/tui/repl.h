@@ -9,8 +9,8 @@
 
 namespace liminal::tui {
 
-using ProviderFactory = std::function<Result<ProviderChoice>(std::string_view name)>;
+using ProviderFactory = std::copyable_function<Result<ProviderChoice>(std::string_view name) const>;
 
-lighter::Task<i32> run_repl(Agent &agent, lighter::InterruptSource &interrupts, const ProviderFactory &factory);
+lighter::Task<i32> run_repl(Agent &agent, lighter::InterruptSource &interrupts, ProviderFactory factory);
 
 } // namespace liminal::tui

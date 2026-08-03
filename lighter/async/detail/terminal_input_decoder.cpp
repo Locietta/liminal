@@ -71,18 +71,18 @@ std::string control_key_text(u8 byte) {
 
 } // namespace
 
-void TerminalInputDecoder::feed(std::string_view bytes, FunctionRef<void(TerminalEvent)> emit) {
+void TerminalInputDecoder::feed(std::string_view bytes, std::function_ref<void(TerminalEvent)> emit) {
     input.append(bytes);
     parse(false, emit);
 }
 
-void TerminalInputDecoder::flush_escape(FunctionRef<void(TerminalEvent)> emit) { parse(true, emit); }
+void TerminalInputDecoder::flush_escape(std::function_ref<void(TerminalEvent)> emit) { parse(true, emit); }
 
 bool TerminalInputDecoder::escape_pending() const noexcept {
     return !pasting && !input.empty() && input.front() == '\x1b' && incomplete_escape(input);
 }
 
-void TerminalInputDecoder::parse(bool flush_escape, FunctionRef<void(TerminalEvent)> emit) {
+void TerminalInputDecoder::parse(bool flush_escape, std::function_ref<void(TerminalEvent)> emit) {
     while (!input.empty()) {
         if (pasting) {
             const auto end = input.find(k_paste_end);
