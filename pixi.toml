@@ -8,11 +8,13 @@ version = "0.1.0"
 [tasks]
 setup-hooks = "python scripts/setup_hooks.py"
 format = "python scripts/format.py"
-configure = "xmake f -m releasedbg -y"                        # we use releasedbg for development and testing
+configure = "xmake f -m releasedbg -y" # we use releasedbg for development and testing
 configure-release = "xmake f -m release -y"
 build = "xmake build -y"
 test-unit = "xmake test"
-test-integration = "python -m pytest tests/integration -v"
+test-integration = { cmd = "python -m pytest tests/integration -v", depends-on = [
+  "build",
+] }
 test-all = { depends-on = ["test-unit", "test-integration"] }
 
 [dependencies]
