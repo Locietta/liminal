@@ -57,7 +57,27 @@ struct FakeProvider {
     usize calls = 0;
 };
 
-i32 run_all() {
+struct OverBudgetProvider {
+    lighter::Task<provider::TurnResponse, Error> complete(const provider::History &, const std::vector<provider::ToolDefinition> &,
+                                                          const provider::StreamCallbacks &) {
+        provider::TurnResponse response{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+        for (usize index = 0; index < 2; ++index) {
+            glz::generic input;
+            auto parse_error = glz::read_json(input, R"({"path":"README.md"})");
+            require(!parse_error, "failed to create budget test input");
+            response.parts.push_back(provider::ToolCall{
+                .id = "call-" + std::to_string(index),
+                .name = "read_file",
+                .input = std::move(input),
+            });
+        }
+        co_return response;
+    }
+
+    lighter::Task<void, Error> compact(provider::History &, std::string_view) { co_return; }
+};
+
+void test_successful_turn() {
     ToolSet tools(std::filesystem::current_path().string());
     model::Choice choice{
         .handle = pro::make_proxy<provider::ProviderFacade, FakeProvider>(),
@@ -84,6 +104,31 @@ i32 run_all() {
     require(std::holds_alternative<AssistantSegmentCompleted>(events[5]), "continuation segment completion is missing");
     require(std::holds_alternative<TurnCompleted>(events[6]), "turn completion event is missing");
     require(agent.history.size() == 4, "transactional provider history has the wrong number of items");
+}
+
+void test_tool_call_budget() {
+    ToolPolicy policy{.max_calls_per_turn = 1};
+    ToolSet tools(std::filesystem::current_path(), policy);
+    model::Choice choice{
+        .handle = pro::make_proxy<provider::ProviderFacade, OverBudgetProvider>(),
+        .entry = {.provider = "fake", .id = "test"},
+    };
+    Agent agent(std::move(choice), tools);
+
+    lighter::EventLoop loop;
+    auto task = agent.run_turn("too many tools", {});
+    loop.schedule(task);
+    loop.run();
+    auto outcome = task.result();
+
+    require(outcome.has_error() && outcome.error().kind == ErrorKind::TOOL && outcome.error().detail.contains("budget exceeded"),
+            "an over-budget provider response must fail before executing tools");
+    require(agent.history.empty(), "an over-budget turn must not commit partial history");
+}
+
+i32 run_all() {
+    test_successful_turn();
+    test_tool_call_budget();
     return 0;
 }
 

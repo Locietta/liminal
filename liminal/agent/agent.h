@@ -17,7 +17,7 @@ struct Agent {
 
     /// One transactional user turn. Partial UI output is emitted as typed
     /// events while provider history commits only after a terminal response.
-    lighter::Task<void, Error> run_turn(std::string prompt, const EventSink &events);
+    lighter::Task<void, Error> run_turn(std::string prompt, EventSink events);
 
     lighter::Task<void, Error> compact(std::string_view instructions);
 

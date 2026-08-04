@@ -1,12 +1,18 @@
 #include "tools.h"
 
 #include <algorithm>
+#include <charconv>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include <lighter/async/io/fs.h>
 #include <lighter/async/io/process.h>
+#include <lighter/async/runtime/timeout.h>
 #include <lighter/async/runtime/when.h>
 #include <lighter/codec/json/json.h>
 
@@ -26,6 +32,10 @@ namespace {
 constexpr usize k_file_limit = 128 * 1024;
 constexpr usize k_capture_head = 32 * 1024;
 constexpr usize k_capture_tail = 32 * 1024;
+constexpr i64 k_min_command_timeout_ms = 1;
+constexpr i64 k_max_command_timeout_ms = 60 * 60 * 1000;
+constexpr usize k_max_parallel_call_limit = 32;
+constexpr usize k_max_turn_call_limit = 256;
 
 struct ReadFileInput {
     std::string path;
@@ -51,18 +61,70 @@ Result<T> parse_input(const glz::generic &input) {
     return *std::move(typed);
 }
 
-bool is_path_absolute(std::string_view path) {
-    if (path.starts_with('/') || path.starts_with('\\')) {
-        return true;
+template <typename T>
+Result<T> parse_bounded_environment(std::string_view name, T fallback, T minimum, T maximum) {
+    const auto variable = std::string(name);
+    const char *raw = std::getenv(variable.c_str());
+    if (!raw || !*raw) {
+        return fallback;
     }
-    return path.size() >= 2 && path[1] == ':';
+
+    T value{};
+    const std::string_view text(raw);
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size() || value < minimum || value > maximum) {
+        return outcome_error(
+            Error::config(variable + " must be an integer from " + std::to_string(minimum) + " to " + std::to_string(maximum)));
+    }
+    return value;
+}
+
+bool component_equal(const std::filesystem::path &lhs, const std::filesystem::path &rhs) {
+#ifdef _WIN32
+    auto left = lhs.native();
+    auto right = rhs.native();
+    return _wcsicmp(left.c_str(), right.c_str()) == 0;
+#else
+    return lhs == rhs;
+#endif
+}
+
+bool path_within(const std::filesystem::path &root, const std::filesystem::path &candidate) {
+    auto root_part = root.begin();
+    auto candidate_part = candidate.begin();
+    while (root_part != root.end()) {
+        if (candidate_part == candidate.end() || !component_equal(*root_part, *candidate_part)) {
+            return false;
+        }
+        ++root_part;
+        ++candidate_part;
+    }
+    return true;
+}
+
+Result<std::filesystem::path> resolve_read_path(const ToolSet &tools, const ReadFileInput &input) {
+    std::error_code error;
+    const auto root = std::filesystem::weakly_canonical(tools.working_directory, error);
+    if (error) {
+        return outcome_error(Error::tool("cannot resolve workspace: " + error.message()));
+    }
+
+    auto requested = std::filesystem::path(input.path);
+    if (requested.is_relative()) requested = root / requested;
+    auto resolved = std::filesystem::weakly_canonical(requested, error);
+    if (error) {
+        return outcome_error(Error::tool("cannot resolve '" + requested.string() + "': " + error.message()));
+    }
+    if (tools.policy.mode == ToolMode::WORKSPACE && !path_within(root, resolved)) {
+        return outcome_error(Error::tool("workspace policy rejects path outside '" + root.string() + "': " + resolved.string()));
+    }
+    return resolved;
 }
 
 std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input) {
-    std::string path = input.path;
-    if (!is_path_absolute(path)) {
-        path = tools.working_directory + "/" + path;
-    }
+    auto resolved = resolve_read_path(tools, input);
+    if (!resolved) return "Error: " + resolved.error().message();
+    const auto path = resolved->string();
 
     auto content = lighter::fs::sync::read_to_string(path);
     if (!content) {
@@ -156,19 +218,36 @@ Task<BoundedCapture, lighter::Error> drain(Stream &stream) {
     }
 }
 
+struct CommandCompletion {
+    BoundedCapture stdout_capture;
+    BoundedCapture stderr_capture;
+    Process::ExitStatus exit_status;
+};
+
+Task<CommandCompletion, lighter::Error> collect_command(Process::SpawnResult &child) {
+    auto joined = co_await WhenAll(drain(child.stdout_pipe), drain(child.stderr_pipe), child.proc.wait());
+    if (!joined) co_await fail(std::move(joined).error());
+    auto [captured_stdout, captured_stderr, exit_status] = *std::move(joined);
+    co_return CommandCompletion{
+        .stdout_capture = std::move(captured_stdout),
+        .stderr_capture = std::move(captured_stderr),
+        .exit_status = exit_status,
+    };
+}
+
 Task<std::string, Error> tool_run_command(const ToolSet &tools, RunCommandInput input) {
 #ifdef _WIN32
     Process::Options options{
         .file = "pwsh",
         .args = {"pwsh", "-NoProfile", "-NonInteractive", "-Command", std::move(input.command)},
-        .cwd = tools.working_directory,
+        .cwd = tools.working_directory.string(),
         .streams = {Process::Stdio::ignore(), Process::Stdio::pipe(false, true), Process::Stdio::pipe(false, true)},
     };
 #else
     Process::Options options{
         .file = "/bin/sh",
         .args = {"sh", "-lc", std::move(input.command)},
-        .cwd = tools.working_directory,
+        .cwd = tools.working_directory.string(),
         .streams = {Process::Stdio::ignore(), Process::Stdio::pipe(false, true), Process::Stdio::pipe(false, true)},
     };
 #endif
@@ -181,27 +260,61 @@ Task<std::string, Error> tool_run_command(const ToolSet &tools, RunCommandInput 
 
     // Drain both pipes while waiting; reading only after exit can deadlock
     // once a pipe buffer fills. Cancellation of wait() kills the child.
-    auto joined = co_await WhenAll(drain(child.stdout_pipe), drain(child.stderr_pipe), child.proc.wait());
-    if (!joined) {
-        co_await fail(Error::tool("i/o failure while running command: " + std::string(joined.error().message())));
+    auto completed = co_await lighter::with_timeout(collect_command(child), tools.policy.command_timeout);
+    if (completed.has_error()) {
+        if (completed.error() == lighter::Error::k_connection_timed_out) {
+            co_await fail(Error::tool("command exceeded " + std::to_string(tools.policy.command_timeout.count()) + " ms timeout"));
+        }
+        co_await fail(Error::tool("i/o failure while running command: " + std::string(completed.error().message())));
     }
-    auto [captured_stdout, captured_stderr, exit_status] = *std::move(joined);
+    if (completed.has_value()) {
+        auto [captured_stdout, captured_stderr, exit_status] = *std::move(completed);
 
-    std::string result = "exit_code: " + std::to_string(exit_status.status);
-    if (exit_status.term_signal != 0) {
-        result += "\nterm_signal: " + std::to_string(exit_status.term_signal);
+        std::string result = "exit_code: " + std::to_string(exit_status.status);
+        if (exit_status.term_signal != 0) {
+            result += "\nterm_signal: " + std::to_string(exit_status.term_signal);
+        }
+        result += "\n\nstdout:\n" + std::move(captured_stdout).text();
+        result += "\n\nstderr:\n" + std::move(captured_stderr).text();
+        co_return result;
     }
-    result += "\n\nstdout:\n" + std::move(captured_stdout).text();
-    result += "\n\nstderr:\n" + std::move(captured_stderr).text();
-    co_return result;
+    co_await lighter::cancel();
 }
 
 } // namespace
 
-ToolSet::ToolSet(std::string working_directory) : working_directory(std::move(working_directory)) {}
+Result<ToolPolicy> load_tool_policy() {
+    ToolPolicy policy;
+    const char *raw_mode = std::getenv("LIMINAL_TOOL_MODE");
+    const std::string_view mode = raw_mode && *raw_mode ? std::string_view(raw_mode) : std::string_view("workspace");
+    if (mode == "workspace") {
+        policy.mode = ToolMode::WORKSPACE;
+    } else if (mode == "unrestricted") {
+        policy.mode = ToolMode::UNRESTRICTED;
+    } else {
+        return outcome_error(Error::config("LIMINAL_TOOL_MODE must be 'workspace' or 'unrestricted'"));
+    }
+
+    auto timeout = parse_bounded_environment<i64>("LIMINAL_COMMAND_TIMEOUT_MS", policy.command_timeout.count(), k_min_command_timeout_ms,
+                                                  k_max_command_timeout_ms);
+    if (!timeout) return outcome_error(std::move(timeout).error());
+    policy.command_timeout = std::chrono::milliseconds(*timeout);
+
+    auto parallel = parse_bounded_environment<usize>("LIMINAL_MAX_PARALLEL_TOOLS", policy.max_parallel_calls, 1, k_max_parallel_call_limit);
+    if (!parallel) return outcome_error(std::move(parallel).error());
+    policy.max_parallel_calls = *parallel;
+
+    auto per_turn = parse_bounded_environment<usize>("LIMINAL_MAX_TOOLS_PER_TURN", policy.max_calls_per_turn, 1, k_max_turn_call_limit);
+    if (!per_turn) return outcome_error(std::move(per_turn).error());
+    policy.max_calls_per_turn = *per_turn;
+    return policy;
+}
+
+ToolSet::ToolSet(std::filesystem::path working_directory, ToolPolicy policy)
+    : working_directory(std::move(working_directory)), policy(policy) {}
 
 std::vector<provider::ToolDefinition> ToolSet::definitions() const {
-    return {
+    std::vector<provider::ToolDefinition> definitions{
         {
             .name = "read_file",
             .description = "Read a local text file. Use this when you need the exact contents of a "
@@ -212,7 +325,9 @@ std::vector<provider::ToolDefinition> ToolSet::definitions() const {
                                                              "working directory."}}},
                              .required = {"path"}},
         },
-        {
+    };
+    if (policy.mode == ToolMode::UNRESTRICTED) {
+        definitions.push_back({
             .name = "run_command",
 #ifdef _WIN32
             .description = "Run a PowerShell (pwsh) command in the working directory. Use this to "
@@ -231,8 +346,9 @@ std::vector<provider::ToolDefinition> ToolSet::definitions() const {
                                                              "single argument to /bin/sh -lc."}}},
                              .required = {"command"}},
 #endif
-        },
-    };
+        });
+    }
+    return definitions;
 }
 
 Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &call) const {
@@ -245,6 +361,12 @@ Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &cal
         co_return result;
     }
     if (call.name == "run_command") {
+        if (policy.mode != ToolMode::UNRESTRICTED) {
+            result.content = "Error: run_command is disabled by workspace tool policy; restart with "
+                             "LIMINAL_TOOL_MODE=unrestricted to authorize an open-world shell";
+            result.is_error = true;
+            co_return result;
+        }
         auto input = co_await or_fail(parse_input<RunCommandInput>(call.input));
         result.content = co_await tool_run_command(*this, std::move(input)).or_fail();
         co_return result;

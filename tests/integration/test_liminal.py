@@ -122,6 +122,7 @@ def terminal_test_environment(
     env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
     env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
     env["LIMINAL_MODEL"] = "test-model"
+    env["LIMINAL_TOOL_MODE"] = "unrestricted"
     return env
 
 
@@ -329,6 +330,7 @@ def run_liminal(stdin, providers, tmp_path, selector="test-model"):
     env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
     env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
     env["LIMINAL_MODEL"] = selector
+    env["LIMINAL_TOOL_MODE"] = "unrestricted"
     result = subprocess.run(
         [str(BINARY)],
         input=stdin,

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <lighter/async/runtime/when.h>
+#include <lighter/async/runtime/sync.h>
 
 namespace liminal {
 
@@ -23,7 +24,16 @@ void emit(const EventSink &events, Event event) {
 /// Runs one tool call, converting infrastructure failures into is_error
 /// results so one bad call never aborts its siblings. Cancellation still
 /// unwinds normally.
-Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::ToolCall &call, const EventSink &events) {
+struct ToolPermit {
+    lighter::Semaphore *slots;
+
+    ~ToolPermit() { slots->release(); }
+};
+
+Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::ToolCall &call, const EventSink &events,
+                                       lighter::Semaphore &slots) {
+    co_await slots.acquire();
+    ToolPermit permit{&slots};
     auto outcome = co_await tools.execute(call);
     provider::ToolResult result;
     if (!outcome) {
@@ -41,7 +51,7 @@ Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::Too
 
 } // namespace
 
-Task<void, Error> Agent::run_turn(std::string prompt, const EventSink &events) {
+Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
     // Transactional: staged history only replaces committed history after a
     // complete terminal response. The UI transcript intentionally remains.
     auto staged = history;
@@ -52,6 +62,8 @@ Task<void, Error> Agent::run_turn(std::string prompt, const EventSink &events) {
     };
 
     constexpr i32 k_max_iterations = 32;
+    usize tool_calls_used = 0;
+    lighter::Semaphore tool_slots(static_cast<isize>(tools->policy.max_parallel_calls));
     for (i32 iteration = 0; iteration < k_max_iterations; ++iteration) {
         auto response = co_await model.handle->complete(staged, tools->definitions(), stream).or_fail();
         auto calls = provider::tool_calls(response);
@@ -73,12 +85,17 @@ Task<void, Error> Agent::run_turn(std::string prompt, const EventSink &events) {
         if (calls.empty()) {
             co_await fail(Error::protocol("provider requested tool results without any tool calls"));
         }
+        if (calls.size() > tools->policy.max_calls_per_turn - tool_calls_used) {
+            co_await fail(
+                Error::tool("tool call budget exceeded (maximum " + std::to_string(tools->policy.max_calls_per_turn) + " per turn)"));
+        }
+        tool_calls_used += calls.size();
 
         std::vector<Task<provider::ToolResult>> pending;
         pending.reserve(calls.size());
         for (const auto *call : calls) {
             emit(events, ToolStarted{.call_id = call->id, .name = call->name});
-            pending.push_back(execute_one(*tools, *call, events));
+            pending.push_back(execute_one(*tools, *call, events, tool_slots));
         }
         auto joined = co_await WhenAll(std::move(pending));
 

@@ -1,20 +1,43 @@
 #pragma once
 
+#include <chrono>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 #include <lighter/async/async.h>
+#include <lighter/types.hpp>
 
 #include "liminal/error.h"
 #include "liminal/provider/common.h"
 
 namespace liminal {
 
+enum struct ToolMode {
+    /// Read text files whose canonical path remains inside the workspace.
+    WORKSPACE,
+
+    /// Permit external reads and expose the open-world command shell.
+    UNRESTRICTED,
+};
+
+struct ToolPolicy {
+    ToolMode mode = ToolMode::WORKSPACE;
+    std::chrono::milliseconds command_timeout{120'000};
+    lighter::usize max_parallel_calls = 4;
+    lighter::usize max_calls_per_turn = 32;
+};
+
+/// Load the session's explicit capability and resource policy. Workspace mode
+/// is the safe default; an unrestricted shell requires an opt-in through
+/// LIMINAL_TOOL_MODE=unrestricted.
+Result<ToolPolicy> load_tool_policy();
+
 /// The v1 built-in tools: read_file and run_command (PowerShell on Windows,
 /// POSIX sh on Linux).
 /// Deliberately not a generic registry - two tools need two branches.
 struct ToolSet {
-    explicit ToolSet(std::string working_directory);
+    explicit ToolSet(std::filesystem::path working_directory, ToolPolicy policy = {});
 
     std::vector<provider::ToolDefinition> definitions() const;
 
@@ -24,7 +47,8 @@ struct ToolSet {
     /// channel - the agent layer converts those into is_error results.
     lighter::Task<provider::ToolResult, Error> execute(const provider::ToolCall &call) const;
 
-    std::string working_directory;
+    std::filesystem::path working_directory;
+    ToolPolicy policy;
 };
 
 } // namespace liminal
