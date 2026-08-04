@@ -45,6 +45,7 @@ def test_headless_session_can_be_discovered_reproduced_and_inspected():
             "create",
             "tools/call",
             {
+                "_meta": {"x-codex-turn-metadata": {"session_id": "integration-test"}},
                 "name": "session_create",
                 "arguments": {
                     "driver": "tui.headless",
@@ -106,12 +107,14 @@ def test_headless_session_can_be_discovered_reproduced_and_inspected():
         "2025-11-25",
     ]
     assert responses["legacy"]["result"]["protocolVersion"] == "2025-11-25"
-    assert [tool["name"] for tool in responses["list"]["result"]["tools"]] == [
+    tools = responses["list"]["result"]["tools"]
+    assert [tool["name"] for tool in tools] == [
         "session_create",
         "session_apply",
         "session_inspect",
         "session_close",
     ]
+    assert tools[-1]["annotations"]["destructiveHint"] is False
 
     created = responses["create"]["result"]["structuredContent"]
     assert created["session_id"] == "session-1"

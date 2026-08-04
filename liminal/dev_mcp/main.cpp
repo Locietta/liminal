@@ -33,6 +33,7 @@ struct RpcRequest {
 };
 
 struct CallToolInput {
+    glz::generic _meta;
     std::string name;
     glz::generic arguments;
 };
@@ -161,7 +162,7 @@ glz::generic tools() {
         "description":"Release a bounded headless session handle.",
         "inputSchema":{"type":"object","additionalProperties":false,"properties":{"session_id":{"type":"string"}},"required":["session_id"]},
         "outputSchema":{"type":"object"},
-        "annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}
+        "annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}
       }
     ])json");
 }
