@@ -44,8 +44,14 @@ std::string_view name(Style style) {
     switch (style) {
         case Style::NORMAL: return "normal";
         case Style::EMPHASIS: return "emphasis";
+        case Style::ITALIC: return "italic";
         case Style::MUTED: return "muted";
         case Style::ACCENT: return "accent";
+        case Style::CODE: return "code";
+        case Style::LINK: return "link";
+        case Style::DIFF_ADDITION: return "diff_addition";
+        case Style::DIFF_DELETION: return "diff_deletion";
+        case Style::DIFF_HUNK: return "diff_hunk";
         case Style::FAILURE: return "failure";
     }
     return "normal";

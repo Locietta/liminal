@@ -22,8 +22,14 @@ std::string_view style_sequence(Style style) {
     switch (style) {
         case Style::NORMAL: return "\x1b[0m";
         case Style::EMPHASIS: return "\x1b[1m";
+        case Style::ITALIC: return "\x1b[3m";
         case Style::MUTED: return "\x1b[2m";
         case Style::ACCENT: return "\x1b[36m";
+        case Style::CODE: return "\x1b[33m";
+        case Style::LINK: return "\x1b[4;36m";
+        case Style::DIFF_ADDITION: return "\x1b[32m";
+        case Style::DIFF_DELETION: return "\x1b[31m";
+        case Style::DIFF_HUNK: return "\x1b[1;36m";
         case Style::FAILURE: return "\x1b[31m";
     }
     return "\x1b[0m";

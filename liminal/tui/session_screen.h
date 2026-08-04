@@ -67,6 +67,7 @@ struct LayoutRow {
     usize source_offset = 0;
     std::string text;
     Style style = Style::NORMAL;
+    std::vector<StyledSpan> spans;
 };
 
 struct LayoutDiagnostics {

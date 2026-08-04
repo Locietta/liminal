@@ -7,6 +7,7 @@
 
 #include <liminal/event.h>
 #include <liminal/tui/headless.h>
+#include <liminal/tui/rich_text.h>
 #include <liminal/tui/session_screen.h>
 #include <liminal/tui/surface.h>
 
@@ -26,6 +27,24 @@ std::string frame_text(const tui::Frame &frame) {
         text += frame.surface.row_text(row);
     }
     return text;
+}
+
+std::string styled_rows_text(const std::vector<tui::StyledRow> &rows) {
+    std::string text;
+    for (const auto &row : rows) {
+        if (!text.empty()) text += '\n';
+        for (const auto &span : row.spans) text += span.text;
+    }
+    return text;
+}
+
+bool has_style(const std::vector<tui::StyledRow> &rows, tui::Style style) {
+    for (const auto &row : rows) {
+        for (const auto &span : row.spans) {
+            if (span.style == style) return true;
+        }
+    }
+    return false;
 }
 
 void check_surface_cells_and_encoding() {
@@ -151,6 +170,77 @@ void check_multiline_navigation_history_and_projection() {
     require(active.state == tui::SessionState::STREAMING, "editing a draft during a turn must not overwrite the turn's semantic state");
 }
 
+void check_rich_output_and_concurrent_tools() {
+    constexpr std::string_view fixture = R"md(# Rich output
+Paragraph with **strong**, *emphasis*, `inline code`, and [docs](https://example.com/docs).
+The foo_bar_baz identifier stays literal.
+- first list item with enough words to wrap cleanly
+1. ordered item
+```cpp
+if (ready) {
+    run();
+}
+```
+```diff
+diff --git a/file.cpp b/file.cpp
+@@ -1 +1 @@
+-old value
++new value
+```
+)md";
+
+    const auto wide = tui::layout_rich_text(fixture, 72);
+    const auto narrow = tui::layout_rich_text(fixture, 24);
+    const auto wide_text = styled_rows_text(wide);
+    const auto narrow_text = styled_rows_text(narrow);
+    require(narrow.size() > wide.size(), "narrow rich output must wrap into more deterministic rows");
+    for (const auto &row : narrow) {
+        std::string text;
+        for (const auto &span : row.spans) text += span.text;
+        require(tui::text_width(text) <= 24, "every rich row must fit its terminal width");
+    }
+    require(wide_text.contains("assistant: Rich output") && !wide_text.contains("# Rich output"),
+            "headings must render without their Markdown marker");
+    require(wide_text.contains("strong") && !wide_text.contains("**strong**") && has_style(wide, tui::Style::EMPHASIS) &&
+                has_style(wide, tui::Style::ITALIC),
+            "strong and emphasis markup must become terminal styles");
+    require(wide_text.contains("foo_bar_baz"), "intraword underscores in code-like identifiers must remain literal");
+    require(wide_text.contains("docs") && wide_text.contains("<https://example.com/docs>") && has_style(wide, tui::Style::LINK),
+            "links must retain a visible, styled target");
+    require(wide_text.contains("• first list item") && narrow_text.contains("  enough words"),
+            "lists must retain a bullet and continuation indentation when wrapped");
+    require(wide_text.contains("[code: cpp]") && wide_text.contains("    run();") && has_style(wide, tui::Style::CODE),
+            "fenced code must retain its language and source whitespace");
+    require(has_style(wide, tui::Style::DIFF_ADDITION) && has_style(wide, tui::Style::DIFF_DELETION) &&
+                has_style(wide, tui::Style::DIFF_HUNK),
+            "unified diff markers must receive distinct semantic styles");
+
+    tui::SessionScreen streaming;
+    streaming.resize({40, 16});
+    streaming.apply(AssistantTextDelta{.text = "Partial **strong"});
+    auto partial = streaming.layout_block(streaming.transcript.blocks.back());
+    std::string partial_text;
+    for (const auto &row : partial) {
+        for (const auto &span : row.spans) partial_text += span.text;
+    }
+    require(partial_text.contains("**strong"), "incomplete streaming markup must remain literal");
+    streaming.apply(AssistantTextDelta{.text = "**"});
+    streaming.apply(AssistantSegmentCompleted{});
+    streaming.layout_block(streaming.transcript.blocks.back());
+    streaming.layout_block(streaming.transcript.blocks.back());
+    const auto diagnostics = streaming.layout_diagnostics();
+    require(diagnostics.cache_hits > 0 && diagnostics.cached_blocks == 1,
+            "a completed rich block must enter the existing stable layout cache");
+
+    tui::SessionScreen tools;
+    tools.apply(ToolStarted{.call_id = "one", .name = "read_file"});
+    tools.apply(ToolStarted{.call_id = "two", .name = "run_tests"});
+    tools.apply(ToolCompleted{.call_id = "one", .name = "read_file"});
+    require(tools.state == tui::SessionState::RUNNING_TOOLS, "one completed tool must not hide a concurrently running sibling");
+    tools.apply(ToolCompleted{.call_id = "two", .name = "run_tests"});
+    require(tools.state == tui::SessionState::STREAMING, "tool state may settle only after the final concurrent tool completes");
+}
+
 void check_scroll_resize_and_unread_state() {
     tui::SessionScreen screen;
     screen.resize({18, 8});
@@ -209,6 +299,7 @@ i32 run_all() {
     check_surface_cells_and_encoding();
     check_composer_editing();
     check_multiline_navigation_history_and_projection();
+    check_rich_output_and_concurrent_tools();
     check_scroll_resize_and_unread_state();
     check_headless_virtual_time_and_snapshots();
     return 0;

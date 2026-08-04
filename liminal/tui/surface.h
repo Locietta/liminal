@@ -13,9 +13,22 @@ using namespace lighter::types;
 enum struct Style {
     NORMAL,
     EMPHASIS,
+    ITALIC,
     MUTED,
     ACCENT,
+    CODE,
+    LINK,
+    DIFF_ADDITION,
+    DIFF_DELETION,
+    DIFF_HUNK,
     FAILURE,
+};
+
+struct StyledSpan {
+    std::string text;
+    Style style = Style::NORMAL;
+
+    friend bool operator==(const StyledSpan &, const StyledSpan &) = default;
 };
 
 struct Cell {

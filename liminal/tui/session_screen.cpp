@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "liminal/tui/rich_text.h"
+
 namespace liminal::tui {
 
 namespace {
@@ -40,6 +42,16 @@ std::string block_text(const Block &block) {
 }
 
 std::vector<LayoutRow> wrap_block(const Block &block, i32 columns) {
+    if (block.kind == BlockKind::ASSISTANT) {
+        auto rich = layout_rich_text(block.text, columns);
+        std::vector<LayoutRow> rows;
+        rows.reserve(rich.size());
+        for (auto &row : rich) {
+            rows.push_back({.block_id = block.id, .source_offset = row.source_offset, .spans = std::move(row.spans)});
+        }
+        return rows;
+    }
+
     std::vector<LayoutRow> rows;
     const auto source = block_text(block);
     const auto width = std::max(columns, 1);
@@ -494,7 +506,11 @@ void SessionScreen::apply(const Event &event) {
     if (std::holds_alternative<PromptSubmitted>(event)) state = SessionState::WAITING;
     if (std::holds_alternative<AssistantTextDelta>(event)) state = SessionState::STREAMING;
     if (std::holds_alternative<ToolStarted>(event)) state = SessionState::RUNNING_TOOLS;
-    if (std::holds_alternative<ToolCompleted>(event)) state = SessionState::STREAMING;
+    if (std::holds_alternative<ToolCompleted>(event)) {
+        const bool running = std::ranges::any_of(
+            transcript.blocks, [](const Block &block) { return block.kind == BlockKind::TOOL && block.state == BlockState::RUNNING; });
+        state = running ? SessionState::RUNNING_TOOLS : SessionState::STREAMING;
+    }
     if (std::holds_alternative<TurnCompleted>(event)) state = SessionState::COMPLETED;
     if (std::holds_alternative<TurnCancelled>(event)) state = SessionState::CANCELLED;
     if (std::holds_alternative<TurnFailed>(event)) state = SessionState::FAILED;
@@ -689,7 +705,13 @@ Frame SessionScreen::frame() const {
     const auto rows = visible_rows(*this);
     for (usize index = 0; index < rows.size(); ++index) {
         const auto &row = rows[index];
-        result.surface.write(static_cast<i32>(index) + (header ? 1 : 0), 0, row.text, row.style);
+        const auto target_row = static_cast<i32>(index) + (header ? 1 : 0);
+        if (row.spans.empty()) {
+            result.surface.write(target_row, 0, row.text, row.style);
+            continue;
+        }
+        i32 column = 0;
+        for (const auto &span : row.spans) column = result.surface.write(target_row, column, span.text, span.style);
     }
 
     if (status) {
