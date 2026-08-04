@@ -265,6 +265,24 @@ Task<> consume_large_body(i32 port, std::string_view payload) {
     require(received == payload, "large body content mismatch");
 }
 
+// --- scenario 6: proxy CONNECT headers are not origin response headers -----
+
+Task<> serve_connect_only_proxy(Tcp::Acceptor listener) {
+    Tcp connection;
+    co_await accept_one(listener, connection);
+    co_await write_all(connection, "HTTP/1.1 200 Connection established\r\n"
+                                   "Proxy-Agent: test\r\n"
+                                   "\r\n");
+    connection = {};
+}
+
+Task<> reject_connect_headers_as_response(i32 port) {
+    http::Client client;
+    auto stream_result =
+        co_await client.on().get("https://example.invalid/stream").proxy("http://127.0.0.1:" + std::to_string(port)).stream();
+    require(!stream_result, "proxy CONNECT headers must not resolve a streaming origin response");
+}
+
 // --- harness ----------------------------------------------------------------
 
 i32 listen_port(Tcp::Acceptor &listener) {
@@ -365,6 +383,20 @@ int main() {
         auto port = listen_port(listener);
         auto server = serve_large_body(std::move(listener), payload);
         auto client = consume_large_body(port, payload);
+        loop.schedule(server);
+        loop.schedule(client);
+        loop.run();
+        std::ignore = server.value();
+        std::ignore = client.value();
+    }
+
+    // scenario 6
+    std::printf("scenario 6\n");
+    {
+        auto listener = make_listener(loop);
+        auto port = listen_port(listener);
+        auto server = serve_connect_only_proxy(std::move(listener));
+        auto client = reject_connect_headers_as_response(port);
         loop.schedule(server);
         loop.schedule(client);
         loop.run();

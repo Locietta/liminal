@@ -192,7 +192,8 @@ Result<model::Choice> Registry::make_choice(const model::Entry &entry, std::opti
             .base_url = provider->base_url,
             .model = entry.id,
             .reasoning_effort = choice.reasoning_effort,
-            .max_output_tokens = k_max_tokens,
+            .max_output_tokens = provider->codex_subscription ? std::nullopt : std::optional<u32>(k_max_tokens),
+            .allow_missing_event_stream_content_type = provider->codex_subscription,
         });
     } else {
         choice.handle = pro::make_proxy<ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
@@ -228,6 +229,7 @@ Result<Registry> load_registry(const std::filesystem::path &providers_path, cons
             .api = ApiType::OPENAI_RESPONSES,
             .base_url = codex_api_base_url(),
             .auth = **std::move(codex_auth),
+            .codex_subscription = true,
             .models_client_version = "0.1.0",
             .models = bundled_codex_models(),
         });

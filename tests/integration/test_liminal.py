@@ -618,7 +618,7 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
     env["LIMINAL_MODEL"] = "codex/gpt-5.6-sol"
     session = subprocess.run(
         [str(BINARY)],
-        input="/model\n/quit\n",
+        input="/model\nhello\n/quit\n",
         env=env,
         cwd=REPO_ROOT,
         capture_output=True,
@@ -633,7 +633,16 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
     assert "codex/gpt-5.6-terra - GPT-5.6-Terra" in session.stdout
     assert "codex/account-specific-model" in session.stdout
     assert "codex/discovered-codex-model - Discovered Codex Model" in session.stdout
-    assert state["log"] == ["start", "poll", "exchange", "refresh", "models", "models"]
+    assert "CODEX_STREAM_OK" in session.stdout
+    assert state["log"] == [
+        "start",
+        "poll",
+        "exchange",
+        "refresh",
+        "models",
+        "models",
+        "responses",
+    ]
 
 
 def test_terminal_session_restores_state(tmp_path, openai_slow_mock):

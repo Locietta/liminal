@@ -22,6 +22,13 @@ ACCESS_TOKEN = ".".join(
 )
 
 
+def sse(events):
+    return "".join(
+        f"event: {event}\ndata: {json.dumps({'type': event, **payload})}\n\n"
+        for event, payload in events
+    ).encode()
+
+
 def make_server(port=0):
     state = {"log": [], "errors": []}
 
@@ -32,6 +39,64 @@ def make_server(port=0):
         def do_POST(self):
             try:
                 body = self.rfile.read(int(self.headers["Content-Length"]))
+                if self.path == "/codex/responses":
+                    request = json.loads(body)
+                    assert self.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
+                    assert self.headers["chatgpt-account-id"] == "account-123"
+                    assert self.headers["originator"] == "liminal"
+                    assert "max_output_tokens" not in request
+                    assert request["model"] == "gpt-5.6-sol"
+                    assert request["stream"] is True
+                    assert request["store"] is False
+                    text = "CODEX_STREAM_OK"
+                    message = {
+                        "type": "message",
+                        "id": "msg_codex",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": text,
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                    response = {
+                        "id": "resp_codex",
+                        "model": "gpt-5.6-sol",
+                        "status": "completed",
+                    }
+                    data = sse(
+                        [
+                            (
+                                "response.created",
+                                {"response": {**response, "status": "in_progress"}},
+                            ),
+                            (
+                                "response.output_text.delta",
+                                {
+                                    "output_index": 0,
+                                    "content_index": 0,
+                                    "item_id": "msg_codex",
+                                    "delta": text,
+                                },
+                            ),
+                            (
+                                "response.output_item.done",
+                                {"output_index": 0, "item": message},
+                            ),
+                            ("response.completed", {"response": response}),
+                        ]
+                    )
+                    state["log"].append("responses")
+                    self.send_response(200)
+                    self.send_header("x-request-id", "req_codex")
+                    # The subscription endpoint currently returns valid SSE
+                    # without a Content-Type header.
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 if self.path == "/api/accounts/deviceauth/usercode":
                     assert json.loads(body) == {
                         "client_id": "app_EMoamEEZ73f0CkXaXp7hrann"

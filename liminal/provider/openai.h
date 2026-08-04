@@ -29,7 +29,8 @@ struct ClientOptions {
     std::optional<std::string> models_client_version;
     std::string model;
     std::optional<std::string> reasoning_effort;
-    u32 max_output_tokens = 8192;
+    std::optional<u32> max_output_tokens = 8192;
+    bool allow_missing_event_stream_content_type = false;
     usize max_retries = 2;
     std::chrono::milliseconds initial_retry_delay{500};
 };

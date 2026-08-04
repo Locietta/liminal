@@ -100,7 +100,8 @@ InflightRequest::InflightRequest(http::Request request) noexcept
     }
 
     if (!easy_setopt(*this, CURLOPT_WRITEFUNCTION, &InflightRequest::on_write) || !easy_setopt(*this, CURLOPT_WRITEDATA, this) ||
-        !easy_setopt(*this, CURLOPT_HEADERFUNCTION, &InflightRequest::on_header) || !easy_setopt(*this, CURLOPT_HEADERDATA, this)) {
+        !easy_setopt(*this, CURLOPT_HEADERFUNCTION, &InflightRequest::on_header) || !easy_setopt(*this, CURLOPT_HEADERDATA, this) ||
+        !easy_setopt(*this, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L)) {
         return;
     }
 }

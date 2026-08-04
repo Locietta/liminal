@@ -101,7 +101,7 @@ struct Reasoning {
 struct ResponseRequest {
     std::string model;
     std::string instructions = "You are a helpful coding assistant.";
-    u32 max_output_tokens = 8192;
+    std::optional<u32> max_output_tokens;
     std::vector<ResponseItem> input;
     std::optional<std::vector<Tool>> tools;
     bool parallel_tool_calls = true;
@@ -609,7 +609,8 @@ Task<provider::TurnResponse, Error> attempt_stream(http::Client &http_client, co
         co_await fail(parse_status_error(response.status, error_body, std::move(request_id), parse_retry_after(response)));
     }
     auto content_type = response.header_value("content-type").value_or("");
-    if (content_type.find("text/event-stream") == std::string_view::npos) {
+    const bool missing_allowed = options.allow_missing_event_stream_content_type && content_type.empty();
+    if (!missing_allowed && content_type.find("text/event-stream") == std::string_view::npos) {
         co_await fail(Error::protocol("expected text/event-stream response, got: " + std::string(content_type)));
     }
 
