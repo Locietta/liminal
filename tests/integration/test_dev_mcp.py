@@ -1,10 +1,14 @@
 """Protocol-level coverage for the deterministic development MCP server."""
 
+import ctypes
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
+from contextlib import contextmanager
+from ctypes import wintypes
 from pathlib import Path
 
 import pytest
@@ -18,6 +22,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def find_binary():
+    configured = os.environ.get("LIMINAL_DEV_MCP_BINARY")
+    if configured:
+        candidate = Path(configured)
+        if candidate.exists():
+            return candidate
     executable = "liminal-dev-mcp.exe" if os.name == "nt" else "liminal-dev-mcp"
     for mode in ("releasedbg", "release"):
         for platform_dir in (REPO_ROOT / "build").glob(f"*/*/{mode}"):
@@ -62,9 +71,97 @@ def run_server(messages, *, environment=None, timeout=20):
     }
 
 
+@contextmanager
+def running_server(*, environment=None):
+    process = subprocess.Popen(
+        [str(BINARY)],
+        cwd=REPO_ROOT,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        bufsize=1,
+    )
+    try:
+        yield process
+    finally:
+        if process.poll() is None:
+            process.stdin.close()
+        try:
+            return_code = process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            return_code = process.wait(timeout=5)
+        stderr = process.stderr.read()
+        assert return_code == 0, stderr
+        assert not stderr
+
+
+def exchange(process, message):
+    process.stdin.write(json.dumps(message) + "\n")
+    process.stdin.flush()
+    line = process.stdout.readline()
+    assert line, process.stderr.read()
+    return json.loads(line)
+
+
+def tool_content(response):
+    return response["result"]["structuredContent"]
+
+
+def process_exists(process_id):
+    if os.name == "nt":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        process = kernel32.OpenProcess(0x1000, False, process_id)
+        if not process:
+            return False
+        try:
+            exit_code = wintypes.DWORD()
+            return (
+                bool(kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code)))
+                and exit_code.value == 259
+            )
+        finally:
+            kernel32.CloseHandle(process)
+
+    try:
+        os.kill(process_id, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def wait_for_process_exit(process_id, timeout=5):
+    deadline = time.monotonic() + timeout
+    while process_exists(process_id):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
 @pytest.fixture
 def openai_mock():
     server, state = mock_openai.make_server()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}/v1", state
+    server.shutdown()
+
+
+@pytest.fixture
+def slow_openai_mock():
+    server, state = mock_openai.make_server(chunk_delay=0.05)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_port}/v1", state
     server.shutdown()
@@ -250,6 +347,183 @@ def test_live_session_operates_real_liminal_process(openai_mock, tmp_path):
     assert quit_snapshot["exit_code"] == 0
     assert state["errors"] == []
     assert responses["close"]["result"]["structuredContent"]["closed"] is True
+
+
+def test_live_session_bounds_are_preflighted_and_closed_processes_are_reaped(
+    openai_mock, tmp_path
+):
+    base_url, _ = openai_mock
+    environment = live_environment(tmp_path, base_url)
+
+    with running_server(environment=environment) as process:
+        process_ids = []
+        for index in range(4):
+            response = exchange(
+                process,
+                request(
+                    f"create-{index}",
+                    "tools/call",
+                    {
+                        "name": "session_create",
+                        "arguments": {
+                            "driver": "liminal.pty",
+                            "cwd": str(REPO_ROOT),
+                        },
+                    },
+                ),
+            )
+            process_ids.append(tool_content(response)["snapshot"]["process_id"])
+
+        rejected = exchange(
+            process,
+            request(
+                "create-over-limit",
+                "tools/call",
+                {
+                    "name": "session_create",
+                    "arguments": {
+                        "driver": "liminal.pty",
+                        "cwd": str(REPO_ROOT),
+                    },
+                },
+            ),
+        )["result"]
+        assert rejected["isError"] is True
+        assert rejected["structuredContent"]["error"] == "live session limit exceeded"
+
+        started = time.monotonic()
+        rejected = exchange(
+            process,
+            request(
+                "apply-over-budget",
+                "tools/call",
+                {
+                    "name": "session_apply",
+                    "arguments": {
+                        "session_id": "session-1",
+                        "actions": [
+                            {"type": "write", "text": "MUST_NOT_BE_APPLIED"},
+                            {"type": "wait", "milliseconds": 20_000},
+                            {"type": "wait", "milliseconds": 10_001},
+                        ],
+                    },
+                },
+            ),
+        )["result"]
+        assert time.monotonic() - started < 2
+        assert rejected["isError"] is True
+        assert rejected["structuredContent"]["error"] == "total wait budget exceeded"
+
+        inspected = exchange(
+            process,
+            request(
+                "inspect",
+                "tools/call",
+                {
+                    "name": "session_inspect",
+                    "arguments": {"session_id": "session-1"},
+                },
+            ),
+        )
+        assert (
+            "MUST_NOT_BE_APPLIED" not in tool_content(inspected)["snapshot"]["output"]
+        )
+
+        for index, process_id in enumerate(process_ids, start=1):
+            closed = exchange(
+                process,
+                request(
+                    f"close-{index}",
+                    "tools/call",
+                    {
+                        "name": "session_close",
+                        "arguments": {"session_id": f"session-{index}"},
+                    },
+                ),
+            )
+            assert tool_content(closed)["closed"] is True
+            assert wait_for_process_exit(process_id)
+
+
+def test_server_eof_reaps_live_process(openai_mock, tmp_path):
+    base_url, _ = openai_mock
+    environment = live_environment(tmp_path, base_url)
+
+    with running_server(environment=environment) as process:
+        created = exchange(
+            process,
+            request(
+                "create",
+                "tools/call",
+                {
+                    "name": "session_create",
+                    "arguments": {
+                        "driver": "liminal.pty",
+                        "cwd": str(REPO_ROOT),
+                    },
+                },
+            ),
+        )
+        process_id = tool_content(created)["snapshot"]["process_id"]
+        assert process_exists(process_id)
+        process.stdin.close()
+        assert process.wait(timeout=10) == 0
+        assert wait_for_process_exit(process_id)
+
+
+def test_close_reaps_live_process_during_active_turn(slow_openai_mock, tmp_path):
+    base_url, state = slow_openai_mock
+    environment = live_environment(tmp_path, base_url)
+
+    with running_server(environment=environment) as process:
+        created = exchange(
+            process,
+            request(
+                "create",
+                "tools/call",
+                {
+                    "name": "session_create",
+                    "arguments": {
+                        "driver": "liminal.pty",
+                        "cwd": str(REPO_ROOT),
+                    },
+                },
+            ),
+        )
+        process_id = tool_content(created)["snapshot"]["process_id"]
+        exchange(
+            process,
+            request(
+                "prompt",
+                "tools/call",
+                {
+                    "name": "session_apply",
+                    "arguments": {
+                        "session_id": "session-1",
+                        "actions": [
+                            {"type": "wait", "milliseconds": 500},
+                            {"type": "prompt", "text": "inspect"},
+                            {"type": "wait", "milliseconds": 1_000},
+                        ],
+                    },
+                },
+            ),
+        )
+        assert state["calls"] >= 2
+
+        closed = exchange(
+            process,
+            request(
+                "close",
+                "tools/call",
+                {
+                    "name": "session_close",
+                    "arguments": {"session_id": "session-1"},
+                },
+            ),
+        )
+        assert tool_content(closed)["closed"] is True
+        assert wait_for_process_exit(process_id)
 
 
 RICH_FIXTURE = """# Rich output

@@ -581,6 +581,8 @@ std::expected<void, std::string> LiveSession::write(std::string_view bytes) {
     return {};
 }
 
+bool LiveSession::supports_key(std::string_view name) { return key_bytes(name).has_value(); }
+
 std::expected<void, std::string> LiveSession::key(std::string_view name) {
     const auto bytes = key_bytes(name);
     if (!bytes) return std::unexpected("unsupported key: " + std::string(name));

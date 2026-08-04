@@ -15,7 +15,7 @@ env_vars = [
 enabled = true
 required = false
 startup_timeout_sec = 30
-tool_timeout_sec = 30
+tool_timeout_sec = 45
 enabled_tools = [
   "session_create",
   "session_apply",

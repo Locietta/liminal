@@ -25,6 +25,11 @@ using namespace lighter::types;
 namespace {
 
 constexpr usize k_max_sessions = 32;
+constexpr usize k_max_live_sessions = 4;
+constexpr usize k_max_actions_per_call = 1000;
+constexpr usize k_max_live_input_bytes_per_call = 4 * 1024 * 1024;
+constexpr i64 k_max_live_wait_ms_per_action = 30'000;
+constexpr i64 k_max_live_wait_ms_per_call = 30'000;
 
 struct RpcRequest {
     std::string jsonrpc;
@@ -170,7 +175,7 @@ glz::generic tools() {
       {
         "name":"session_apply",
         "title":"Operate Liminal session",
-        "description":"Apply headless actions, or operate a real Liminal terminal with write, prompt, key, resize, wait, and terminate actions. Supported key names: enter, escape, backspace, ctrl_c, ctrl_j, tab, arrows, page_up, page_down, home, end, and delete.",
+        "description":"Apply headless actions, or operate a real Liminal terminal with write, prompt, key, resize, wait, and terminate actions. A call may wait for at most 30000 milliseconds total and write at most 4 MiB total. Supported key names: enter, escape, backspace, ctrl_c, ctrl_j, tab, arrows, page_up, page_down, home, end, and delete.",
         "inputSchema":{"type":"object","additionalProperties":false,"properties":{"session_id":{"type":"string"},"actions":{"type":"array","maxItems":1000,"items":{"type":"object","properties":{"type":{"type":"string"},"text":{"type":"string","maxLength":1048576},"key":{"type":"string"},"call_id":{"type":"string"},"name":{"type":"string"},"effort":{"type":["string","null"]},"columns":{"type":"integer"},"rows":{"type":"integer"},"amount":{"type":"integer"},"milliseconds":{"type":"integer"},"is_error":{"type":"boolean"}},"required":["type"],"additionalProperties":false}}},"required":["session_id","actions"]},
         "outputSchema":{"type":"object"},
         "annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}
@@ -199,8 +204,14 @@ struct Server {
         if (call.name == "session_create") {
             auto input = decode<CreateInput>(call.arguments);
             if (!input) return execution_error(input.error());
+            if (input->driver != "tui.headless" && input->driver != "liminal.pty") {
+                return execution_error("unsupported driver: " + input->driver);
+            }
             if (headless_sessions.size() + live_sessions.size() >= k_max_sessions) {
                 return execution_error("server session limit exceeded");
+            }
+            if (input->driver == "liminal.pty" && live_sessions.size() >= k_max_live_sessions) {
+                return execution_error("live session limit exceeded");
             }
             if (input->columns < 1 || input->columns > 500 || input->rows < 1 || input->rows > 200 || input->now_ms < 0) {
                 return execution_error("invalid terminal size or virtual time");
@@ -223,8 +234,6 @@ struct Server {
                     R"json({"driver":"liminal.pty","version":"1","actions":true,"virtual_clock":false,"snapshots":true,"process":true,"network":true,"workspace":true,"authenticated":true})json");
                 structured["snapshot"] = snapshot_value(*snapshot);
                 live_sessions.emplace(id, *std::move(session));
-            } else {
-                return execution_error("unsupported driver: " + input->driver);
             }
             return tool_result(std::move(structured));
         }
@@ -241,7 +250,7 @@ struct Server {
         if (call.name == "session_apply") {
             auto input = decode<ApplyInput>(call.arguments);
             if (!input) return execution_error(input.error());
-            if (input->actions.size() > 1000) return execution_error("action batch limit exceeded");
+            if (input->actions.size() > k_max_actions_per_call) return execution_error("action batch limit exceeded");
             glz::generic structured = object();
             structured["session_id"] = input->session_id;
             if (auto *session = get_headless(input->session_id)) {
@@ -255,32 +264,58 @@ struct Server {
                 if (auto applied = session->apply(actions); !applied) return execution_error(applied.error());
                 structured["snapshot"] = snapshot_value(*session);
             } else if (auto *session = get_live(input->session_id)) {
+                std::vector<LiveAction> actions;
+                actions.reserve(input->actions.size());
+                usize total_input_bytes = 0;
+                i64 total_wait_ms = 0;
                 for (const auto &value : input->actions) {
                     auto action = decode<LiveAction>(value);
                     if (!action) return execution_error(action.error());
-                    std::expected<void, std::string> applied;
-                    if (action->type == "write") {
-                        if (action->text.size() > 1024 * 1024) return execution_error("write text limit exceeded");
-                        applied = session->write(action->text);
-                    } else if (action->type == "prompt") {
-                        if (action->text.size() > 1024 * 1024) return execution_error("prompt text limit exceeded");
-                        applied = session->write(action->text + "\r");
+                    if (action->type == "write" || action->type == "prompt") {
+                        if (action->text.size() > 1024 * 1024) {
+                            return execution_error(action->type + " text limit exceeded");
+                        }
+                        const auto input_bytes = action->text.size() + (action->type == "prompt" ? 1 : 0);
+                        if (input_bytes > k_max_live_input_bytes_per_call - total_input_bytes) {
+                            return execution_error("total input byte budget exceeded");
+                        }
+                        total_input_bytes += input_bytes;
                     } else if (action->type == "key") {
-                        applied = session->key(action->key);
+                        if (!LiveSession::supports_key(action->key)) {
+                            return execution_error("unsupported key: " + action->key);
+                        }
                     } else if (action->type == "resize") {
                         if (action->columns < 1 || action->columns > 500 || action->rows < 1 || action->rows > 200) {
                             return execution_error("invalid terminal size");
                         }
-                        applied = session->resize(action->columns, action->rows);
                     } else if (action->type == "wait") {
-                        if (action->milliseconds < 0 || action->milliseconds > 30000) {
+                        if (action->milliseconds < 0 || action->milliseconds > k_max_live_wait_ms_per_action) {
                             return execution_error("wait must be between 0 and 30000 milliseconds");
                         }
-                        applied = session->wait(std::chrono::milliseconds(action->milliseconds));
-                    } else if (action->type == "terminate") {
-                        applied = session->terminate();
-                    } else {
+                        if (action->milliseconds > k_max_live_wait_ms_per_call - total_wait_ms) {
+                            return execution_error("total wait budget exceeded");
+                        }
+                        total_wait_ms += action->milliseconds;
+                    } else if (action->type != "terminate") {
                         return execution_error("unsupported liminal.pty action: " + action->type);
+                    }
+                    actions.push_back(*std::move(action));
+                }
+
+                for (const auto &action : actions) {
+                    std::expected<void, std::string> applied;
+                    if (action.type == "write") {
+                        applied = session->write(action.text);
+                    } else if (action.type == "prompt") {
+                        applied = session->write(action.text + "\r");
+                    } else if (action.type == "key") {
+                        applied = session->key(action.key);
+                    } else if (action.type == "resize") {
+                        applied = session->resize(action.columns, action.rows);
+                    } else if (action.type == "wait") {
+                        applied = session->wait(std::chrono::milliseconds(action.milliseconds));
+                    } else {
+                        applied = session->terminate();
                     }
                     if (!applied) return execution_error(applied.error());
                 }

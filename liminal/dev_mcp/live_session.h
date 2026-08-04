@@ -32,6 +32,7 @@ struct LiveSnapshot {
 
 struct LiveSession {
     static std::expected<std::unique_ptr<LiveSession>, std::string> create(std::string_view working_directory, i32 columns, i32 rows);
+    static bool supports_key(std::string_view name);
 
     ~LiveSession();
 
