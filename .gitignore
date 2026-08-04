@@ -6,7 +6,7 @@
 .cache
 .clice
 
-build/
+build*/
 .xmake/
 
 __pycache__/

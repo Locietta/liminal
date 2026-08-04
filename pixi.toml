@@ -8,8 +8,10 @@ version = "0.1.0"
 [tasks]
 setup-hooks = "python scripts/setup_hooks.py"
 format = "python scripts/format.py"
-configure = "xmake f -m releasedbg -y" # we use releasedbg for development and testing
-configure-release = "xmake f -m release -y"
+format-check = "python scripts/format.py --check ."
+configure = "xmake f -m releasedbg --sanitizers=n -y" # we use releasedbg for development and testing
+configure-release = "xmake f -m release --sanitizers=n -y"
+configure-sanitize = "xmake f -m releasedbg --sanitizers=y -y"
 build = "xmake build -y"
 test-unit = "xmake test"
 test-integration = { cmd = "python -m pytest tests/integration -v", depends-on = [
@@ -18,6 +20,9 @@ test-integration = { cmd = "python -m pytest tests/integration -v", depends-on =
 test-all = { cmd = "xmake test && python -m pytest tests/integration -v", depends-on = [
   "build",
 ] }
+test-linux = "python scripts/test_wsl.py"
+test-linux-release = "python scripts/test_wsl.py --mode release"
+test-linux-sanitize = "python scripts/test_wsl.py --mode sanitize"
 
 [dependencies]
 python = ">=3.14"

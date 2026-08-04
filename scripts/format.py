@@ -13,15 +13,22 @@ from pathlib import Path
 FORMATTERS = {
     "clang-format": {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"},
     "ruff": {".py", ".pyi"},
-    "prettier": {".json", ".md"},
+    "prettier": {".json", ".md", ".yaml", ".yml"},
     "taplo": {".toml"},
 }
 
 COMMANDS = {
-    "clang-format": ["clang-format", "-i"],
+    "clang-format": ["clang-format"],
     "ruff": ["ruff", "format"],
-    "prettier": ["prettier", "--write"],
+    "prettier": ["prettier"],
     "taplo": ["taplo", "format"],
+}
+
+MODE_ARGUMENTS = {
+    "clang-format": {False: ["-i"], True: ["--dry-run", "--Werror"]},
+    "ruff": {False: [], True: ["--check"]},
+    "prettier": {False: ["--write"], True: ["--check"]},
+    "taplo": {False: [], True: ["--check"]},
 }
 
 LANGUAGES = {
@@ -48,6 +55,11 @@ def parse_args() -> argparse.Namespace:
         "--language",
         choices=LANGUAGES,
         help="override language detection for every input",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="report files that require formatting without modifying them",
     )
     return parser.parse_args()
 
@@ -110,7 +122,9 @@ def language_arguments(language: str | None, files: list[Path]) -> list[str]:
     return []
 
 
-def run_formatter(formatter: str, files: list[Path], language: str | None) -> int:
+def run_formatter(
+    formatter: str, files: list[Path], language: str | None, check: bool
+) -> int:
     executable = shutil.which(COMMANDS[formatter][0])
     if executable is None:
         print(f"format: could not find {formatter}", file=sys.stderr)
@@ -132,12 +146,18 @@ def run_formatter(formatter: str, files: list[Path], language: str | None) -> in
             )
             if result.returncode != 0:
                 return result.returncode
-            file.write_bytes(result.stdout)
+            if check:
+                if result.stdout != file.read_bytes():
+                    print(f"format: {file} requires taplo formatting", file=sys.stderr)
+                    return 1
+            else:
+                file.write_bytes(result.stdout)
         return 0
 
     command = [
         executable,
         *COMMANDS[formatter][1:],
+        *MODE_ARGUMENTS[formatter][check],
         *language_arguments(language, files),
         *map(str, files),
     ]
@@ -166,8 +186,9 @@ def main() -> int:
         return 0
 
     for formatter, files in selected.items():
-        print(f"Formatting {len(files)} file(s) with {formatter}...", flush=True)
-        returncode = run_formatter(formatter, files, args.language)
+        action = "Checking" if args.check else "Formatting"
+        print(f"{action} {len(files)} file(s) with {formatter}...", flush=True)
+        returncode = run_formatter(formatter, files, args.language, args.check)
         if returncode != 0:
             return returncode
 
