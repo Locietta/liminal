@@ -10,13 +10,6 @@ import sys
 from pathlib import Path
 
 
-def wsl_path(path: Path, distro: str) -> str:
-    return subprocess.check_output(
-        ["wsl.exe", "-d", distro, "--", "wslpath", "-a", path.resolve().as_posix()],
-        text=True,
-    ).strip()
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build and test a disposable snapshot of this worktree in WSL."
@@ -39,16 +32,17 @@ def main() -> int:
             ["git", "rev-parse", "--show-toplevel"], text=True
         ).strip()
     )
-    script = repo / "scripts" / "test-wsl.sh"
     return subprocess.run(
         [
             "wsl.exe",
             "-d",
             args.distro,
+            "--cd",
+            str(repo),
             "--",
             "bash",
-            wsl_path(script, args.distro),
-            wsl_path(repo, args.distro),
+            "scripts/test-wsl.sh",
+            ".",
             args.mode,
         ],
         check=False,
