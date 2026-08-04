@@ -71,6 +71,7 @@ def openai_mock_fixture(**kwargs):
 
 
 openai_mock = openai_mock_fixture()
+openai_slow_mock = openai_mock_fixture(chunk_delay=0.02)
 openai_mock_no_compact = openai_mock_fixture(compact_404=True)
 openai_mock_no_models = openai_mock_fixture(models_status=404)
 
@@ -95,7 +96,9 @@ def configured_provider(api, base_url, api_key, models, discover_models=False):
     }
 
 
-def terminal_test_environment(tmp_path, model_count=1):
+def terminal_test_environment(
+    tmp_path, model_count=1, base_url="http://127.0.0.1:1/v1", api_key="unused-key"
+):
     providers_file = tmp_path / "providers.json"
     providers_file.write_text(
         json.dumps(
@@ -103,8 +106,8 @@ def terminal_test_environment(tmp_path, model_count=1):
                 "providers": {
                     "terminal-test": configured_provider(
                         "openai-responses",
-                        "http://127.0.0.1:1/v1",
-                        "unused-key",
+                        base_url,
+                        api_key,
                         [{"id": "test-model"}]
                         + [
                             {"id": f"extra-model-{index}"}
@@ -135,13 +138,15 @@ def read_conpty_until(process, output, marker, timeout):
         output.extend(chunk)
 
 
-def check_conpty_terminal_session(tmp_path):
+def check_conpty_terminal_session(tmp_path, base_url):
     from conpty import ConPtyProcess
 
     process = ConPtyProcess(
         [BINARY],
         cwd=REPO_ROOT,
-        env=terminal_test_environment(tmp_path, model_count=13),
+        env=terminal_test_environment(
+            tmp_path, model_count=13, base_url=base_url, api_key=mock_openai.API_KEY
+        ),
         columns=40,
         rows=8,
     )
@@ -171,7 +176,19 @@ def check_conpty_terminal_session(tmp_path):
             assert chunk, f"ConPTY output closed during resize: {output!r}"
             output.extend(chunk)
 
-        process.write(b"\x7f\x7f\x7f/quit\r")
+        # Clear the paste, submit a real turn, then prove input and resize are
+        # handled while its deliberately slow SSE stream is still active.
+        process.write(b"\x7f\x7f\x7finspect\r")
+        read_conpty_until(process, output, b"Let me inspect the repository.", 10)
+        process.resize(60, 12)
+        process.write(b"queued")
+        read_conpty_until(process, output, b"queued", 5)
+        read_conpty_until(process, output, b"\x1b[12;", 5)
+        read_conpty_until(
+            process, output, b"The working directory is the liminal repository.", 10
+        )
+
+        process.write(b"\x7f\x7f\x7f\x7f\x7f\x7f/quit\r")
         assert process.wait(10) == 0
         while chunk := process.read(0.1):
             output.extend(chunk)
@@ -524,10 +541,11 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
     assert state["log"] == ["start", "poll", "exchange", "refresh", "models", "models"]
 
 
-def test_terminal_session_restores_state(tmp_path):
+def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
     """The interactive backend uses and restores an alternate terminal screen."""
+    base_url, _ = openai_slow_mock
     if os.name == "nt":
-        check_conpty_terminal_session(tmp_path)
+        check_conpty_terminal_session(tmp_path, base_url)
         return
 
     import fcntl
@@ -539,7 +557,12 @@ def test_terminal_session_restores_state(tmp_path):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 8, 40, 0, 0))
     original = termios.tcgetattr(slave)
-    env = terminal_test_environment(tmp_path, model_count=13)
+    env = terminal_test_environment(
+        tmp_path,
+        model_count=13,
+        base_url=base_url,
+        api_key=mock_openai.API_KEY,
+    )
 
     process = subprocess.Popen(
         [str(BINARY)],
@@ -562,6 +585,35 @@ def test_terminal_session_restores_state(tmp_path):
 
         assert output.count(b"\x1b[?1049h") == 1
         assert output.index(b"\x1b[?2004h") < output.index(b"\x1b[?1049h")
+
+        os.kill(process.pid, signal.SIGTSTP)
+        deadline = time.monotonic() + 5
+        while output.count(b"\x1b[?1049l") < 1:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"suspend did not restore terminal: {output!r}"
+            readable, _, _ = select.select([master], [], [], remaining)
+            assert readable, f"suspend produced no terminal restoration: {output!r}"
+            output.extend(os.read(master, 4096))
+        deadline = time.monotonic() + 5
+        stopped_status = None
+        while stopped_status is None:
+            waited_pid, status = os.waitpid(process.pid, os.WUNTRACED | os.WNOHANG)
+            if waited_pid == process.pid:
+                stopped_status = status
+                break
+            assert time.monotonic() < deadline, (
+                "process did not enter the stopped state"
+            )
+            time.sleep(0.01)
+        assert os.WIFSTOPPED(stopped_status)
+        os.kill(process.pid, signal.SIGCONT)
+        deadline = time.monotonic() + 5
+        while output.count(b"\x1b[?1049h") < 2:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"resume did not re-enter terminal: {output!r}"
+            readable, _, _ = select.select([master], [], [], remaining)
+            assert readable, f"resume produced no terminal redraw: {output!r}"
+            output.extend(os.read(master, 4096))
 
         os.write(master, b"/model\r")
         deadline = time.monotonic() + 5
@@ -612,8 +664,33 @@ def test_terminal_session_restores_state(tmp_path):
             )
             output.extend(os.read(master, 4096))
 
-        # Clear the three pasted code points, then exit normally.
-        os.write(master, b"\x7f\x7f\x7f/quit\r")
+        os.write(master, b"\x7f\x7f\x7finspect\r")
+        deadline = time.monotonic() + 10
+        while b"Let me inspect the repository." not in output:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"slow turn did not start: {output!r}"
+            readable, _, _ = select.select([master], [], [], remaining)
+            assert readable, f"slow turn produced no output: {output!r}"
+            output.extend(os.read(master, 4096))
+        os.write(master, b"queued")
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 60, 0, 0))
+        os.kill(process.pid, signal.SIGWINCH)
+        deadline = time.monotonic() + 5
+        while b"queued" not in output or b"\x1b[12;" not in output:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"input/resize stalled during turn: {output!r}"
+            readable, _, _ = select.select([master], [], [], remaining)
+            assert readable, f"input/resize produced no redraw during turn: {output!r}"
+            output.extend(os.read(master, 4096))
+        deadline = time.monotonic() + 10
+        while b"The working directory is the liminal repository." not in output:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"slow turn did not complete: {output!r}"
+            readable, _, _ = select.select([master], [], [], remaining)
+            assert readable, f"slow turn stopped producing output: {output!r}"
+            output.extend(os.read(master, 4096))
+
+        os.write(master, b"\x7f\x7f\x7f\x7f\x7f\x7f/quit\r")
         assert process.wait(timeout=10) == 0
         while True:
             readable, _, _ = select.select([master], [], [], 0.1)
@@ -627,9 +704,55 @@ def test_terminal_session_restores_state(tmp_path):
             if not chunk:
                 break
             output.extend(chunk)
-        assert output.count(b"\x1b[?1049l") == 1
+        assert output.count(b"\x1b[?1049l") == 2
         assert output.index(b"\x1b[?1049h") < output.index(b"\x1b[?1049l")
         assert output.index(b"\x1b[?1049l") < output.index(b"\x1b[?2004l")
+        assert termios.tcgetattr(slave) == original
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        os.close(master)
+        os.close(slave)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX PTY stream-routing test")
+def test_redirected_stdout_keeps_interactive_tui_on_stderr(tmp_path):
+    """A redirected data stream must not disable terminal input or emit VT."""
+    import fcntl
+    import pty
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 8, 40, 0, 0))
+    original = termios.tcgetattr(slave)
+    env = terminal_test_environment(tmp_path)
+    process = subprocess.Popen(
+        [str(BINARY)],
+        stdin=slave,
+        stdout=subprocess.PIPE,
+        stderr=slave,
+        env=env,
+        cwd=REPO_ROOT,
+        close_fds=True,
+    )
+    terminal_output = bytearray()
+    try:
+        deadline = time.monotonic() + 10
+        while b" > " not in terminal_output:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, (
+                f"stderr TUI prompt did not appear: {terminal_output!r}"
+            )
+            readable, _, _ = select.select([master], [], [], remaining)
+            assert readable, f"stderr TUI produced no prompt: {terminal_output!r}"
+            terminal_output.extend(os.read(master, 4096))
+        os.write(master, b"/quit\r")
+        stdout, _ = process.communicate(timeout=10)
+        assert b"\x1b[" not in stdout
+        assert b"liminal - model: test-model" in stdout
+        assert terminal_output.count(b"\x1b[?1049h") == 1
         assert termios.tcgetattr(slave) == original
     finally:
         if process.poll() is None:

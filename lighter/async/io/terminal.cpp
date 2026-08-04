@@ -249,6 +249,7 @@ void run_terminal_worker(TerminalSession::Self *self) {
     if (self->virtual_input) {
         std::array<char, 4096> buffer{};
         detail::TerminalInputDecoder decoder;
+        auto last_size = windows_size(self->output);
         auto emit = [self](TerminalEvent event) { self->post(std::move(event)); };
         while (true) {
             const DWORD timeout = decoder.escape_pending() ? 25 : INFINITE;
@@ -265,6 +266,16 @@ void run_terminal_worker(TerminalSession::Self *self) {
                 return;
             }
 
+            // ConPTY normally exposes WINDOW_BUFFER_SIZE_EVENT records, but a
+            // resize racing readable VT input can coalesce the record. Polling
+            // the canonical output size whenever input wakes the worker keeps
+            // resize delivery deterministic without a timer or busy loop.
+            const auto current_size = windows_size(self->output);
+            if (current_size.columns > 0 && current_size.rows > 0 && current_size != last_size) {
+                last_size = current_size;
+                self->post(resize_event(current_size));
+            }
+
             INPUT_RECORD record{};
             DWORD available = 0;
             if (!PeekConsoleInputW(self->input, &record, 1, &available)) {
@@ -278,7 +289,11 @@ void run_terminal_worker(TerminalSession::Self *self) {
                     return;
                 }
                 if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) {
-                    self->post(resize_event(windows_size(self->output)));
+                    const auto size = windows_size(self->output);
+                    if (size.columns > 0 && size.rows > 0 && size != last_size) {
+                        last_size = size;
+                        self->post(resize_event(size));
+                    }
                 }
                 continue;
             }

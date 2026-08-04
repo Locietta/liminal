@@ -53,8 +53,8 @@ struct InterruptSource {
     struct Self;
     Self *operator->() noexcept;
 
-    /// Watches the default fatal set - INT, TERM and HUP - skipping any this
-    /// platform cannot deliver.
+    /// Watches the default fatal set - INT, TERM, HUP and BREAK - skipping any
+    /// this platform cannot deliver.
     static Result<InterruptSource> create(EventLoop &loop = EventLoop::current());
 
     /// Watches `fatal` plus `observed`. Fatal controls cancel the token;

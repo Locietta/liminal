@@ -53,6 +53,11 @@ struct Frame {
 i32 cell_width(char32_t codepoint) noexcept;
 i32 text_width(std::string_view text) noexcept;
 
+/// Replaces terminal control characters and invalid UTF-8 with U+FFFD. Plain
+/// redirected output may preserve newline, carriage return, and tab as layout
+/// controls; frame cell content never does.
+std::string sanitize_terminal_text(std::string_view text, bool preserve_layout_controls = false);
+
 /// Encodes a complete frame using cursor-addressed VT output. The encoder
 /// always restores a visible cursor when the frame requests one.
 std::string encode_frame(const Frame &frame);

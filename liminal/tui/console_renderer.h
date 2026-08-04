@@ -15,7 +15,8 @@ namespace liminal::tui {
 /// Sole output boundary. Interactive sessions render application-owned full
 /// frames; redirected sessions retain append-only plain output.
 struct ConsoleRenderer {
-    explicit ConsoleRenderer(lighter::TerminalSession *terminal = nullptr) : terminal(terminal) {}
+    explicit ConsoleRenderer(lighter::TerminalSession *terminal = nullptr, bool mirror_plain_output = false)
+        : terminal(terminal), mirror_plain_output(mirror_plain_output) {}
 
     lighter::Error write(std::string_view text);
     lighter::Error render(const Event &event);
@@ -36,6 +37,7 @@ struct ConsoleRenderer {
     std::string take_prompt();
 
     lighter::TerminalSession *terminal;
+    bool mirror_plain_output = false;
     SessionScreen screen;
 };
 

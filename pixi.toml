@@ -15,7 +15,9 @@ test-unit = "xmake test"
 test-integration = { cmd = "python -m pytest tests/integration -v", depends-on = [
   "build",
 ] }
-test-all = { depends-on = ["test-unit", "test-integration"] }
+test-all = { cmd = "xmake test && python -m pytest tests/integration -v", depends-on = [
+  "build",
+] }
 
 [dependencies]
 python = ">=3.14"

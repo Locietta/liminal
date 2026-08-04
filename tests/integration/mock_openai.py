@@ -14,6 +14,7 @@ All assertions record into state["errors"]; auth is a hardcoded fake.
 """
 
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 API_KEY = "test-key"
@@ -26,7 +27,9 @@ def sse(events):
     ).encode()
 
 
-def make_server(port=0, compact_404=False, models_status=200, models=None):
+def make_server(
+    port=0, compact_404=False, models_status=200, models=None, chunk_delay=0
+):
     """Returns (server, state). state: calls, log[], errors[]."""
     models = models or ["test-model", "discovered-openai-model"]
     state = {
@@ -101,6 +104,8 @@ def make_server(port=0, compact_404=False, models_status=200, models=None):
                 for i in range(0, len(data), chunk_size):
                     self.wfile.write(data[i : i + chunk_size])
                     self.wfile.flush()
+                    if chunk_delay:
+                        time.sleep(chunk_delay)
             else:
                 self.wfile.write(data)
 

@@ -12,6 +12,8 @@ namespace {
 
 bool in_range(char32_t value, char32_t first, char32_t last) noexcept { return value >= first && value <= last; }
 
+bool terminal_control(char32_t value) noexcept { return value < 0x20 || in_range(value, 0x7f, 0x9f); }
+
 bool combining(char32_t value) noexcept {
     return in_range(value, 0x0300, 0x036f) || in_range(value, 0x1ab0, 0x1aff) || in_range(value, 0x1dc0, 0x1dff) ||
            in_range(value, 0x20d0, 0x20ff) || in_range(value, 0xfe00, 0xfe0f) || in_range(value, 0xfe20, 0xfe2f) || value == 0x200d;
@@ -35,6 +37,8 @@ std::string_view style_sequence(Style style) {
     return "\x1b[0m";
 }
 
+void append_safe_cell_text(std::string &output, std::string_view text) { output += sanitize_terminal_text(text); }
+
 } // namespace
 
 Surface::Surface(i32 columns, i32 rows)
@@ -48,9 +52,13 @@ i32 Surface::write(i32 row, i32 column, std::string_view text, Style style) {
     usize offset = 0;
     while (offset < text.size()) {
         auto decoded = lighter::encoding::utf8::decode_one(text.substr(offset));
-        const auto encoded = decoded.status == lighter::encoding::utf8::DecodeStatus::OK ? text.substr(offset, decoded.size) :
-                                                                                           lighter::encoding::utf8::k_replacement;
+        auto encoded = decoded.status == lighter::encoding::utf8::DecodeStatus::OK ? text.substr(offset, decoded.size) :
+                                                                                     lighter::encoding::utf8::k_replacement;
         offset += decoded.size;
+        if (terminal_control(decoded.codepoint)) {
+            decoded.codepoint = 0xfffd;
+            encoded = lighter::encoding::utf8::k_replacement;
+        }
         const auto width = cell_width(decoded.codepoint);
         if (width == 0) {
             if (current > 0 && current <= columns) {
@@ -87,7 +95,8 @@ std::string Surface::row_text(i32 row) const {
 }
 
 i32 cell_width(char32_t codepoint) noexcept {
-    if (codepoint == 0 || codepoint < 0x20 || in_range(codepoint, 0x7f, 0x9f) || combining(codepoint)) return 0;
+    if (terminal_control(codepoint)) return 1;
+    if (combining(codepoint)) return 0;
     return wide(codepoint) ? 2 : 1;
 }
 
@@ -102,6 +111,23 @@ i32 text_width(std::string_view text) noexcept {
     return width;
 }
 
+std::string sanitize_terminal_text(std::string_view text, bool preserve_layout_controls) {
+    std::string output;
+    output.reserve(text.size());
+    usize offset = 0;
+    while (offset < text.size()) {
+        const auto decoded = lighter::encoding::utf8::decode_one(text.substr(offset));
+        const auto encoded = decoded.status == lighter::encoding::utf8::DecodeStatus::OK ? text.substr(offset, decoded.size) :
+                                                                                           lighter::encoding::utf8::k_replacement;
+        offset += decoded.size;
+        const bool layout_control = decoded.codepoint == '\n' || decoded.codepoint == '\r' || decoded.codepoint == '\t';
+        output += terminal_control(decoded.codepoint) && !(preserve_layout_controls && layout_control) ?
+                      lighter::encoding::utf8::k_replacement :
+                      encoded;
+    }
+    return output;
+}
+
 std::string encode_frame(const Frame &frame) {
     std::string output = "\x1b[?25l\x1b[H";
     Style active = Style::NORMAL;
@@ -114,7 +140,7 @@ std::string encode_frame(const Frame &frame) {
                 output += style_sequence(cell.style);
                 active = cell.style;
             }
-            output += cell.text;
+            append_safe_cell_text(output, cell.text);
         }
         if (row + 1 < frame.surface.rows) output += "\r\n";
     }

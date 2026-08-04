@@ -181,6 +181,16 @@ void check_windows_console_restoration() {
         require(opened.has_value(), "Windows terminal session could not be opened");
         auto session = *std::move(opened);
         require(session.active(), "Windows terminal session must become active");
+        require(!session.suspend(), "Windows terminal session could not suspend");
+        DWORD suspended_input_mode = 0;
+        DWORD suspended_output_mode = 0;
+        require(GetConsoleMode(input, &suspended_input_mode) && GetConsoleMode(output, &suspended_output_mode),
+                "suspended Windows console modes could not be read");
+        require(suspended_input_mode == original_input_mode && suspended_output_mode == original_output_mode,
+                "suspension must restore exact Windows console modes");
+        require(GetConsoleCP() == original_input_codepage && GetConsoleOutputCP() == original_output_codepage,
+                "suspension must restore exact Windows code pages");
+        require(!session.resume() && session.active(), "Windows terminal session could not resume");
     }
 
     DWORD restored_input_mode = 0;

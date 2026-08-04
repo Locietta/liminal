@@ -21,6 +21,7 @@ enum class ControlEventKind : u8 {
     BREAK,
     LOGOFF,
     SHUTDOWN,
+    SUSPEND,
 };
 
 /// True when the current platform can deliver this control event.

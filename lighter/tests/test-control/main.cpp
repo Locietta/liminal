@@ -35,12 +35,14 @@ void check_support_table() {
     require(control_event_supported(ControlEventKind::BREAK), "Windows must support Ctrl+Break");
     require(!control_event_supported(ControlEventKind::LOGOFF), "interactive Windows apps do not receive logoff controls");
     require(!control_event_supported(ControlEventKind::SHUTDOWN), "interactive Windows apps do not receive shutdown controls");
+    require(!control_event_supported(ControlEventKind::SUSPEND), "Windows has no POSIX terminal suspension control");
 #else
     require(control_event_supported(ControlEventKind::TERMINATE), "POSIX must support SIGTERM");
     require(control_event_supported(ControlEventKind::QUIT), "POSIX must support SIGQUIT");
     require(!control_event_supported(ControlEventKind::BREAK), "Ctrl+Break is Windows-only");
     require(!control_event_supported(ControlEventKind::LOGOFF), "logoff is Windows-only");
     require(!control_event_supported(ControlEventKind::SHUTDOWN), "shutdown is Windows-only");
+    require(control_event_supported(ControlEventKind::SUSPEND), "POSIX must support terminal suspension control");
 #endif
     require(enum_name(ControlEventKind::INTERRUPT) == "INTERRUPT", "enum_name must render control events");
 }

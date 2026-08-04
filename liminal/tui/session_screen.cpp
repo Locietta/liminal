@@ -94,30 +94,89 @@ std::vector<LayoutRow> wrap_block(const Block &block, i32 columns) {
     return rows;
 }
 
-std::vector<LayoutRow> layout_transcript(const Transcript &transcript, i32 columns) {
-    std::vector<LayoutRow> rows;
-    for (const auto &block : transcript.blocks) {
-        auto block_rows = wrap_block(block, columns);
-        rows.insert(rows.end(), std::make_move_iterator(block_rows.begin()), std::make_move_iterator(block_rows.end()));
+std::optional<usize> find_block(const Transcript &transcript, u64 id) {
+    if (id > 0 && id <= transcript.blocks.size()) {
+        const auto index = static_cast<usize>(id - 1);
+        if (transcript.blocks[index].id == id) return index;
     }
-    return rows;
+    for (usize index = 0; index < transcript.blocks.size(); ++index) {
+        if (transcript.blocks[index].id == id) return index;
+    }
+    return std::nullopt;
 }
 
-usize find_anchor(const std::vector<LayoutRow> &rows, const ViewportAnchor &anchor) {
-    usize closest = rows.size();
+usize find_anchor_row(const std::vector<LayoutRow> &rows, usize source_offset) {
+    usize closest = 0;
     for (usize index = 0; index < rows.size(); ++index) {
-        if (rows[index].block_id != anchor.block_id) continue;
-        if (rows[index].source_offset > anchor.source_offset) break;
+        if (rows[index].source_offset > source_offset) break;
         closest = index;
     }
-    return closest == rows.size() ? 0 : closest;
+    return closest;
 }
 
-usize viewport_start(const SessionScreen &screen, const std::vector<LayoutRow> &rows) {
+std::vector<LayoutRow> rows_from(const Transcript &transcript, i32 columns, const ViewportAnchor &anchor, usize limit) {
+    std::vector<LayoutRow> result;
+    if (limit == 0) return result;
+    const auto first_block = find_block(transcript, anchor.block_id);
+    if (!first_block) return result;
+
+    for (usize block_index = *first_block; block_index < transcript.blocks.size() && result.size() < limit; ++block_index) {
+        auto rows = wrap_block(transcript.blocks[block_index], columns);
+        const auto first_row = block_index == *first_block ? find_anchor_row(rows, anchor.source_offset) : 0;
+        const auto count = std::min(limit - result.size(), rows.size() - first_row);
+        result.insert(result.end(), std::make_move_iterator(rows.begin() + static_cast<isize>(first_row)),
+                      std::make_move_iterator(rows.begin() + static_cast<isize>(first_row + count)));
+    }
+    return result;
+}
+
+std::vector<LayoutRow> rows_before(const Transcript &transcript, i32 columns, const ViewportAnchor &anchor, usize limit) {
+    std::vector<LayoutRow> result;
+    if (limit == 0) return result;
+    const auto first_block = find_block(transcript, anchor.block_id);
+    if (!first_block) return result;
+
+    auto block_index = *first_block;
+    auto rows = wrap_block(transcript.blocks[block_index], columns);
+    auto end = find_anchor_row(rows, anchor.source_offset);
+    while (true) {
+        const auto count = std::min(limit - result.size(), end);
+        result.insert(result.begin(), std::make_move_iterator(rows.begin() + static_cast<isize>(end - count)),
+                      std::make_move_iterator(rows.begin() + static_cast<isize>(end)));
+        if (result.size() == limit || block_index == 0) break;
+        --block_index;
+        rows = wrap_block(transcript.blocks[block_index], columns);
+        end = rows.size();
+    }
+    return result;
+}
+
+std::vector<LayoutRow> tail_rows(const Transcript &transcript, i32 columns, usize limit) {
+    std::vector<LayoutRow> result;
+    if (limit == 0) return result;
+    for (usize block_index = transcript.blocks.size(); block_index > 0 && result.size() < limit; --block_index) {
+        auto rows = wrap_block(transcript.blocks[block_index - 1], columns);
+        const auto count = std::min(limit - result.size(), rows.size());
+        result.insert(result.begin(), std::make_move_iterator(rows.end() - static_cast<isize>(count)), std::make_move_iterator(rows.end()));
+    }
+    return result;
+}
+
+ViewportAnchor row_anchor(const LayoutRow &row) { return {.block_id = row.block_id, .source_offset = row.source_offset}; }
+
+std::vector<LayoutRow> visible_rows(const SessionScreen &screen) {
     const auto visible = static_cast<usize>(std::max(screen.viewport_rows(), 0));
-    const auto tail = rows.size() > visible ? rows.size() - visible : 0;
-    if (!screen.anchor) return tail;
-    return std::min(find_anchor(rows, *screen.anchor), tail);
+    if (visible == 0) return {};
+    if (!screen.anchor) return tail_rows(screen.transcript, screen.size.columns, visible);
+
+    auto rows = rows_from(screen.transcript, screen.size.columns, *screen.anchor, visible);
+    if (rows.empty()) return tail_rows(screen.transcript, screen.size.columns, visible);
+    if (rows.size() < visible) {
+        auto previous = rows_before(screen.transcript, screen.size.columns, *screen.anchor, visible - rows.size());
+        previous.insert(previous.end(), std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
+        return previous;
+    }
+    return rows;
 }
 
 struct DisplayComposer {
@@ -227,17 +286,31 @@ void SessionScreen::apply(const Event &event) {
 void SessionScreen::add_notice(std::string text) { apply(SessionNotice{.text = trim_notice(std::move(text))}); }
 
 void SessionScreen::scroll(i32 row_delta) {
-    const auto rows = layout_transcript(transcript, size.columns);
-    if (rows.empty() || viewport_rows() <= 0) return;
-    const auto visible = static_cast<usize>(viewport_rows());
-    const auto tail = rows.size() > visible ? rows.size() - visible : 0;
-    const auto current = viewport_start(*this, rows);
-    const auto target = static_cast<usize>(std::clamp<i64>(static_cast<i64>(current) + row_delta, 0, static_cast<i64>(tail)));
-    if (target == tail) {
+    if (row_delta == 0 || viewport_rows() <= 0) return;
+    const auto current_rows = visible_rows(*this);
+    if (current_rows.empty()) return;
+    const auto current = row_anchor(current_rows.front());
+
+    if (row_delta < 0) {
+        const auto distance = static_cast<usize>(-static_cast<i64>(row_delta));
+        auto previous = rows_before(transcript, size.columns, current, distance);
+        if (!previous.empty()) anchor = row_anchor(previous.front());
+        return;
+    }
+
+    const auto distance = static_cast<usize>(row_delta);
+    auto following = rows_from(transcript, size.columns, current, distance + 1);
+    if (following.size() <= distance) {
         follow_tail();
         return;
     }
-    anchor = ViewportAnchor{.block_id = rows[target].block_id, .source_offset = rows[target].source_offset};
+    const auto target = row_anchor(following[distance]);
+    const auto remaining = rows_from(transcript, size.columns, target, static_cast<usize>(viewport_rows()) + 1);
+    if (remaining.size() <= static_cast<usize>(viewport_rows())) {
+        follow_tail();
+        return;
+    }
+    anchor = target;
 }
 
 void SessionScreen::page(i32 direction) { scroll(direction * std::max(viewport_rows() - 1, 1)); }
@@ -262,11 +335,9 @@ Frame SessionScreen::frame() const {
         result.surface.write(0, 0, "liminal  " + selection, Style::EMPHASIS);
     }
 
-    const auto rows = layout_transcript(transcript, size.columns);
-    const auto start = viewport_start(*this, rows);
-    const auto visible = static_cast<usize>(std::max(viewport_rows(), 0));
-    for (usize index = 0; index < visible && start + index < rows.size(); ++index) {
-        const auto &row = rows[start + index];
+    const auto rows = visible_rows(*this);
+    for (usize index = 0; index < rows.size(); ++index) {
+        const auto &row = rows[index];
         result.surface.write(static_cast<i32>(index) + (header ? 1 : 0), 0, row.text, row.style);
     }
 

@@ -26,12 +26,12 @@ namespace lighter {
 
 namespace {
 
-constexpr usize k_control_kind_count = 7;
+constexpr usize k_control_kind_count = 8;
 constexpr usize k_max_control_sources = 8;
 
 constexpr usize kind_index(ControlEventKind kind) noexcept { return static_cast<usize>(kind); }
 
-static_assert(k_control_kind_count == kind_index(ControlEventKind::SHUTDOWN) + 1);
+static_assert(k_control_kind_count == kind_index(ControlEventKind::SUSPEND) + 1);
 static_assert(k_control_kind_count <= 32);
 
 constexpr u32 kind_bit(ControlEventKind kind) noexcept { return u32{1} << kind_index(kind); }
@@ -208,6 +208,7 @@ i32 native_signal(ControlEventKind kind) noexcept {
         case ControlEventKind::BREAK:
         case ControlEventKind::LOGOFF:
         case ControlEventKind::SHUTDOWN: return -1;
+        case ControlEventKind::SUSPEND: return SIGTSTP;
     }
     return -1;
 }
@@ -218,6 +219,7 @@ std::optional<ControlEventKind> from_posix_signal(i32 value) noexcept {
         case SIGTERM: return ControlEventKind::TERMINATE;
         case SIGHUP: return ControlEventKind::HANGUP;
         case SIGQUIT: return ControlEventKind::QUIT;
+        case SIGTSTP: return ControlEventKind::SUSPEND;
         default: return std::nullopt;
     }
 }
@@ -368,7 +370,7 @@ bool control_event_supported(ControlEventKind kind) noexcept {
     return kind == ControlEventKind::INTERRUPT || kind == ControlEventKind::HANGUP || kind == ControlEventKind::BREAK;
 #else
     return kind == ControlEventKind::INTERRUPT || kind == ControlEventKind::TERMINATE || kind == ControlEventKind::HANGUP ||
-           kind == ControlEventKind::QUIT;
+           kind == ControlEventKind::QUIT || kind == ControlEventKind::SUSPEND;
 #endif
 }
 

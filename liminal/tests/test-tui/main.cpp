@@ -39,6 +39,20 @@ void check_surface_cells_and_encoding() {
     require(encoded.starts_with("\x1b[?25l\x1b[H"), "frame must start from a hidden cursor at terminal home");
     require(encoded.contains("\x1b[2K"), "frame must clear every owned row");
     require(encoded.ends_with("\x1b[1;4H\x1b[?25h"), "frame must restore the requested visible cursor");
+
+    tui::Surface untrusted(12, 1);
+    untrusted.write(0, 0, "safe\x1b[?1049l");
+    const tui::Frame safe_frame{.surface = std::move(untrusted)};
+    const auto safe_encoded = tui::encode_frame(safe_frame);
+    require(!safe_encoded.contains("safe\x1b[?1049l"), "untrusted text must not inject VT sequences into a frame");
+    require(safe_frame.surface.row_text(0).contains("safe\xef\xbf\xbd[?1049l"),
+            "terminal controls must remain visible as replacement characters");
+
+    tui::Frame forged{.surface = tui::Surface(4, 1)};
+    forged.surface.cells[0].text = "X\x1b[2J";
+    require(!tui::encode_frame(forged).contains("X\x1b[2J"), "the frame encoder must defend against directly forged cell text");
+    require(tui::sanitize_terminal_text("line\n\x1b[2J", true) == "line\n\xef\xbf\xbd[2J",
+            "plain output must preserve layout while replacing terminal controls");
 }
 
 void check_composer_editing() {

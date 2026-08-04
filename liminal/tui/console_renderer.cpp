@@ -7,42 +7,56 @@
 
 namespace liminal::tui {
 
-lighter::Error ConsoleRenderer::write(std::string_view text) {
-    if (terminal) {
-        return terminal->write(text);
-    }
+namespace {
+
+std::string plain_text(std::string_view text) { return sanitize_terminal_text(text, true); }
+
+lighter::Error write_stdout(std::string_view text) {
     while (!text.empty()) {
         const auto written = std::fwrite(text.data(), 1, text.size(), stdout);
-        if (written == 0) {
-            return lighter::Error::k_io_error;
-        }
+        if (written == 0) return lighter::Error::k_io_error;
         text.remove_prefix(written);
     }
     return {};
 }
 
-lighter::Error ConsoleRenderer::render(const Event &event) {
-    if (terminal) {
-        screen.apply(event);
-        return redraw();
-    }
+lighter::Error render_plain(const Event &event) {
     return std::visit(
-        [this](const auto &value) -> lighter::Error {
+        [](const auto &value) -> lighter::Error {
             using T = std::remove_cvref_t<decltype(value)>;
             if constexpr (std::same_as<T, AssistantTextDelta>) {
-                return write(value.text);
+                return write_stdout(plain_text(value.text));
             } else if constexpr (std::same_as<T, ToolStarted>) {
-                return write("\n[running tool: " + value.name + "]\n");
+                return write_stdout("\n[running tool: " + plain_text(value.name) + "]\n");
             } else if constexpr (std::same_as<T, TurnCompleted>) {
-                return write("\n");
+                return write_stdout("\n");
             } else if constexpr (std::same_as<T, TurnCancelled>) {
-                return write("\n[turn cancelled; discarded from history - command side effects may remain]\n");
+                return write_stdout("\n[turn cancelled; discarded from history - command side effects may remain]\n");
             } else if constexpr (std::same_as<T, TurnFailed>) {
-                return write("\n[error: " + value.message + "]\n");
+                return write_stdout("\n[error: " + plain_text(value.message) + "]\n");
             }
             return {};
         },
         event);
+}
+
+} // namespace
+
+lighter::Error ConsoleRenderer::write(std::string_view text) {
+    const auto safe = plain_text(text);
+    if (terminal) {
+        return terminal->write(safe);
+    }
+    return write_stdout(safe);
+}
+
+lighter::Error ConsoleRenderer::render(const Event &event) {
+    if (terminal) {
+        screen.apply(event);
+        if (auto error = redraw()) return error;
+        return mirror_plain_output ? render_plain(event) : lighter::Error{};
+    }
+    return render_plain(event);
 }
 
 lighter::Error ConsoleRenderer::banner(std::string_view model, const std::optional<std::string> &effort) {
@@ -51,31 +65,34 @@ lighter::Error ConsoleRenderer::banner(std::string_view model, const std::option
         if (!current_size) return current_size.error();
         screen.resize(*current_size);
         screen.set_model(model, effort);
-        return redraw();
+        if (auto error = redraw()) return error;
+        if (!mirror_plain_output) return {};
     }
-    auto selection = std::string(model);
+    auto selection = plain_text(model);
     if (effort) {
-        selection += "@" + *effort;
+        selection += "@" + plain_text(*effort);
     }
-    return write("liminal - model: " + selection + " (tools run unsandboxed with your privileges)\n");
+    return write_stdout("liminal - model: " + selection + " (tools run unsandboxed with your privileges)\n");
 }
 
 lighter::Error ConsoleRenderer::prompt(std::string_view model, const std::optional<std::string> &effort) {
     if (terminal) {
         screen.set_model(model, effort);
-        return redraw();
+        if (auto error = redraw()) return error;
+        if (!mirror_plain_output) return {};
     }
-    auto selection = std::string(model);
+    auto selection = plain_text(model);
     if (effort) {
-        selection += "@" + *effort;
+        selection += "@" + plain_text(*effort);
     }
-    return write("\n" + selection + " > ");
+    return write_stdout("\n" + selection + " > ");
 }
 
 lighter::Error ConsoleRenderer::notice(std::string_view text) {
     if (!terminal) return write(text);
     screen.add_notice(std::string(text));
-    return redraw();
+    if (auto error = redraw()) return error;
+    return mirror_plain_output ? write_stdout(plain_text(text)) : lighter::Error{};
 }
 
 lighter::Error ConsoleRenderer::insert(std::string_view text) {
