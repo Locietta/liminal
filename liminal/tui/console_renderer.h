@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -34,6 +35,8 @@ struct ConsoleRenderer {
     lighter::Error page(i32 direction);
     lighter::Error resize(lighter::TerminalSize size);
     lighter::Error redraw();
+    lighter::Error flush();
+    void set_redraw_scheduler(std::copyable_function<void()> scheduler);
     lighter::Error clear_prompt();
     bool prompt_empty() const noexcept;
     std::string take_prompt();
@@ -41,6 +44,9 @@ struct ConsoleRenderer {
     lighter::TerminalSession *terminal;
     bool mirror_plain_output = false;
     SessionScreen screen;
+    std::optional<Frame> previous_frame;
+    std::copyable_function<void()> redraw_scheduler;
+    bool redraw_pending = false;
 };
 
 } // namespace liminal::tui

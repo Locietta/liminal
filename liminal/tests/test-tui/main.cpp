@@ -6,6 +6,7 @@
 #include <lighter/types.hpp>
 
 #include <liminal/event.h>
+#include <liminal/tui/headless.h>
 #include <liminal/tui/session_screen.h>
 #include <liminal/tui/surface.h>
 
@@ -33,12 +34,30 @@ void check_surface_cells_and_encoding() {
     require(surface.row_text(0) == "A中B", "continuation cells must not duplicate wide glyphs");
     require(surface.cells[2].continuation, "wide glyphs must reserve a continuation cell");
     require(tui::text_width("A中B") == 4, "text width must match surface placement");
+    require(tui::text_width("👩‍💻") == 2, "emoji ZWJ sequence must occupy one wide grapheme");
+    require(tui::text_width("🇨🇳") == 2, "regional-indicator pair must occupy one wide grapheme");
+    require(tui::text_width("✔️") == 2, "emoji variation selector must determine cluster width");
+
+    tui::Surface graphemes(4, 1);
+    require(graphemes.write(0, 0, "👩‍💻X") == 3, "surface must place whole grapheme clusters");
+    require(graphemes.cells[1].continuation, "wide grapheme must reserve its continuation cell");
+    require(graphemes.row_text(0) == "👩‍💻X", "surface must retain the complete grapheme text");
+    graphemes.write(0, 1, "B");
+    require(!graphemes.cells[1].continuation && graphemes.row_text(0) == " BX",
+            "overwriting a continuation cell must clear its complete previous grapheme");
 
     tui::Frame frame{.surface = std::move(surface), .cursor = {.row = 0, .column = 3, .visible = true}};
     const auto encoded = tui::encode_frame(frame);
     require(encoded.starts_with("\x1b[?25l\x1b[H"), "frame must start from a hidden cursor at terminal home");
     require(encoded.contains("\x1b[2K"), "frame must clear every owned row");
     require(encoded.ends_with("\x1b[1;4H\x1b[?25h"), "frame must restore the requested visible cursor");
+    require(tui::encode_frame_diff(&frame, frame).empty(), "an unchanged frame must not emit terminal operations");
+
+    auto changed = frame;
+    changed.surface.write(0, 3, "C");
+    const auto diff = tui::encode_frame_diff(&frame, changed);
+    require(diff.starts_with("\x1b[?25l\x1b[1;1H"), "a row diff must address only the changed row");
+    require(!diff.contains("\x1b[H"), "a same-sized diff must not redraw from terminal home");
 
     tui::Surface untrusted(12, 1);
     untrusted.write(0, 0, "safe\x1b[?1049l");
@@ -68,7 +87,12 @@ void check_composer_editing() {
     composer.insert("中");
     composer.move_left();
     composer.move_right();
-    require(composer.cursor == composer.text.size(), "cursor movement must preserve UTF-8 code-point boundaries");
+    require(composer.cursor == composer.text.size(), "cursor movement must preserve grapheme boundaries");
+    composer.insert("👩‍💻");
+    composer.move_left();
+    require(composer.cursor == std::string("a中").size(), "cursor movement must treat an emoji sequence as one grapheme");
+    composer.erase();
+    require(composer.text == "a中", "delete must remove a complete grapheme cluster");
     composer.insert("\nnext");
     require(composer.take() == "a中\nnext", "pasted newlines must remain part of one submitted prompt");
     require(composer.text.empty() && composer.cursor == 0, "submission must reset composer state");
@@ -107,16 +131,37 @@ void check_scroll_resize_and_unread_state() {
     const auto resized = screen.frame();
     require(resized.surface.row_text(6).starts_with("history"), "resize must deterministically reflow browsing status");
     require(tui::encode_frame(resized) == tui::encode_frame(screen.frame()), "unchanged state must produce an identical frame");
+    const auto diagnostics = screen.layout_diagnostics();
+    require(diagnostics.cache_hits > 0 && diagnostics.cached_blocks > 0, "repeated frames must reuse stable block layout");
 
     screen.follow_tail();
     require(!screen.anchor && !screen.unread, "returning to tail must clear browsing and unread state");
     require(frame_text(screen.frame()).contains("line-9"), "returning to tail must reveal the newest output");
 }
 
+void check_headless_virtual_time_and_snapshots() {
+    tui::HeadlessSession session(24, 8, 100);
+    require(session.render_count == 1, "headless creation must capture an initial frame");
+    require(session.apply({.type = "insert", .text = "hello"}).has_value(), "headless input action must apply");
+    require(session.apply({.type = "submit"}).has_value(), "headless submit action must apply");
+    require(session.apply({.type = "assistant_delta", .text = "world"}).has_value(), "headless response action must apply");
+    require(session.render_pending && session.render_count == 1, "same-tick actions must coalesce before the frame deadline");
+    require(session.apply({.type = "advance_time", .milliseconds = 15}).has_value(), "virtual time must advance");
+    require(session.render_count == 1, "a frame must remain pending before its virtual deadline");
+    require(session.apply({.type = "advance_time", .milliseconds = 1}).has_value(), "virtual time must reach the deadline");
+    const auto snapshot = session.inspect();
+    require(!snapshot.render_pending && snapshot.render_count == 2, "deadline must flush one coalesced frame");
+    require(snapshot.blocks.size() == 2 && snapshot.blocks[0].text == "hello" && snapshot.blocks[1].text == "world",
+            "headless snapshots must expose the real transcript reducer state");
+    require(!snapshot.ansi_operations.empty() && !snapshot.cells.empty(), "headless snapshots must expose ANSI operations and cells");
+    require(session.inspect().layout == snapshot.layout, "inspection must not mutate layout diagnostics");
+}
+
 i32 run_all() {
     check_surface_cells_and_encoding();
     check_composer_editing();
     check_scroll_resize_and_unread_state();
+    check_headless_virtual_time_and_snapshots();
     return 0;
 }
 

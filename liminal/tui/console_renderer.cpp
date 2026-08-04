@@ -97,36 +97,43 @@ lighter::Error ConsoleRenderer::notice(std::string_view text) {
 
 lighter::Error ConsoleRenderer::insert(std::string_view text) {
     screen.composer.insert(text);
+    screen.state = SessionState::EDITING;
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::backspace() {
     screen.composer.backspace();
+    screen.state = SessionState::EDITING;
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::erase() {
     screen.composer.erase();
+    screen.state = SessionState::EDITING;
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::move_left() {
     screen.composer.move_left();
+    screen.state = SessionState::EDITING;
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::move_right() {
     screen.composer.move_right();
+    screen.state = SessionState::EDITING;
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::move_home() {
     screen.composer.move_home();
+    screen.state = SessionState::EDITING;
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::move_end() {
     screen.composer.move_end();
+    screen.state = SessionState::EDITING;
     return redraw();
 }
 
@@ -142,11 +149,33 @@ lighter::Error ConsoleRenderer::resize(lighter::TerminalSize size) {
 
 lighter::Error ConsoleRenderer::redraw() {
     if (!terminal) return {};
-    return terminal->write(encode_frame(screen.frame()));
+    if (redraw_scheduler) {
+        if (!redraw_pending) {
+            redraw_pending = true;
+            redraw_scheduler();
+        }
+        return {};
+    }
+    return flush();
 }
+
+lighter::Error ConsoleRenderer::flush() {
+    if (!terminal) return {};
+    redraw_pending = false;
+    auto frame = screen.frame();
+    auto encoded = encode_frame_diff(previous_frame ? &*previous_frame : nullptr, frame);
+    if (!encoded.empty()) {
+        if (auto error = terminal->write(encoded)) return error;
+    }
+    previous_frame = std::move(frame);
+    return {};
+}
+
+void ConsoleRenderer::set_redraw_scheduler(std::copyable_function<void()> scheduler) { redraw_scheduler = std::move(scheduler); }
 
 lighter::Error ConsoleRenderer::clear_prompt() {
     screen.composer.clear();
+    screen.state = SessionState::EDITING;
     return redraw();
 }
 

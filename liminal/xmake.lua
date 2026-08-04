@@ -1,10 +1,10 @@
-add_requires("ngcpp-proxy")
+add_requires("libunicode 0.9.2", "ngcpp-proxy")
 
 target("liminal-core")
     set_kind("static")
     add_files("agent/*.cpp", "model/*.cpp", "provider/*.cpp", "tools/*.cpp", "tui/*.cpp")
     add_deps("lighter")
-    add_packages("ngcpp-proxy", {public = true})
+    add_packages("libunicode", "ngcpp-proxy", {public = true})
 
 target("liminal")
     set_kind("binary")

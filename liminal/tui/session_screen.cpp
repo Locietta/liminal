@@ -7,31 +7,9 @@
 #include <utility>
 #include <vector>
 
-#include <lighter/encoding/utf8.h>
-
 namespace liminal::tui {
 
 namespace {
-
-struct LayoutRow {
-    u64 block_id = 0;
-    usize source_offset = 0;
-    std::string text;
-    Style style = Style::NORMAL;
-};
-
-usize previous_boundary(std::string_view text, usize cursor) {
-    if (cursor == 0) return 0;
-    auto previous = cursor - 1;
-    while (previous > 0 && (static_cast<unsigned char>(text[previous]) & 0xc0) == 0x80) --previous;
-    return previous;
-}
-
-usize next_boundary(std::string_view text, usize cursor) {
-    if (cursor >= text.size()) return text.size();
-    const auto decoded = lighter::encoding::utf8::decode_one(text.substr(cursor));
-    return std::min(text.size(), cursor + decoded.size);
-}
 
 Style block_style(const Block &block) {
     if (block.state == BlockState::FAILED) return Style::FAILURE;
@@ -69,19 +47,17 @@ std::vector<LayoutRow> wrap_block(const Block &block, i32 columns) {
     usize offset = 0;
     while (offset < source.size()) {
         const auto start = offset;
-        const auto decoded = lighter::encoding::utf8::decode_one(std::string_view(source).substr(offset));
-        const auto encoded = decoded.status == lighter::encoding::utf8::DecodeStatus::OK ?
-                                 std::string_view(source).substr(offset, decoded.size) :
-                                 lighter::encoding::utf8::k_replacement;
-        offset += decoded.size;
-        if (decoded.codepoint == '\r') continue;
-        if (decoded.codepoint == '\n') {
+        const auto grapheme = next_grapheme(source, offset);
+        const auto encoded = std::string_view(source).substr(offset, grapheme.size);
+        offset += grapheme.size;
+        if (encoded == "\r") continue;
+        if (encoded == "\n") {
             rows.push_back(std::move(current));
             current = {.block_id = block.id, .source_offset = offset, .style = block_style(block)};
             used = 0;
             continue;
         }
-        const auto cells = std::max(cell_width(decoded.codepoint), 0);
+        const auto cells = std::max(grapheme.width, 0);
         if (cells > 0 && used > 0 && used + cells > width) {
             rows.push_back(std::move(current));
             current = {.block_id = block.id, .source_offset = start, .style = block_style(block)};
@@ -114,14 +90,14 @@ usize find_anchor_row(const std::vector<LayoutRow> &rows, usize source_offset) {
     return closest;
 }
 
-std::vector<LayoutRow> rows_from(const Transcript &transcript, i32 columns, const ViewportAnchor &anchor, usize limit) {
+std::vector<LayoutRow> rows_from(const SessionScreen &screen, const ViewportAnchor &anchor, usize limit) {
     std::vector<LayoutRow> result;
     if (limit == 0) return result;
-    const auto first_block = find_block(transcript, anchor.block_id);
+    const auto first_block = find_block(screen.transcript, anchor.block_id);
     if (!first_block) return result;
 
-    for (usize block_index = *first_block; block_index < transcript.blocks.size() && result.size() < limit; ++block_index) {
-        auto rows = wrap_block(transcript.blocks[block_index], columns);
+    for (usize block_index = *first_block; block_index < screen.transcript.blocks.size() && result.size() < limit; ++block_index) {
+        auto rows = screen.layout_block(screen.transcript.blocks[block_index]);
         const auto first_row = block_index == *first_block ? find_anchor_row(rows, anchor.source_offset) : 0;
         const auto count = std::min(limit - result.size(), rows.size() - first_row);
         result.insert(result.end(), std::make_move_iterator(rows.begin() + static_cast<isize>(first_row)),
@@ -130,14 +106,14 @@ std::vector<LayoutRow> rows_from(const Transcript &transcript, i32 columns, cons
     return result;
 }
 
-std::vector<LayoutRow> rows_before(const Transcript &transcript, i32 columns, const ViewportAnchor &anchor, usize limit) {
+std::vector<LayoutRow> rows_before(const SessionScreen &screen, const ViewportAnchor &anchor, usize limit) {
     std::vector<LayoutRow> result;
     if (limit == 0) return result;
-    const auto first_block = find_block(transcript, anchor.block_id);
+    const auto first_block = find_block(screen.transcript, anchor.block_id);
     if (!first_block) return result;
 
     auto block_index = *first_block;
-    auto rows = wrap_block(transcript.blocks[block_index], columns);
+    auto rows = screen.layout_block(screen.transcript.blocks[block_index]);
     auto end = find_anchor_row(rows, anchor.source_offset);
     while (true) {
         const auto count = std::min(limit - result.size(), end);
@@ -145,17 +121,17 @@ std::vector<LayoutRow> rows_before(const Transcript &transcript, i32 columns, co
                       std::make_move_iterator(rows.begin() + static_cast<isize>(end)));
         if (result.size() == limit || block_index == 0) break;
         --block_index;
-        rows = wrap_block(transcript.blocks[block_index], columns);
+        rows = screen.layout_block(screen.transcript.blocks[block_index]);
         end = rows.size();
     }
     return result;
 }
 
-std::vector<LayoutRow> tail_rows(const Transcript &transcript, i32 columns, usize limit) {
+std::vector<LayoutRow> tail_rows(const SessionScreen &screen, usize limit) {
     std::vector<LayoutRow> result;
     if (limit == 0) return result;
-    for (usize block_index = transcript.blocks.size(); block_index > 0 && result.size() < limit; --block_index) {
-        auto rows = wrap_block(transcript.blocks[block_index - 1], columns);
+    for (usize block_index = screen.transcript.blocks.size(); block_index > 0 && result.size() < limit; --block_index) {
+        auto rows = screen.layout_block(screen.transcript.blocks[block_index - 1]);
         const auto count = std::min(limit - result.size(), rows.size());
         result.insert(result.begin(), std::make_move_iterator(rows.end() - static_cast<isize>(count)), std::make_move_iterator(rows.end()));
     }
@@ -167,12 +143,12 @@ ViewportAnchor row_anchor(const LayoutRow &row) { return {.block_id = row.block_
 std::vector<LayoutRow> visible_rows(const SessionScreen &screen) {
     const auto visible = static_cast<usize>(std::max(screen.viewport_rows(), 0));
     if (visible == 0) return {};
-    if (!screen.anchor) return tail_rows(screen.transcript, screen.size.columns, visible);
+    if (!screen.anchor) return tail_rows(screen, visible);
 
-    auto rows = rows_from(screen.transcript, screen.size.columns, *screen.anchor, visible);
-    if (rows.empty()) return tail_rows(screen.transcript, screen.size.columns, visible);
+    auto rows = rows_from(screen, *screen.anchor, visible);
+    if (rows.empty()) return tail_rows(screen, visible);
     if (rows.size() < visible) {
-        auto previous = rows_before(screen.transcript, screen.size.columns, *screen.anchor, visible - rows.size());
+        auto previous = rows_before(screen, *screen.anchor, visible - rows.size());
         previous.insert(previous.end(), std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
         return previous;
     }
@@ -189,15 +165,13 @@ DisplayComposer display_composer(const Composer &composer) {
     usize offset = 0;
     while (offset < composer.text.size()) {
         if (offset == composer.cursor) display.cursor_column = text_width(display.text);
-        const auto decoded = lighter::encoding::utf8::decode_one(std::string_view(composer.text).substr(offset));
-        const auto encoded = decoded.status == lighter::encoding::utf8::DecodeStatus::OK ?
-                                 std::string_view(composer.text).substr(offset, decoded.size) :
-                                 lighter::encoding::utf8::k_replacement;
-        offset += decoded.size;
-        if (decoded.codepoint == '\r') continue;
-        if (decoded.codepoint == '\n') {
+        const auto grapheme = next_grapheme(composer.text, offset);
+        const auto encoded = std::string_view(composer.text).substr(offset, grapheme.size);
+        offset += grapheme.size;
+        if (encoded == "\r") continue;
+        if (encoded == "\n") {
             display.text += "\\n";
-        } else if (decoded.codepoint == '\t') {
+        } else if (encoded == "\t") {
             display.text += "\\t";
         } else {
             display.text += encoded;
@@ -212,11 +186,10 @@ std::string cell_slice(std::string_view text, i32 first, i32 width) {
     i32 column = 0;
     usize offset = 0;
     while (offset < text.size() && text_width(output) < width) {
-        const auto decoded = lighter::encoding::utf8::decode_one(text.substr(offset));
-        const auto encoded = decoded.status == lighter::encoding::utf8::DecodeStatus::OK ? text.substr(offset, decoded.size) :
-                                                                                           lighter::encoding::utf8::k_replacement;
-        offset += decoded.size;
-        const auto cells = cell_width(decoded.codepoint);
+        const auto grapheme = next_grapheme(text, offset);
+        const auto encoded = text.substr(offset, grapheme.size);
+        offset += grapheme.size;
+        const auto cells = grapheme.width;
         if (cells == 0) {
             if (column >= first && !output.empty()) output += encoded;
             continue;
@@ -245,19 +218,19 @@ void Composer::insert(std::string_view value) {
 }
 
 void Composer::backspace() {
-    const auto previous = previous_boundary(text, cursor);
+    const auto previous = previous_grapheme_boundary(text, cursor);
     text.erase(previous, cursor - previous);
     cursor = previous;
 }
 
 void Composer::erase() {
-    const auto next = next_boundary(text, cursor);
+    const auto next = next_grapheme_boundary(text, cursor);
     text.erase(cursor, next - cursor);
 }
 
-void Composer::move_left() { cursor = previous_boundary(text, cursor); }
+void Composer::move_left() { cursor = previous_grapheme_boundary(text, cursor); }
 
-void Composer::move_right() { cursor = next_boundary(text, cursor); }
+void Composer::move_right() { cursor = next_grapheme_boundary(text, cursor); }
 
 void Composer::move_home() noexcept { cursor = 0; }
 
@@ -285,10 +258,45 @@ void SessionScreen::set_model(std::string_view name, const std::optional<std::st
 
 void SessionScreen::apply(const Event &event) {
     transcript.apply(event);
+    if (std::holds_alternative<PromptSubmitted>(event)) state = SessionState::WAITING;
+    if (std::holds_alternative<AssistantTextDelta>(event)) state = SessionState::STREAMING;
+    if (std::holds_alternative<ToolStarted>(event)) state = SessionState::RUNNING_TOOLS;
+    if (std::holds_alternative<ToolCompleted>(event)) state = SessionState::STREAMING;
+    if (std::holds_alternative<TurnCompleted>(event)) state = SessionState::COMPLETED;
+    if (std::holds_alternative<TurnCancelled>(event)) state = SessionState::CANCELLED;
+    if (std::holds_alternative<TurnFailed>(event)) state = SessionState::FAILED;
     if (anchor) unread = true;
 }
 
 void SessionScreen::add_notice(std::string text) { apply(SessionNotice{.text = trim_notice(std::move(text))}); }
+
+std::vector<LayoutRow> SessionScreen::layout_block(const Block &block) const {
+    const bool stable = block.state != BlockState::STREAMING && block.state != BlockState::RUNNING;
+    if (stable) {
+        const auto cached = layout_cache.find(block.id);
+        if (cached != layout_cache.end() && cached->second.columns == size.columns && cached->second.kind == block.kind &&
+            cached->second.state == block.state && cached->second.text == block.text) {
+            ++diagnostics.cache_hits;
+            return cached->second.rows;
+        }
+    }
+
+    ++diagnostics.cache_misses;
+    ++diagnostics.blocks_laid_out;
+    auto rows = wrap_block(block, size.columns);
+    if (stable) {
+        layout_cache.insert_or_assign(
+            block.id,
+            CachedBlockLayout{.columns = size.columns, .kind = block.kind, .state = block.state, .text = block.text, .rows = rows});
+    }
+    return rows;
+}
+
+LayoutDiagnostics SessionScreen::layout_diagnostics() const noexcept {
+    auto result = diagnostics;
+    result.cached_blocks = layout_cache.size();
+    return result;
+}
 
 void SessionScreen::scroll(i32 row_delta) {
     if (row_delta == 0 || viewport_rows() <= 0) return;
@@ -298,19 +306,19 @@ void SessionScreen::scroll(i32 row_delta) {
 
     if (row_delta < 0) {
         const auto distance = static_cast<usize>(-static_cast<i64>(row_delta));
-        auto previous = rows_before(transcript, size.columns, current, distance);
+        auto previous = rows_before(*this, current, distance);
         if (!previous.empty()) anchor = row_anchor(previous.front());
         return;
     }
 
     const auto distance = static_cast<usize>(row_delta);
-    auto following = rows_from(transcript, size.columns, current, distance + 1);
+    auto following = rows_from(*this, current, distance + 1);
     if (following.size() <= distance) {
         follow_tail();
         return;
     }
     const auto target = row_anchor(following[distance]);
-    const auto remaining = rows_from(transcript, size.columns, target, static_cast<usize>(viewport_rows()) + 1);
+    const auto remaining = rows_from(*this, target, static_cast<usize>(viewport_rows()) + 1);
     if (remaining.size() <= static_cast<usize>(viewport_rows())) {
         follow_tail();
         return;

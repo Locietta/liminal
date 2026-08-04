@@ -17,6 +17,7 @@
 #include <lighter/async/runtime/sync.h>
 #include <lighter/async/runtime/when.h>
 #include <lighter/async/vocab/cancellation.h>
+#include <lighter/async/io/watcher.h>
 
 #include "liminal/tui/console_renderer.h"
 
@@ -159,6 +160,18 @@ Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &render
         if (event->kind == TerminalEventKind::CLOSED) co_return 0;
         if (auto error = apply_terminal_event(*event, renderer, prompts)) {
             failure.record("cannot render terminal input", error, control);
+            co_return 1;
+        }
+    }
+}
+
+Task<i32> render_monitor(lighter::Event &requested, ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure) {
+    while (true) {
+        co_await requested.wait();
+        co_await lighter::yield();
+        requested.reset();
+        if (auto error = renderer.flush()) {
+            failure.record("cannot render coalesced frame", error, control);
             co_return 1;
         }
     }
@@ -428,23 +441,30 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
         } else if (interactive) {
             PromptQueue prompts;
             PromptReader reader{.prompts = &prompts};
+            lighter::Event render_requested;
+            renderer.set_redraw_scheduler([&render_requested] { render_requested.set(); });
 #ifndef _WIN32
             auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
                                           signal_monitor(interrupts, renderer, control, failure),
                                           terminal_input_loop(terminal, renderer, prompts, control, failure),
+                                          render_monitor(render_requested, renderer, control, failure),
                                           suspend_monitor(suspend_controls, terminal, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
             if (raced.index() == 3) exit_code = std::get<3>(raced);
+            if (raced.index() == 4) exit_code = std::get<4>(raced);
 #else
             auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
                                           signal_monitor(interrupts, renderer, control, failure),
-                                          terminal_input_loop(terminal, renderer, prompts, control, failure));
+                                          terminal_input_loop(terminal, renderer, prompts, control, failure),
+                                          render_monitor(render_requested, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
+            if (raced.index() == 3) exit_code = std::get<3>(raced);
 #endif
+            renderer.set_redraw_scheduler({});
         } else {
             PromptReader reader{.input = &pipe};
             auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),

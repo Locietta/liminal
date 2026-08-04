@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <string>
 #include <string_view>
+#include <utility>
+
+#include <libunicode/grapheme_segmenter.h>
+#include <libunicode/width.h>
 
 #include <lighter/encoding/utf8.h>
 
@@ -13,18 +17,6 @@ namespace {
 bool in_range(char32_t value, char32_t first, char32_t last) noexcept { return value >= first && value <= last; }
 
 bool terminal_control(char32_t value) noexcept { return value < 0x20 || in_range(value, 0x7f, 0x9f); }
-
-bool combining(char32_t value) noexcept {
-    return in_range(value, 0x0300, 0x036f) || in_range(value, 0x1ab0, 0x1aff) || in_range(value, 0x1dc0, 0x1dff) ||
-           in_range(value, 0x20d0, 0x20ff) || in_range(value, 0xfe00, 0xfe0f) || in_range(value, 0xfe20, 0xfe2f) || value == 0x200d;
-}
-
-bool wide(char32_t value) noexcept {
-    return in_range(value, 0x1100, 0x115f) || value == 0x2329 || value == 0x232a || in_range(value, 0x2e80, 0xa4cf) ||
-           in_range(value, 0xac00, 0xd7a3) || in_range(value, 0xf900, 0xfaff) || in_range(value, 0xfe10, 0xfe19) ||
-           in_range(value, 0xfe30, 0xfe6f) || in_range(value, 0xff00, 0xff60) || in_range(value, 0xffe0, 0xffe6) ||
-           in_range(value, 0x1f300, 0x1faff) || in_range(value, 0x20000, 0x3fffd);
-}
 
 std::string_view style_sequence(Style style) {
     switch (style) {
@@ -39,6 +31,36 @@ std::string_view style_sequence(Style style) {
 
 void append_safe_cell_text(std::string &output, std::string_view text) { output += sanitize_terminal_text(text); }
 
+void append_row(std::string &output, const Surface &surface, i32 row) {
+    Style active = Style::NORMAL;
+    output += "\x1b[0m\x1b[2K";
+    for (i32 column = 0; column < surface.columns; ++column) {
+        const auto &cell = surface.cells[static_cast<usize>(row * surface.columns + column)];
+        if (cell.continuation) continue;
+        if (cell.style != active) {
+            output += style_sequence(cell.style);
+            active = cell.style;
+        }
+        append_safe_cell_text(output, cell.text);
+    }
+}
+
+bool row_equal(const Surface &left, const Surface &right, i32 row) {
+    const auto offset = static_cast<usize>(row * left.columns);
+    return std::equal(left.cells.begin() + static_cast<isize>(offset),
+                      left.cells.begin() + static_cast<isize>(offset + static_cast<usize>(left.columns)),
+                      right.cells.begin() + static_cast<isize>(offset));
+}
+
+void append_cursor(std::string &output, const Frame &frame) {
+    output += "\x1b[0m";
+    if (frame.cursor.visible && frame.surface.rows > 0 && frame.surface.columns > 0) {
+        const auto row = std::clamp(frame.cursor.row, 0, frame.surface.rows - 1);
+        const auto column = std::clamp(frame.cursor.column, 0, frame.surface.columns - 1);
+        output += "\x1b[" + std::to_string(row + 1) + ";" + std::to_string(column + 1) + "H\x1b[?25h";
+    }
+}
+
 } // namespace
 
 Surface::Surface(i32 columns, i32 rows)
@@ -48,18 +70,23 @@ void Surface::clear() { std::ranges::fill(cells, Cell{}); }
 
 i32 Surface::write(i32 row, i32 column, std::string_view text, Style style) {
     if (row < 0 || row >= rows || column >= columns) return column;
+    const auto clear_cluster = [this, row](i32 target) {
+        if (target < 0 || target >= columns) return;
+        auto owner = target;
+        while (owner > 0 && cells[static_cast<usize>(row * columns + owner)].continuation) --owner;
+        cells[static_cast<usize>(row * columns + owner)] = {};
+        for (auto continuation = owner + 1; continuation < columns && cells[static_cast<usize>(row * columns + continuation)].continuation;
+             ++continuation) {
+            cells[static_cast<usize>(row * columns + continuation)] = {};
+        }
+    };
     i32 current = std::max(column, 0);
     usize offset = 0;
     while (offset < text.size()) {
-        auto decoded = lighter::encoding::utf8::decode_one(text.substr(offset));
-        auto encoded = decoded.status == lighter::encoding::utf8::DecodeStatus::OK ? text.substr(offset, decoded.size) :
-                                                                                     lighter::encoding::utf8::k_replacement;
-        offset += decoded.size;
-        if (terminal_control(decoded.codepoint)) {
-            decoded.codepoint = 0xfffd;
-            encoded = lighter::encoding::utf8::k_replacement;
-        }
-        const auto width = cell_width(decoded.codepoint);
+        const auto grapheme = next_grapheme(text, offset);
+        auto encoded = sanitize_terminal_text(text.substr(grapheme.offset, grapheme.size));
+        offset += grapheme.size;
+        const auto width = grapheme.width;
         if (width == 0) {
             if (current > 0 && current <= columns) {
                 auto previous = current - 1;
@@ -73,10 +100,11 @@ i32 Surface::write(i32 row, i32 column, std::string_view text, Style style) {
             continue;
         }
         if (current + width > columns) break;
+        for (i32 target = current; target < current + width; ++target) clear_cluster(target);
         auto &cell = cells[static_cast<usize>(row * columns + current)];
-        cell = {.text = std::string(encoded), .style = style};
-        if (width == 2) {
-            cells[static_cast<usize>(row * columns + current + 1)] = {.text = {}, .style = style, .continuation = true};
+        cell = {.text = std::move(encoded), .style = style};
+        for (i32 continuation = 1; continuation < width; ++continuation) {
+            cells[static_cast<usize>(row * columns + current + continuation)] = {.text = {}, .style = style, .continuation = true};
         }
         current += width;
     }
@@ -96,17 +124,62 @@ std::string Surface::row_text(i32 row) const {
 
 i32 cell_width(char32_t codepoint) noexcept {
     if (terminal_control(codepoint)) return 1;
-    if (combining(codepoint)) return 0;
-    return wide(codepoint) ? 2 : 1;
+    return static_cast<i32>(unicode::width(codepoint));
+}
+
+GraphemeSpan next_grapheme(std::string_view text, usize offset) noexcept {
+    offset = std::min(offset, text.size());
+    if (offset == text.size()) return {.offset = offset};
+
+    const auto first = lighter::encoding::utf8::decode_one(text.substr(offset));
+    if (first.status != lighter::encoding::utf8::DecodeStatus::OK || terminal_control(first.codepoint)) {
+        return {.offset = offset, .size = first.size, .width = 1};
+    }
+
+    unicode::grapheme_segmenter_state state;
+    unicode::grapheme_process_init(first.codepoint, state);
+    unicode::grapheme_cluster_width_accumulator width;
+    width.push(first.codepoint);
+
+    auto end = offset + first.size;
+    while (end < text.size()) {
+        const auto decoded = lighter::encoding::utf8::decode_one(text.substr(end));
+        if (decoded.status != lighter::encoding::utf8::DecodeStatus::OK || terminal_control(decoded.codepoint) ||
+            unicode::grapheme_process_breakable(decoded.codepoint, state)) {
+            break;
+        }
+        width.push(decoded.codepoint);
+        end += decoded.size;
+    }
+    return {.offset = offset, .size = end - offset, .width = static_cast<i32>(width.width())};
+}
+
+usize previous_grapheme_boundary(std::string_view text, usize offset) noexcept {
+    const auto target = std::min(offset, text.size());
+    usize current = 0;
+    usize previous = 0;
+    while (current < target) {
+        previous = current;
+        const auto grapheme = next_grapheme(text, current);
+        current += grapheme.size;
+    }
+    return previous;
+}
+
+usize next_grapheme_boundary(std::string_view text, usize offset) noexcept {
+    const auto start = std::min(offset, text.size());
+    if (start == text.size()) return start;
+    const auto grapheme = next_grapheme(text, start);
+    return start + grapheme.size;
 }
 
 i32 text_width(std::string_view text) noexcept {
     i32 width = 0;
     usize offset = 0;
     while (offset < text.size()) {
-        const auto decoded = lighter::encoding::utf8::decode_one(text.substr(offset));
-        offset += decoded.size;
-        width += cell_width(decoded.codepoint);
+        const auto grapheme = next_grapheme(text, offset);
+        offset += grapheme.size;
+        width += grapheme.width;
     }
     return width;
 }
@@ -130,26 +203,30 @@ std::string sanitize_terminal_text(std::string_view text, bool preserve_layout_c
 
 std::string encode_frame(const Frame &frame) {
     std::string output = "\x1b[?25l\x1b[H";
-    Style active = Style::NORMAL;
     for (i32 row = 0; row < frame.surface.rows; ++row) {
-        output += "\x1b[2K";
-        for (i32 column = 0; column < frame.surface.columns; ++column) {
-            const auto &cell = frame.surface.cells[static_cast<usize>(row * frame.surface.columns + column)];
-            if (cell.continuation) continue;
-            if (cell.style != active) {
-                output += style_sequence(cell.style);
-                active = cell.style;
-            }
-            append_safe_cell_text(output, cell.text);
-        }
+        append_row(output, frame.surface, row);
         if (row + 1 < frame.surface.rows) output += "\r\n";
     }
-    output += "\x1b[0m";
-    if (frame.cursor.visible && frame.surface.rows > 0 && frame.surface.columns > 0) {
-        const auto row = std::clamp(frame.cursor.row, 0, frame.surface.rows - 1);
-        const auto column = std::clamp(frame.cursor.column, 0, frame.surface.columns - 1);
-        output += "\x1b[" + std::to_string(row + 1) + ";" + std::to_string(column + 1) + "H\x1b[?25h";
+    append_cursor(output, frame);
+    return output;
+}
+
+std::string encode_frame_diff(const Frame *previous, const Frame &frame) {
+    if (!previous || previous->surface.columns != frame.surface.columns || previous->surface.rows != frame.surface.rows) {
+        return encode_frame(frame);
     }
+
+    std::string output;
+    for (i32 row = 0; row < frame.surface.rows; ++row) {
+        if (row_equal(previous->surface, frame.surface, row)) continue;
+        if (output.empty()) output += "\x1b[?25l";
+        output += "\x1b[" + std::to_string(row + 1) + ";1H";
+        append_row(output, frame.surface, row);
+    }
+    if (previous->cursor != frame.cursor) {
+        if (output.empty()) output += "\x1b[?25l";
+    }
+    if (!output.empty()) append_cursor(output, frame);
     return output;
 }
 
