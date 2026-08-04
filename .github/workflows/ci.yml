@@ -16,10 +16,11 @@ jobs:
     name: Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # main
-      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+      - uses: actions/checkout@main
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           cache: true
+          cache-write: false
       - run: pixi run format-check
 
   build:
@@ -32,37 +33,42 @@ jobs:
           - name: Linux (gcc)
             os: ubuntu-latest
             cache: ~/.xmake/packages
+            cache-write: true
             configure: xmake f -m releasedbg --sanitizers=n -y
             build: build
             test: test-all
           - name: Windows (mingw)
             os: windows-latest
             cache: ~/AppData/Local/.xmake/packages
+            cache-write: true
             configure: xmake f -m releasedbg --sanitizers=n -y
             build: build
             test: test-all
           - name: Linux release (gcc)
             os: ubuntu-latest
             cache: ~/.xmake/packages
+            cache-write: false
             configure: xmake f -m release --sanitizers=n -y
             build: build
             test: test-all
           - name: Windows release (mingw)
             os: windows-latest
             cache: ~/AppData/Local/.xmake/packages
+            cache-write: false
             configure: xmake f -m release --sanitizers=n -y
             build: build
             test: test-all
           - name: Linux sanitizers (gcc)
             os: ubuntu-latest
             cache: ~/.xmake/packages
+            cache-write: false
             configure: xmake f -m releasedbg --sanitizers=y -y
             build: xmake build -j 2 -y
             test: xmake test -j 2
     steps:
       # xmake/ is a submodule holding the pinned package recipes, the custom
       # package managers and the build rules; without it xmake cannot configure.
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # main
+      - uses: actions/checkout@main
         with:
           submodules: true
 
@@ -71,16 +77,17 @@ jobs:
       # python/pytest for the integration tests. xmake is deliberately NOT a pixi
       # dependency - it writes a global config that the system xmake shares, so a
       # second copy inside the environment would clash with it for no gain.
-      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           cache: true
+          cache-write: ${{ matrix.cache-write }}
 
-      - uses: xmake-io/github-action-setup-xmake@3a1a5dddfc7fa625d9a698738334bf55655a861a # v1
+      - uses: xmake-io/github-action-setup-xmake@v1
 
       # Only the header-only packages (glaze, ...) are built from source; the
       # rest come from the pixi environment.
       - name: Cache xmake packages
-        uses: actions/cache@3edfce9056124e459a23f683a21433670d47daca # main
+        uses: actions/cache@main
         with:
           path: ${{ matrix.cache }}
           key: xmake-${{ runner.os }}-${{ hashFiles('xmake/packages/**/xmake.lua') }}
