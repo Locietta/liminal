@@ -8,6 +8,7 @@
 #include <lighter/async/io/awaiter.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/vocab/error.h>
+#include <lighter/utils/panic.h>
 
 namespace lighter {
 
@@ -166,11 +167,9 @@ static fs::FileStats to_file_stats(const uv_stat_t &s) {
 fs::DirHandle::DirHandle(DirHandle &&other) noexcept : dir(other.dir) { other.dir = nullptr; }
 
 fs::DirHandle &fs::DirHandle::operator=(DirHandle &&other) noexcept {
-    // FIXME: Should we close the existing dir handle if valid?
-    if (this != &other) {
-        dir = other.dir;
-        other.dir = nullptr;
-    }
+    if (this == &other) return *this;
+    lighter::check(!valid(), "cannot overwrite an open directory handle");
+    dir = std::exchange(other.dir, nullptr);
     return *this;
 }
 

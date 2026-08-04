@@ -103,6 +103,8 @@ struct CopyfileOptions {
 struct DirHandle {
     DirHandle() = default;
     DirHandle(DirHandle &&other) noexcept;
+    /// Transfer into an empty destination. Overwriting an open directory is a
+    /// fatal ownership error because closing the native handle is asynchronous.
     DirHandle &operator=(DirHandle &&other) noexcept;
 
     DirHandle(const DirHandle &) = delete;
