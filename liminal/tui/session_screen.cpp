@@ -263,6 +263,11 @@ void Composer::move_home() noexcept { cursor = 0; }
 
 void Composer::move_end() noexcept { cursor = text.size(); }
 
+void Composer::clear() noexcept {
+    text.clear();
+    cursor = 0;
+}
+
 std::string Composer::take() {
     cursor = 0;
     return std::exchange(text, {});

@@ -23,7 +23,10 @@ struct Composer {
     void move_right();
     void move_home() noexcept;
     void move_end() noexcept;
+    void clear() noexcept;
     std::string take();
+
+    bool empty() const noexcept { return text.empty(); }
 
     std::string text;
     usize cursor = 0;

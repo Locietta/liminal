@@ -72,6 +72,11 @@ void check_composer_editing() {
     composer.insert("\nnext");
     require(composer.take() == "a中\nnext", "pasted newlines must remain part of one submitted prompt");
     require(composer.text.empty() && composer.cursor == 0, "submission must reset composer state");
+
+    composer.insert("discard me");
+    composer.move_left();
+    composer.clear();
+    require(composer.empty() && composer.cursor == 0, "clearing must reset composer text and cursor");
 }
 
 void check_scroll_resize_and_unread_state() {

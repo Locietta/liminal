@@ -138,6 +138,36 @@ def read_conpty_until(process, output, marker, timeout):
         output.extend(chunk)
 
 
+def read_conpty_frame_without(process, output, marker, timeout):
+    deadline = time.monotonic() + timeout
+    while marker in output[output.rfind(b"\x1b[H") :]:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"ConPTY frame still contains {marker!r}: {output!r}"
+        chunk = process.read(remaining)
+        assert chunk, f"ConPTY closed before clearing {marker!r}: {output!r}"
+        output.extend(chunk)
+
+
+def read_pty_until(master, output, marker, timeout):
+    deadline = time.monotonic() + timeout
+    while marker not in output:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"{marker!r} did not appear: {output!r}"
+        readable, _, _ = select.select([master], [], [], remaining)
+        assert readable, f"PTY produced no output before {marker!r}: {output!r}"
+        output.extend(os.read(master, 4096))
+
+
+def read_pty_frame_without(master, output, marker, timeout):
+    deadline = time.monotonic() + timeout
+    while marker in output[output.rfind(b"\x1b[H") :]:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"PTY frame still contains {marker!r}: {output!r}"
+        readable, _, _ = select.select([master], [], [], remaining)
+        assert readable, f"PTY produced no frame clearing {marker!r}: {output!r}"
+        output.extend(os.read(master, 4096))
+
+
 def check_conpty_terminal_session(tmp_path, base_url):
     from conpty import ConPtyProcess
 
@@ -220,6 +250,46 @@ def check_conpty_terminal_restores_after_interrupt(tmp_path):
         while chunk := process.read(0.1):
             output.extend(chunk)
         assert output.count(b"\x1b[?1049l") == 1
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(5)
+        process.close()
+
+
+def check_conpty_ctrl_c_routes_by_state(tmp_path, base_url):
+    from conpty import ConPtyProcess
+
+    process = ConPtyProcess(
+        [BINARY],
+        cwd=REPO_ROOT,
+        env=terminal_test_environment(
+            tmp_path, base_url=base_url, api_key=mock_openai.API_KEY
+        ),
+        columns=60,
+        rows=12,
+    )
+    output = bytearray()
+    try:
+        read_conpty_until(process, output, b" > ", 10)
+        process.write(b"inspect\r")
+        read_conpty_until(process, output, b"Let me inspect the repository.", 10)
+        process.write(b"queued")
+        read_conpty_until(process, output, b"queued", 5)
+
+        cleared_at = len(output)
+        process.write(b"\x03")
+        read_conpty_frame_without(process, output, b"queued", 5)
+        assert b"queued" not in output[cleared_at:]
+        assert b"Turn cancelled" not in output[cleared_at:]
+        assert process.poll() is None
+
+        process.write(b"\x03")
+        read_conpty_until(process, output, b"Turn cancelled", 10)
+        assert process.poll() is None
+
+        process.write(b"\x03")
+        assert process.wait(10) == 130
     finally:
         if process.poll() is None:
             process.kill()
@@ -830,6 +900,62 @@ def test_terminal_restores_after_interrupt(tmp_path):
             output.extend(chunk)
 
         assert output.count(b"\x1b[?1049l") == 1
+        assert termios.tcgetattr(slave) == original
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        os.close(master)
+        os.close(slave)
+
+
+def test_ctrl_c_routes_by_ui_state(openai_slow_mock, tmp_path):
+    base_url, _ = openai_slow_mock
+    if os.name == "nt":
+        check_conpty_ctrl_c_routes_by_state(tmp_path, base_url)
+        return
+
+    import fcntl
+    import pty
+    import signal
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 60, 0, 0))
+    original = termios.tcgetattr(slave)
+    process = subprocess.Popen(
+        [str(BINARY)],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=terminal_test_environment(
+            tmp_path, base_url=base_url, api_key=mock_openai.API_KEY
+        ),
+        cwd=REPO_ROOT,
+        close_fds=True,
+    )
+    output = bytearray()
+    try:
+        read_pty_until(master, output, b" > ", 10)
+        os.write(master, b"inspect\r")
+        read_pty_until(master, output, b"Let me inspect the repository.", 10)
+        os.write(master, b"queued")
+        read_pty_until(master, output, b"queued", 5)
+
+        cleared_at = len(output)
+        os.kill(process.pid, signal.SIGINT)
+        read_pty_frame_without(master, output, b"queued", 5)
+        assert b"queued" not in output[cleared_at:]
+        assert b"Turn cancelled" not in output[cleared_at:]
+        assert process.poll() is None
+
+        os.kill(process.pid, signal.SIGINT)
+        read_pty_until(master, output, b"Turn cancelled", 10)
+        assert process.poll() is None
+
+        os.kill(process.pid, signal.SIGINT)
+        assert process.wait(timeout=10) == 130
         assert termios.tcgetattr(slave) == original
     finally:
         if process.poll() is None:

@@ -145,6 +145,13 @@ lighter::Error ConsoleRenderer::redraw() {
     return terminal->write(encode_frame(screen.frame()));
 }
 
+lighter::Error ConsoleRenderer::clear_prompt() {
+    screen.composer.clear();
+    return redraw();
+}
+
+bool ConsoleRenderer::prompt_empty() const noexcept { return screen.composer.empty(); }
+
 std::string ConsoleRenderer::take_prompt() { return screen.composer.take(); }
 
 } // namespace liminal::tui

@@ -34,6 +34,8 @@ struct ConsoleRenderer {
     lighter::Error page(i32 direction);
     lighter::Error resize(lighter::TerminalSize size);
     lighter::Error redraw();
+    lighter::Error clear_prompt();
+    bool prompt_empty() const noexcept;
     std::string take_prompt();
 
     lighter::TerminalSession *terminal;

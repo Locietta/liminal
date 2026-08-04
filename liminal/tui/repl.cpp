@@ -168,19 +168,28 @@ constexpr std::string_view k_default_compact_instructions =
     "Compact the conversation while preserving the user's goals, constraints, decisions, "
     "important tool results, modified files, unresolved issues, and the context needed to continue.";
 
-Task<i32> signal_monitor(InterruptSource &interrupts, TurnControl &control, SessionFailure &failure) {
+Task<i32> signal_monitor(InterruptSource &interrupts, ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure) {
     while (true) {
         auto signal = co_await interrupts.next();
         if (!signal) {
             failure.record("cannot watch process controls", signal.error(), control);
             co_return 1;
         }
-        if (interrupts.interrupt_count() >= 2) {
-            co_return 130;
-        }
-        if (control.active_turn) {
-            control.active_turn->cancel();
-            continue;
+
+        if (*signal == lighter::ControlEventKind::INTERRUPT) {
+            // Match Codex's bottom-pane-first routing: local draft state owns
+            // the press before active work, and only an idle empty session exits.
+            if (!renderer.prompt_empty()) {
+                if (auto error = renderer.clear_prompt()) {
+                    failure.record("cannot clear prompt", error, control);
+                    co_return 1;
+                }
+                continue;
+            }
+            if (control.active_turn) {
+                control.active_turn->cancel();
+                continue;
+            }
         }
         co_return 130;
     }
@@ -420,18 +429,18 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             PromptQueue prompts;
             PromptReader reader{.prompts = &prompts};
 #ifndef _WIN32
-            auto raced =
-                co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure), signal_monitor(interrupts, control, failure),
-                                 terminal_input_loop(terminal, renderer, prompts, control, failure),
-                                 suspend_monitor(suspend_controls, terminal, renderer, control, failure));
+            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
+                                          signal_monitor(interrupts, renderer, control, failure),
+                                          terminal_input_loop(terminal, renderer, prompts, control, failure),
+                                          suspend_monitor(suspend_controls, terminal, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
             if (raced.index() == 3) exit_code = std::get<3>(raced);
 #else
-            auto raced =
-                co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure), signal_monitor(interrupts, control, failure),
-                                 terminal_input_loop(terminal, renderer, prompts, control, failure));
+            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
+                                          signal_monitor(interrupts, renderer, control, failure),
+                                          terminal_input_loop(terminal, renderer, prompts, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
@@ -439,7 +448,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
         } else {
             PromptReader reader{.input = &pipe};
             auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
-                                          signal_monitor(interrupts, control, failure));
+                                          signal_monitor(interrupts, renderer, control, failure));
             exit_code = raced.index() == 0 ? std::get<0>(raced) : std::get<1>(raced);
         }
     }

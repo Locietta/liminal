@@ -71,10 +71,8 @@ void check_key_sequences() {
         TerminalKey key;
     };
     constexpr KeyCase cases[] = {
-        {"\x1b[A", TerminalKey::ARROW_UP},
-        {"\x1b[3~", TerminalKey::DELETE_KEY},
-        {"\x1bOP", TerminalKey::F1},
-        {"\x1b[24~", TerminalKey::F12},
+        {"\x1b[A", TerminalKey::ARROW_UP}, {"\x1b[3~", TerminalKey::DELETE_KEY}, {"\x1bOP", TerminalKey::F1},
+        {"\x1b[[A", TerminalKey::F1},      {"\x1b[24~", TerminalKey::F12},
     };
 
     for (const auto &[encoded, expected] : cases) {
@@ -87,6 +85,43 @@ void check_key_sequences() {
                 "a key sequence split at every byte must decode exactly once");
         require(!decoder.escape_pending(), "a complete key sequence must not retain escape state");
     }
+}
+
+void check_modified_and_unknown_escape_sequences() {
+    struct ModifiedKeyCase {
+        std::string_view encoded;
+        TerminalKey key;
+        TerminalModifiers modifiers;
+    };
+    constexpr ModifiedKeyCase cases[] = {
+        {"\x1b[1;5D", TerminalKey::ARROW_LEFT, TerminalModifiers::CONTROL},
+        {"\x1b[6;4~", TerminalKey::PAGE_DOWN, TerminalModifiers::SHIFT | TerminalModifiers::ALT},
+        {"\x1b[1;9C", TerminalKey::ARROW_RIGHT, TerminalModifiers::SUPER},
+    };
+
+    for (const auto &[encoded, key, modifiers] : cases) {
+        detail::TerminalInputDecoder decoder;
+        std::vector<TerminalEvent> events;
+        for (const char byte : encoded) {
+            feed(decoder, std::string_view(&byte, 1), events);
+        }
+        require(events.size() == 1 && events[0].kind == TerminalEventKind::KEY && events[0].key == key && events[0].modifiers == modifiers,
+                "a modified CSI key split at every byte must retain its key and modifiers");
+    }
+
+    detail::TerminalInputDecoder decoder;
+    std::vector<TerminalEvent> events;
+    for (const auto encoded : {std::string_view("\x1b[42;7z"), std::string_view("\x1bOZ")}) {
+        for (const char byte : encoded) {
+            feed(decoder, std::string_view(&byte, 1), events);
+        }
+        require(events.size() == 1 && events[0].kind == TerminalEventKind::KEY && events[0].key == TerminalKey::UNKNOWN,
+                "an unsupported complete terminal key sequence must be consumed as one unknown key");
+        events.clear();
+    }
+    feed(decoder, "x", events);
+    require(events.size() == 1 && events[0].kind == TerminalEventKind::TEXT && events[0].text == "x",
+            "text following unsupported terminal key sequences must remain intact");
 }
 
 void check_escape_timeout() {
@@ -212,6 +247,7 @@ i32 run_all() {
     check_terminal_basics();
     check_text_and_utf8_chunking();
     check_key_sequences();
+    check_modified_and_unknown_escape_sequences();
     check_escape_timeout();
     check_control_bytes();
     check_paste_chunking();
