@@ -1,0 +1,14 @@
+[mcp_servers.liminal_dev]
+command = "pixi"
+args = ["run", "xmake", "run", "liminal-dev-mcp"]
+cwd = "."
+enabled = true
+required = false
+startup_timeout_sec = 30
+tool_timeout_sec = 30
+enabled_tools = [
+  "session_create",
+  "session_apply",
+  "session_inspect",
+  "session_close",
+]
