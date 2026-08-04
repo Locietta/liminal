@@ -140,9 +140,13 @@ def read_conpty_until(process, output, marker, timeout):
 
 def read_conpty_frame_without(process, output, marker, timeout):
     deadline = time.monotonic() + timeout
-    while marker in output[output.rfind(b"\x1b[H") :]:
+    start = len(output)
+    while True:
+        fresh = output[start:]
+        if b"\x1b[?25l" in fresh and b"\x1b[?25h" in fresh and marker not in fresh:
+            return
         remaining = deadline - time.monotonic()
-        assert remaining > 0, f"ConPTY frame still contains {marker!r}: {output!r}"
+        assert remaining > 0, f"ConPTY diff did not clear {marker!r}: {output!r}"
         chunk = process.read(remaining)
         assert chunk, f"ConPTY closed before clearing {marker!r}: {output!r}"
         output.extend(chunk)
@@ -160,9 +164,13 @@ def read_pty_until(master, output, marker, timeout):
 
 def read_pty_frame_without(master, output, marker, timeout):
     deadline = time.monotonic() + timeout
-    while marker in output[output.rfind(b"\x1b[H") :]:
+    start = len(output)
+    while True:
+        fresh = output[start:]
+        if b"\x1b[?25l" in fresh and b"\x1b[?25h" in fresh and marker not in fresh:
+            return
         remaining = deadline - time.monotonic()
-        assert remaining > 0, f"PTY frame still contains {marker!r}: {output!r}"
+        assert remaining > 0, f"PTY diff did not clear {marker!r}: {output!r}"
         readable, _, _ = select.select([master], [], [], remaining)
         assert readable, f"PTY produced no frame clearing {marker!r}: {output!r}"
         output.extend(os.read(master, 4096))

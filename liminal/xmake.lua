@@ -11,4 +11,9 @@ target("liminal")
     add_files("main.cpp")
     add_deps("liminal-core")
 
+target("liminal-dev-mcp")
+    set_kind("binary")
+    add_files("dev_mcp/main.cpp")
+    add_deps("liminal-core")
+
 includes("tests/xmake.lua")
