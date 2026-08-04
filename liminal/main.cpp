@@ -50,7 +50,12 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
         co_return 1;
     }
 
-    Agent agent(*std::move(initial), tools);
+    provider::History initial_history;
+    if (const char *system = std::getenv("LIMINAL_SYSTEM_PROMPT"); system && *system) {
+        provider::append_system(initial_history, system);
+    }
+    provider::append_developer(initial_history, env_or("LIMINAL_DEVELOPER_PROMPT", "You are a helpful coding assistant."));
+    Agent agent(*std::move(initial), tools, std::move(initial_history));
     co_return co_await tui::run_repl(agent, interrupts, models);
 }
 

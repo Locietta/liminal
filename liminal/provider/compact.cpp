@@ -40,7 +40,8 @@ bool starts_turn(const Item &item) {
 } // namespace
 
 Task<void, Error> local_compact(ProviderView provider, History &history, std::string_view instructions) {
-    if (history.empty()) {
+    const auto instruction_count = instruction_prefix_size(history);
+    if (instruction_count == history.size()) {
         co_return;
     }
 
@@ -49,14 +50,14 @@ Task<void, Error> local_compact(ProviderView provider, History &history, std::st
     // live inside a turn). A single-turn history is summarized wholesale -
     // the caller asked for compaction, an unshrunk transcript would be a
     // silent no-op.
-    usize cut = 0;
+    usize cut = instruction_count;
     for (usize index = history.size(); index-- > 0;) {
         if (starts_turn(history[index])) {
             cut = index;
             break;
         }
     }
-    if (cut == 0) {
+    if (cut == instruction_count) {
         cut = history.size();
     }
 
@@ -86,6 +87,9 @@ Task<void, Error> local_compact(ProviderView provider, History &history, std::st
     }
 
     History compacted;
+    compacted.reserve(instruction_count + 1 + history.size() - cut);
+    compacted.insert(compacted.end(), std::make_move_iterator(history.begin()),
+                     std::make_move_iterator(history.begin() + instruction_count));
     compacted.push_back({.role = Role::USER, .parts = {TextPart{.text = std::string(k_bridge_prefix) + summary}}});
     compacted.insert(compacted.end(), std::make_move_iterator(history.begin() + cut), std::make_move_iterator(history.end()));
     history = std::move(compacted);

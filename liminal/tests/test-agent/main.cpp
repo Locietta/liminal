@@ -84,6 +84,8 @@ void test_successful_turn() {
         .entry = {.provider = "fake", .id = "test"},
     };
     Agent agent(std::move(choice), tools);
+    require(agent.history.size() == 1 && agent.history[0].role == provider::Role::DEVELOPER,
+            "an agent must start with a developer instruction");
 
     std::vector<Event> events;
     EventSink sink = [&events](const Event &event) { events.push_back(event); };
@@ -103,7 +105,7 @@ void test_successful_turn() {
     require(std::holds_alternative<AssistantTextDelta>(events[4]), "continuation text delta is missing");
     require(std::holds_alternative<AssistantSegmentCompleted>(events[5]), "continuation segment completion is missing");
     require(std::holds_alternative<TurnCompleted>(events[6]), "turn completion event is missing");
-    require(agent.history.size() == 4, "transactional provider history has the wrong number of items");
+    require(agent.history.size() == 5, "transactional provider history has the wrong number of items");
 }
 
 void test_tool_call_budget() {
@@ -123,12 +125,22 @@ void test_tool_call_budget() {
 
     require(outcome.has_error() && outcome.error().kind == ErrorKind::TOOL && outcome.error().detail.contains("budget exceeded"),
             "an over-budget provider response must fail before executing tools");
-    require(agent.history.empty(), "an over-budget turn must not commit partial history");
+    require(agent.history.size() == 1 && agent.history[0].role == provider::Role::DEVELOPER,
+            "an over-budget turn must preserve only the instruction prefix");
+}
+
+void test_instruction_prefix() {
+    provider::History history;
+    provider::append_system(history, "platform policy");
+    provider::append_developer(history, "coding policy");
+    provider::append_user(history, "change the project");
+    require(provider::instruction_prefix_size(history) == 2, "system and developer messages must form the instruction prefix");
 }
 
 i32 run_all() {
     test_successful_turn();
     test_tool_call_budget();
+    test_instruction_prefix();
     return 0;
 }
 

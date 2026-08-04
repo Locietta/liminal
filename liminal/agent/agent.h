@@ -13,7 +13,8 @@
 namespace liminal {
 
 struct Agent {
-    Agent(model::Choice model, ToolSet &tools) : model(std::move(model)), tools(&tools) {}
+    Agent(model::Choice model, ToolSet &tools);
+    Agent(model::Choice model, ToolSet &tools, provider::History initial_history);
 
     /// One transactional user turn. Partial UI output is emitted as typed
     /// events while provider history commits only after a terminal response.

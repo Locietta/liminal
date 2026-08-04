@@ -123,6 +123,8 @@ def terminal_test_environment(
     env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
     env["LIMINAL_MODEL"] = "test-model"
     env["LIMINAL_TOOL_MODE"] = "unrestricted"
+    env["LIMINAL_SYSTEM_PROMPT"] = "Test system policy."
+    env["LIMINAL_DEVELOPER_PROMPT"] = "Test developer policy."
     return env
 
 
@@ -331,6 +333,8 @@ def run_liminal(stdin, providers, tmp_path, selector="test-model"):
     env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
     env["LIMINAL_MODEL"] = selector
     env["LIMINAL_TOOL_MODE"] = "unrestricted"
+    env["LIMINAL_SYSTEM_PROMPT"] = "Test system policy."
+    env["LIMINAL_DEVELOPER_PROMPT"] = "Test developer policy."
     result = subprocess.run(
         [str(BINARY)],
         input=stdin,

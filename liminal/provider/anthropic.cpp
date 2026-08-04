@@ -64,6 +64,7 @@ struct MessageRequest {
 
     std::string model;
     u32 max_tokens = 8192;
+    std::optional<std::string> system;
     std::vector<Message> messages;
     std::optional<std::vector<provider::ToolDefinition>> tools; // omitted when nullopt
     bool stream = true;
@@ -148,11 +149,43 @@ Result<std::string> encode_opaque(wire::ContentBlock block) {
 /// History -> wire messages. Opaque parts carrying our tag are replayed
 /// verbatim (thinking blocks with their signatures); foreign-tagged parts
 /// belong to another provider and are dropped.
-Result<std::vector<wire::Message>> to_wire(const provider::History &history) {
+struct WireHistory {
+    std::optional<std::string> system;
     std::vector<wire::Message> messages;
-    messages.reserve(history.size());
+};
+
+void append_instruction(std::string &prompt, provider::Role role, std::string_view text) {
+    if (text.empty()) return;
+    if (prompt.empty()) {
+        prompt = "Instruction hierarchy: SYSTEM instructions take precedence over DEVELOPER instructions.\n";
+    }
+    prompt += role == provider::Role::SYSTEM ? "\n[SYSTEM]\n" : "\n[DEVELOPER]\n";
+    prompt += text;
+}
+
+Result<WireHistory> to_wire(const provider::History &history) {
+    WireHistory serialized;
+    serialized.messages.reserve(history.size());
+    std::string system;
+    bool conversation_started = false;
 
     for (const auto &item : history) {
+        const bool instruction = provider::is_instruction(item.role);
+        if (instruction && conversation_started) {
+            return outcome_error(Error::protocol("system and developer instructions must precede conversation messages"));
+        }
+        if (instruction) {
+            for (const auto &part : item.parts) {
+                if (const auto *text = std::get_if<provider::TextPart>(&part)) {
+                    append_instruction(system, item.role, text->text);
+                } else {
+                    return outcome_error(Error::protocol("instruction messages may contain only text"));
+                }
+            }
+            continue;
+        }
+        conversation_started = true;
+
         wire::Message message{.role = item.role == provider::Role::ASSISTANT ? "assistant" : "user"};
         message.content.reserve(item.parts.size());
 
@@ -182,10 +215,11 @@ Result<std::vector<wire::Message>> to_wire(const provider::History &history) {
         // An item whose parts were all foreign opaques would serialize as an
         // empty message, which the API rejects; skip it entirely.
         if (!message.content.empty()) {
-            messages.push_back(std::move(message));
+            serialized.messages.push_back(std::move(message));
         }
     }
-    return messages;
+    if (!system.empty()) serialized.system = std::move(system);
+    return serialized;
 }
 
 provider::StopKind to_stop_kind(std::string_view stop_reason) {
@@ -683,10 +717,12 @@ Client::Client(ClientOptions options) : options(std::move(options)) {
 
 Task<provider::TurnResponse, Error> Client::complete(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
                                                      const provider::StreamCallbacks &callbacks) {
+    auto wire_history = co_await or_fail(to_wire(history));
     wire::MessageRequest request{
         .model = options.model,
         .max_tokens = options.max_tokens,
-        .messages = co_await or_fail(to_wire(history)),
+        .system = std::move(wire_history.system),
+        .messages = std::move(wire_history.messages),
     };
     if (!tools.empty()) {
         request.tools = tools;

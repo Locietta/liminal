@@ -191,6 +191,20 @@ def make_server(
             state["calls"] += 1
             assert body["store"] is False, "store must be false (stateless/ZDR)"
             assert "reasoning.encrypted_content" in body["include"]
+            assert "instructions" not in body, (
+                "agent instructions must be explicit developer messages"
+            )
+            system, developer = body["input"][:2]
+            assert system == {
+                "type": "message",
+                "role": "system",
+                "content": [{"type": "input_text", "text": "Test system policy."}],
+            }
+            assert developer == {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "Test developer policy."}],
+            }
 
             # Local-compaction summarizer request: checkpoint prompt, no tools.
             if "context checkpoint compaction" in json.dumps(body["input"]):

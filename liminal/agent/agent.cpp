@@ -51,6 +51,13 @@ Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::Too
 
 } // namespace
 
+Agent::Agent(model::Choice model, ToolSet &tools) : model(std::move(model)), tools(&tools) {
+    provider::append_developer(history, "You are a helpful coding assistant.");
+}
+
+Agent::Agent(model::Choice model, ToolSet &tools, provider::History initial_history)
+    : model(std::move(model)), tools(&tools), history(std::move(initial_history)) {}
+
 Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
     // Transactional: staged history only replaces committed history after a
     // complete terminal response. The UI transcript intentionally remains.

@@ -22,6 +22,8 @@ using namespace lighter::types;
 // switching, persistence, and compaction all operate on this representation.
 
 enum struct Role {
+    SYSTEM,
+    DEVELOPER,
     USER,
     ASSISTANT,
 };
@@ -80,6 +82,25 @@ struct TurnResponse {
 };
 
 // --- history manipulation ----------------------------------------------
+
+inline bool is_instruction(Role role) { return role == Role::SYSTEM || role == Role::DEVELOPER; }
+
+/// System and developer instructions form an immutable leading prefix. This
+/// is the strongest representation portable across the Responses API and the
+/// Anthropic Messages API.
+inline usize instruction_prefix_size(const History &history) {
+    usize size = 0;
+    while (size < history.size() && is_instruction(history[size].role)) ++size;
+    return size;
+}
+
+inline void append_system(History &history, std::string instructions) {
+    history.push_back({.role = Role::SYSTEM, .parts = {TextPart{.text = std::move(instructions)}}});
+}
+
+inline void append_developer(History &history, std::string instructions) {
+    history.push_back({.role = Role::DEVELOPER, .parts = {TextPart{.text = std::move(instructions)}}});
+}
 
 inline void append_user(History &history, std::string prompt) {
     history.push_back({.role = Role::USER, .parts = {TextPart{.text = std::move(prompt)}}});

@@ -152,6 +152,11 @@ def make_server(port=0, models_status=200, models=None):
 
             assert self.headers["x-api-key"] == API_KEY, "missing/wrong x-api-key"
             assert self.headers["anthropic-version"], "missing anthropic-version header"
+            assert "[SYSTEM]\nTest system policy." in body["system"]
+            assert "[DEVELOPER]\nTest developer policy." in body["system"]
+            assert all(
+                message["role"] in {"user", "assistant"} for message in body["messages"]
+            ), "instructions must use Anthropic's top-level system field"
 
             last = body["messages"][-1]
             last_texts = [

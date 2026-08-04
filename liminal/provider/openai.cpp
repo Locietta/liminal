@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -100,7 +101,6 @@ struct Reasoning {
 
 struct ResponseRequest {
     std::string model;
-    std::string instructions = "You are a helpful coding assistant.";
     std::optional<u32> max_output_tokens;
     std::vector<ResponseItem> input;
     std::optional<std::vector<Tool>> tools;
@@ -194,6 +194,16 @@ Result<wire::FunctionCallItem> to_function_call(const provider::ToolCall &call) 
     return wire::FunctionCallItem{.call_id = call.id, .name = call.name, .arguments = *std::move(arguments)};
 }
 
+std::string_view role_name(provider::Role role) {
+    switch (role) {
+        case provider::Role::SYSTEM: return "system";
+        case provider::Role::DEVELOPER: return "developer";
+        case provider::Role::USER: return "user";
+        case provider::Role::ASSISTANT: return "assistant";
+    }
+    std::unreachable();
+}
+
 /// History -> Responses input items. One neutral item may fan out into
 /// several wire items: contiguous text parts form one message; every tool
 /// call/result and replayed opaque is its own top-level item. Opaque parts
@@ -202,14 +212,21 @@ Result<wire::FunctionCallItem> to_function_call(const provider::ToolCall &call) 
 Result<std::vector<wire::ResponseItem>> to_wire(const provider::History &history) {
     std::vector<wire::ResponseItem> items;
     items.reserve(history.size());
+    bool conversation_started = false;
 
     for (const auto &item : history) {
+        const bool instruction = provider::is_instruction(item.role);
+        if (instruction && conversation_started) {
+            return outcome_error(Error::protocol("system and developer instructions must precede conversation messages"));
+        }
+        conversation_started = conversation_started || !instruction;
         const bool assistant = item.role == provider::Role::ASSISTANT;
-        wire::MessageItem message{.role = assistant ? "assistant" : "user"};
+        const auto role = std::string(role_name(item.role));
+        wire::MessageItem message{.role = role};
 
         auto flush_message = [&] {
             if (!message.content.empty()) {
-                items.push_back(std::exchange(message, wire::MessageItem{.role = assistant ? "assistant" : "user"}));
+                items.push_back(std::exchange(message, wire::MessageItem{.role = role}));
             }
         };
 
@@ -221,6 +238,7 @@ Result<std::vector<wire::ResponseItem>> to_wire(const provider::History &history
                     message.content.push_back(wire::InputText{.text = text->text});
                 }
             } else if (const auto *call = std::get_if<provider::ToolCall>(&part)) {
+                if (instruction) return outcome_error(Error::protocol("instruction messages may contain only text"));
                 flush_message();
                 auto function = to_function_call(*call);
                 if (!function) {
@@ -228,9 +246,11 @@ Result<std::vector<wire::ResponseItem>> to_wire(const provider::History &history
                 }
                 items.push_back(*std::move(function));
             } else if (const auto *result = std::get_if<provider::ToolResult>(&part)) {
+                if (instruction) return outcome_error(Error::protocol("instruction messages may contain only text"));
                 flush_message();
                 items.push_back(wire::FunctionCallOutputItem{.call_id = result->call_id, .output = result->content});
             } else if (const auto *opaque = std::get_if<provider::OpaquePart>(&part)) {
+                if (instruction) return outcome_error(Error::protocol("instruction messages may contain only text"));
                 if (opaque->provider_tag != k_provider_tag) {
                     continue; // another provider's private state
                 }
@@ -745,9 +765,12 @@ Task<provider::TurnResponse, Error> Client::complete(const provider::History &hi
 }
 
 Task<void, Error> Client::compact(provider::History &history, std::string_view instructions) {
+    const auto instruction_count = provider::instruction_prefix_size(history);
+    if (instruction_count == history.size()) co_return;
+    provider::History conversation(history.begin() + instruction_count, history.end());
     wire::CompactRequest request{
         .model = options.model,
-        .input = co_await or_fail(to_wire(history)),
+        .input = co_await or_fail(to_wire(conversation)),
         .instructions = std::string(instructions),
     };
     auto encoded = json::to_string(request);
@@ -760,8 +783,12 @@ Task<void, Error> Client::compact(provider::History &history, std::string_view i
         auto outcome = co_await attempt_remote_compact(http_client, options, body);
         if (outcome) {
             // The compacted items (typically one encrypted compaction item)
-            // replace the transcript, carried opaquely until the next call.
+            // replace the conversation, while the instruction prefix remains
+            // explicit and provider-neutral.
             provider::History compacted;
+            compacted.reserve(instruction_count + 1);
+            compacted.insert(compacted.end(), std::make_move_iterator(history.begin()),
+                             std::make_move_iterator(history.begin() + instruction_count));
             compacted.push_back({.role = provider::Role::USER});
             for (auto &item : *outcome) {
                 auto payload = co_await or_fail(encode_opaque(item));
