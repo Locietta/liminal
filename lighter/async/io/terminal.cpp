@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -138,7 +139,13 @@ std::string terminal_features(const TerminalSession::Options &options, bool enab
 
 #ifdef _WIN32
 
+bool conpty_requested() noexcept {
+    const auto *value = std::getenv("LIGHTER_CONPTY");
+    return value && std::string_view(value) == "1";
+}
+
 HANDLE windows_handle(i32 fd, bool &owned, bool force_console = false) noexcept {
+    force_console = force_console || conpty_requested();
     owned = false;
     const auto raw = _get_osfhandle(fd);
     if (raw != -1) {
@@ -521,15 +528,11 @@ TerminalSession::Self *TerminalSession::operator->() noexcept { return self.get(
 bool TerminalSession::attached(i32 fd) noexcept {
 #ifdef _WIN32
     bool owned = false;
-    const auto handle = windows_handle(fd, owned);
-    if (!handle || handle == INVALID_HANDLE_VALUE) {
-        return false;
-    }
+    const auto handle = windows_handle(fd, owned, conpty_requested());
+    if (!handle || handle == INVALID_HANDLE_VALUE) return false;
     DWORD mode = 0;
     const bool result = GetConsoleMode(handle, &mode) != FALSE;
-    if (owned) {
-        CloseHandle(handle);
-    }
+    if (owned) CloseHandle(handle);
     return result;
 #else
     return ::isatty(fd) == 1;

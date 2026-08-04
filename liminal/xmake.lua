@@ -13,7 +13,14 @@ target("liminal")
 
 target("liminal-dev-mcp")
     set_kind("binary")
-    add_files("dev_mcp/main.cpp")
+    add_files("dev_mcp/*.cpp")
     add_deps("liminal-core")
+    if is_plat("mingw") or is_plat("windows") then
+        after_build(function (target)
+            os.cp(path.join(os.scriptdir(), "dev_mcp/windows_pty.py"), target:targetdir())
+        end)
+    elseif is_plat("linux") then
+        add_syslinks("util")
+    end
 
 includes("tests/xmake.lua")

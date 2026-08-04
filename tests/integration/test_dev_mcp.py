@@ -3,9 +3,15 @@
 import json
 import os
 import subprocess
+import sys
+import threading
 from pathlib import Path
 
 import pytest
+
+
+sys.path.insert(0, str(Path(__file__).parent))
+import mock_openai
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -36,15 +42,16 @@ def request(identifier, method, params=None):
     }
 
 
-def run_server(messages):
+def run_server(messages, *, environment=None, timeout=20):
     result = subprocess.run(
         [str(BINARY)],
         input="".join(json.dumps(message) + "\n" for message in messages),
         cwd=REPO_ROOT,
+        env=environment,
         capture_output=True,
         text=True,
         encoding="utf-8",
-        timeout=20,
+        timeout=timeout,
         check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -53,6 +60,38 @@ def run_server(messages):
         response["id"]: response
         for response in map(json.loads, result.stdout.splitlines())
     }
+
+
+@pytest.fixture
+def openai_mock():
+    server, state = mock_openai.make_server()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}/v1", state
+    server.shutdown()
+
+
+def live_environment(tmp_path, base_url):
+    providers = tmp_path / "providers.json"
+    providers.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "mcp-test": {
+                        "api": "openai-responses",
+                        "base_url": base_url,
+                        "api_key": mock_openai.API_KEY,
+                        "discover_models": False,
+                        "models": [{"id": "test-model"}],
+                    }
+                }
+            }
+        )
+    )
+    environment = os.environ.copy()
+    environment["LIMINAL_PROVIDERS_FILE"] = str(providers)
+    environment["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
+    environment["LIMINAL_MODEL"] = "test-model"
+    return environment
 
 
 def test_headless_session_can_be_discovered_reproduced_and_inspected():
@@ -131,6 +170,85 @@ def test_headless_session_can_be_discovered_reproduced_and_inspected():
     assert [block["text"] for block in snapshot["blocks"]] == ["hello 👩‍💻", "world"]
     assert snapshot["ansi_operations"]
     assert snapshot["cells"]
+    assert responses["close"]["result"]["structuredContent"]["closed"] is True
+
+
+def test_live_session_operates_real_liminal_process(openai_mock, tmp_path):
+    base_url, state = openai_mock
+    messages = [
+        request(
+            "create",
+            "tools/call",
+            {
+                "name": "session_create",
+                "arguments": {
+                    "driver": "liminal.pty",
+                    "columns": 48,
+                    "rows": 10,
+                    "cwd": str(REPO_ROOT),
+                },
+            },
+        ),
+        request(
+            "prompt",
+            "tools/call",
+            {
+                "name": "session_apply",
+                "arguments": {
+                    "session_id": "session-1",
+                    "actions": [
+                        {"type": "wait", "milliseconds": 500},
+                        {"type": "prompt", "text": "inspect"},
+                        {"type": "wait", "milliseconds": 3000},
+                        {"type": "resize", "columns": 60, "rows": 12},
+                        {"type": "wait", "milliseconds": 250},
+                    ],
+                },
+            },
+        ),
+        request(
+            "quit",
+            "tools/call",
+            {
+                "name": "session_apply",
+                "arguments": {
+                    "session_id": "session-1",
+                    "actions": [
+                        {"type": "prompt", "text": "/quit"},
+                        {"type": "wait", "milliseconds": 1000},
+                    ],
+                },
+            },
+        ),
+        request(
+            "close",
+            "tools/call",
+            {"name": "session_close", "arguments": {"session_id": "session-1"}},
+        ),
+    ]
+    responses = run_server(
+        messages,
+        environment=live_environment(tmp_path, base_url),
+        timeout=30,
+    )
+
+    created = responses["create"]["result"]["structuredContent"]
+    assert created["capabilities"]["driver"] == "liminal.pty"
+    assert created["capabilities"]["process"] is True
+    snapshot = responses["prompt"]["result"]["structuredContent"]["snapshot"]
+    assert snapshot["columns"] == 60
+    assert snapshot["rows"] == 12
+    assert snapshot["process_id"] > 0
+    assert snapshot["output_encoding"] == "escaped-control-bytes"
+    assert "Let me inspect the repository." in snapshot["output"]
+    assert "The working directory is the liminal repository." in snapshot["output"]
+    assert any(
+        "working directory is the liminal" in line for line in snapshot["visible_text"]
+    )
+    quit_snapshot = responses["quit"]["result"]["structuredContent"]["snapshot"]
+    assert quit_snapshot["running"] is False
+    assert quit_snapshot["exit_code"] == 0
+    assert state["errors"] == []
     assert responses["close"]["result"]["structuredContent"]["closed"] is True
 
 

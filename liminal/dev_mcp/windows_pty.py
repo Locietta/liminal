@@ -1,8 +1,9 @@
-"""Minimal Windows pseudoconsole host used by the integration tests."""
+"""Windows pseudoconsole host and private live-session helper protocol."""
 
 import ctypes
 import os
 import subprocess
+import sys
 import time
 from ctypes import wintypes
 
@@ -193,6 +194,8 @@ class ConPtyProcess:
         self._process = None
         self.pid = -1
 
+        env = env.copy()
+        env["LIGHTER_CONPTY"] = "1"
         input_read, input_write = _pipe()
         output_read, output_write = _pipe()
         try:
@@ -372,3 +375,85 @@ class ConPtyProcess:
             "getting ConPTY exit code failed",
         )
         return exit_code.value
+
+
+def _reply(*parts):
+    sys.stdout.buffer.write((" ".join(str(part) for part in parts) + "\n").encode())
+    sys.stdout.buffer.flush()
+
+
+def _decode(value):
+    return bytes.fromhex(value).decode("utf-8")
+
+
+def _drain(process):
+    output = bytearray()
+    while chunk := process.read(0):
+        output.extend(chunk)
+    exit_code = process.poll()
+    return exit_code, bytes(output)
+
+
+def run_helper():
+    process = None
+    try:
+        start = sys.stdin.buffer.readline().decode().strip().split()
+        if len(start) != 5 or start[0] != "START":
+            raise ValueError("expected START executable cwd columns rows")
+        process = ConPtyProcess(
+            [_decode(start[1])],
+            cwd=_decode(start[2]),
+            env=os.environ.copy(),
+            columns=int(start[3]),
+            rows=int(start[4]),
+        )
+        _reply("OK", process.pid)
+
+        for encoded in sys.stdin.buffer:
+            command = encoded.decode().strip().split()
+            if not command:
+                continue
+            try:
+                if command[0] == "READ":
+                    exit_code, output = _drain(process)
+                    _reply(
+                        "OK",
+                        int(exit_code is None),
+                        -1 if exit_code is None else exit_code,
+                        output.hex() or "-",
+                    )
+                elif command[0] == "WRITE" and len(command) == 2:
+                    process.write(bytes.fromhex(command[1]))
+                    _reply("OK")
+                elif command[0] == "RESIZE" and len(command) == 3:
+                    process.resize(int(command[1]), int(command[2]))
+                    _reply("OK")
+                elif command[0] == "TERMINATE":
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(2)
+                    _reply("OK")
+                elif command[0] == "CLOSE":
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(2)
+                    _reply("OK")
+                    return 0
+                else:
+                    raise ValueError("unknown helper command")
+            except Exception as error:
+                _reply("ERR", str(error).encode().hex())
+    except Exception as error:
+        _reply("ERR", str(error).encode().hex())
+        return 1
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+                process.wait(2)
+            process.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_helper())
