@@ -6,6 +6,19 @@ add_rules("mode.release", "mode.releasedbg")
 
 set_languages("cxxlatest")
 
+option("sanitizers")
+    set_default(false)
+    set_showmenu(true)
+option_end()
+
+if has_config("sanitizers") then
+    if not is_plat("linux") then
+        raise("the sanitizer configuration is supported on Linux only")
+    end
+    add_cxxflags("-fsanitize=address,undefined", "-fno-omit-frame-pointer", {tools = {"gcc", "gxx"}, force = true})
+    add_ldflags("-fsanitize=address,undefined", {tools = {"gcc", "gxx"}, force = true})
+end
+
 local contract_semantic = "enforce"
 if is_mode("release") then
     contract_semantic = "ignore"

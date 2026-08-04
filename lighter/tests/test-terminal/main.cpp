@@ -14,6 +14,7 @@
 
 #include <lighter/async/async.h>
 #include <lighter/async/detail/terminal_input_decoder.h>
+#include <lighter/encoding/utf8.h>
 #include <lighter/types.hpp>
 
 namespace {
@@ -191,6 +192,53 @@ void check_focus_sequences() {
             "focus sequences must retain their state");
 }
 
+bool same_event(const TerminalEvent &lhs, const TerminalEvent &rhs) {
+    return lhs.kind == rhs.kind && lhs.key == rhs.key && lhs.modifiers == rhs.modifiers && lhs.text == rhs.text && lhs.size == rhs.size &&
+           lhs.repeat == rhs.repeat && lhs.x == rhs.x && lhs.y == rhs.y && lhs.mouse_buttons == rhs.mouse_buttons &&
+           lhs.wheel_delta == rhs.wheel_delta && lhs.pressed == rhs.pressed && lhs.focused == rhs.focused;
+}
+
+std::vector<TerminalEvent> decode_chunks(std::string_view bytes, usize chunk_size) {
+    detail::TerminalInputDecoder decoder;
+    std::vector<TerminalEvent> events;
+    for (usize offset = 0; offset < bytes.size(); offset += chunk_size) {
+        feed(decoder, bytes.substr(offset, std::min(chunk_size, bytes.size() - offset)), events);
+    }
+    flush_escape(decoder, events);
+    std::vector<TerminalEvent> normalized;
+    for (auto &event : events) {
+        if (event.kind == TerminalEventKind::TEXT && !normalized.empty() && normalized.back().kind == TerminalEventKind::TEXT) {
+            normalized.back().text += event.text;
+        } else {
+            normalized.push_back(std::move(event));
+        }
+    }
+    return normalized;
+}
+
+void check_decoder_chunk_fuzz() {
+    u32 state = 0x9e3779b9;
+    auto next = [&state] {
+        state = state * 1664525u + 1013904223u;
+        return state;
+    };
+
+    for (usize sample = 0; sample < 500; ++sample) {
+        std::string input;
+        const auto size = static_cast<usize>(next() % 257);
+        input.reserve(size);
+        for (usize index = 0; index < size; ++index) input.push_back(static_cast<char>(next() & 0xff));
+
+        const auto whole = decode_chunks(input, std::max<usize>(1, input.size()));
+        const auto chunked = decode_chunks(input, 1 + next() % 11);
+        require(whole.size() == chunked.size(), "terminal decoding must be invariant under arbitrary byte chunking");
+        for (usize index = 0; index < whole.size(); ++index) {
+            require(same_event(whole[index], chunked[index]), "chunked terminal decoding changed an emitted event");
+            require(encoding::utf8::is_valid(whole[index].text), "terminal decoding must emit only valid UTF-8 text");
+        }
+    }
+}
+
 #ifdef _WIN32
 void check_windows_console_restoration() {
     bool allocated = false;
@@ -258,6 +306,7 @@ i32 run_all() {
     check_control_bytes();
     check_paste_chunking();
     check_focus_sequences();
+    check_decoder_chunk_fuzz();
 #ifdef _WIN32
     check_windows_console_restoration();
 #endif

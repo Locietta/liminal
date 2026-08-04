@@ -4,6 +4,7 @@
 #include <utility>
 
 #include <lighter/types.hpp>
+#include <lighter/encoding/utf8.h>
 
 #include <liminal/event.h>
 #include <liminal/tui/headless.h>
@@ -295,6 +296,65 @@ void check_headless_virtual_time_and_snapshots() {
     require(session.inspect().layout == snapshot.layout, "inspection must not mutate layout diagnostics");
 }
 
+void check_headless_resize_and_markup_stress() {
+    tui::HeadlessSession session(80, 24);
+    u32 state = 0x243f6a88;
+    auto next = [&state] {
+        state = state * 1103515245u + 12345u;
+        return state;
+    };
+    constexpr std::string_view fragments[] = {
+        "plain text ", "**unfinished", "** done\n", "```cpp\n", "x();\n```\n", "\x1b[2J", "中", "👩‍💻", "\xff",
+    };
+
+    for (usize index = 0; index < 4000; ++index) {
+        const auto choice = next() % 8;
+        tui::HeadlessAction action;
+        if (choice <= 2) {
+            action.type = "assistant_delta";
+            action.text = std::string(fragments[next() % std::size(fragments)]);
+        } else if (choice == 3) {
+            action.type = "resize";
+            action.columns = 1 + static_cast<i32>(next() % 120);
+            action.rows = 1 + static_cast<i32>(next() % 50);
+        } else if (choice == 4) {
+            action.type = "notice";
+            action.text = "notice-" + std::to_string(index);
+        } else if (choice == 5) {
+            action.type = "scroll";
+            action.amount = static_cast<i32>(next() % 41) - 20;
+        } else if (choice == 6) {
+            action.type = "advance_time";
+            action.milliseconds = next() % 33;
+        } else {
+            action.type = "assistant_segment_completed";
+        }
+        require(session.apply(action).has_value(), "bounded stress action must remain valid");
+
+        if (index % 97 == 0) {
+            const auto snapshot = session.inspect();
+            require(snapshot.columns >= 1 && snapshot.columns <= 500 && snapshot.rows >= 1 && snapshot.rows <= 200,
+                    "stress projection must preserve terminal bounds");
+            require(snapshot.visible_text.size() == static_cast<usize>(snapshot.rows),
+                    "stress projection must expose exactly one string per terminal row");
+            if (snapshot.cursor.visible) {
+                require(snapshot.cursor.row >= 0 && snapshot.cursor.row < snapshot.rows && snapshot.cursor.column >= 0 &&
+                            snapshot.cursor.column < snapshot.columns,
+                        "stress projection must keep a visible cursor inside the terminal");
+            }
+            for (const auto &cell : snapshot.cells) {
+                require(cell.row >= 0 && cell.row < snapshot.rows && cell.column >= 0 && cell.column < snapshot.columns,
+                        "stress projection emitted an out-of-bounds cell");
+                require(lighter::encoding::utf8::is_valid(cell.text), "stress projection emitted invalid UTF-8");
+            }
+        }
+    }
+
+    const auto snapshot = session.inspect();
+    require(snapshot.action_count == 4000, "stress session must apply every generated action");
+    require(snapshot.text_bytes <= 8 * 1024 * 1024, "stress session must remain inside its declared text budget");
+}
+
 i32 run_all() {
     check_surface_cells_and_encoding();
     check_composer_editing();
@@ -302,6 +362,7 @@ i32 run_all() {
     check_rich_output_and_concurrent_tools();
     check_scroll_resize_and_unread_state();
     check_headless_virtual_time_and_snapshots();
+    check_headless_resize_and_markup_stress();
     return 0;
 }
 
