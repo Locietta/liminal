@@ -21,10 +21,19 @@ struct Composer {
     void insert(std::string_view value);
     void backspace();
     void erase();
+    void backspace_word();
+    void erase_word();
     void move_left();
     void move_right();
-    void move_home() noexcept;
-    void move_end() noexcept;
+    void move_word_left();
+    void move_word_right();
+    bool move_up();
+    bool move_down();
+    void move_home();
+    void move_end();
+    void move_document_home() noexcept;
+    void move_document_end() noexcept;
+    void replace(std::string value);
     void clear() noexcept;
     std::string take();
 
@@ -32,6 +41,18 @@ struct Composer {
 
     std::string text;
     usize cursor = 0;
+    std::optional<i32> preferred_column;
+};
+
+struct PromptHistory {
+    void record(const std::string &prompt);
+    bool previous(Composer &composer);
+    bool next(Composer &composer);
+    void edited() noexcept;
+
+    std::vector<std::string> entries;
+    std::optional<usize> index;
+    std::string draft;
 };
 
 struct ViewportAnchor {
@@ -83,18 +104,37 @@ struct SessionScreen {
     void apply(const Event &event);
     void add_notice(std::string text);
 
+    void insert(std::string_view text);
+    void backspace();
+    void erase();
+    void backspace_word();
+    void erase_word();
+    void move_left();
+    void move_right();
+    void move_word_left();
+    void move_word_right();
+    void move_up();
+    void move_down();
+    void move_home();
+    void move_end();
+    void move_document_home();
+    void move_document_end();
+    void clear_prompt();
+    std::string take_prompt();
+
     void scroll(i32 rows);
     void page(i32 direction);
     void follow_tail() noexcept;
 
     Frame frame() const;
-    i32 viewport_rows() const noexcept;
+    i32 viewport_rows() const;
     std::vector<LayoutRow> layout_block(const Block &block) const;
     LayoutDiagnostics layout_diagnostics() const noexcept;
 
     lighter::TerminalSize size{80, 24};
     Transcript transcript;
     Composer composer;
+    PromptHistory prompt_history;
     std::string model;
     std::optional<std::string> effort;
     std::optional<ViewportAnchor> anchor;
@@ -102,6 +142,9 @@ struct SessionScreen {
     SessionState state = SessionState::EDITING;
     mutable std::unordered_map<u64, CachedBlockLayout> layout_cache;
     mutable LayoutDiagnostics diagnostics;
+
+private:
+    void mark_editing() noexcept;
 };
 
 } // namespace liminal::tui

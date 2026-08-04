@@ -154,6 +154,12 @@ void check_control_bytes() {
                 "control bytes must decode to their conventional key identity");
     }
     require(events.back().kind == TerminalEventKind::TEXT && events.back().text == "x", "input following NUL must still be emitted");
+
+    events.clear();
+    feed(decoder, "\r\n", events);
+    require(events.size() == 2 && events[0].key == TerminalKey::ENTER && events[0].modifiers == TerminalModifiers::NONE &&
+                events[1].key == TerminalKey::CHARACTER && events[1].modifiers == TerminalModifiers::CONTROL && events[1].text == "j",
+            "carriage return must submit while line feed remains the portable Ctrl+J newline binding");
 }
 
 void check_paste_chunking() {

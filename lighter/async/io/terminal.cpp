@@ -389,6 +389,10 @@ void run_terminal_worker(TerminalSession::Self *self) {
 
             const auto mapped = windows_key(key.wVirtualKeyCode);
             const auto modifiers = windows_modifiers(key.dwControlKeyState);
+            if (mapped == TerminalKey::CHARACTER && text.empty() && has_modifier(modifiers, TerminalModifiers::CONTROL) &&
+                key.wVirtualKeyCode >= 'A' && key.wVirtualKeyCode <= 'Z') {
+                text = std::string(1, static_cast<char>('a' + key.wVirtualKeyCode - 'A'));
+            }
             if (mapped == TerminalKey::CHARACTER && !text.empty() && modifiers == TerminalModifiers::NONE && key.bKeyDown) {
                 if (key.wRepeatCount > 1) {
                     const auto unit = text;

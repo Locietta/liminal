@@ -103,6 +103,54 @@ void check_composer_editing() {
     require(composer.empty() && composer.cursor == 0, "clearing must reset composer text and cursor");
 }
 
+void check_multiline_navigation_history_and_projection() {
+    tui::Composer composer;
+    composer.replace("one two\n中x\nz");
+    composer.move_document_home();
+    composer.move_word_right();
+    require(composer.cursor == 3, "word-right must stop after the current word");
+    composer.move_word_right();
+    require(composer.cursor == 7, "word-right must cross whitespace to the next word boundary");
+    composer.move_end();
+    require(composer.cursor == 7, "End must target the current logical line");
+    require(composer.move_down() && composer.cursor == std::string("one two\n中x").size(),
+            "down must preserve the display-cell column and clamp to a shorter line");
+    require(composer.move_down() && composer.cursor == composer.text.size(), "down must reach the final logical line");
+    require(composer.move_up() && composer.cursor == std::string("one two\n中x").size(),
+            "vertical navigation must preserve its preferred display-cell column");
+    composer.backspace_word();
+    require(composer.text == "one two\n\nz", "word backspace must remove one Unicode word without crossing a newline");
+
+    tui::SessionScreen screen;
+    screen.resize({20, 9});
+    screen.set_model("test", std::nullopt);
+    screen.insert("first");
+    require(screen.take_prompt() == "first", "submission must return the current prompt");
+    screen.insert("second");
+    require(screen.take_prompt() == "second", "later submissions must remain independent");
+    screen.insert("scratch");
+    screen.move_up();
+    require(screen.composer.text == "second", "up on the first line must recall the newest prompt");
+    screen.move_up();
+    require(screen.composer.text == "first", "repeated up must walk older prompt history");
+    screen.move_down();
+    screen.move_down();
+    require(screen.composer.text == "scratch", "down past the newest prompt must restore the original draft");
+
+    screen.clear_prompt();
+    screen.insert("one\ntwo\nthree\nfour");
+    const auto frame = screen.frame();
+    require(screen.viewport_rows() == 4, "a growing composer must retain transcript viewport space");
+    require(frame.surface.row_text(6) == "two" && frame.surface.row_text(7) == "three" && frame.surface.row_text(8) == "four",
+            "an overflowing composer must vertically window around its cursor");
+    require(frame.cursor.row == 8 && frame.cursor.column == 4, "the multiline composer cursor must remain visible on its logical row");
+
+    tui::SessionScreen active;
+    active.apply(AssistantTextDelta{.text = "streaming"});
+    active.insert("queued draft");
+    require(active.state == tui::SessionState::STREAMING, "editing a draft during a turn must not overwrite the turn's semantic state");
+}
+
 void check_scroll_resize_and_unread_state() {
     tui::SessionScreen screen;
     screen.resize({18, 8});
@@ -160,6 +208,7 @@ void check_headless_virtual_time_and_snapshots() {
 i32 run_all() {
     check_surface_cells_and_encoding();
     check_composer_editing();
+    check_multiline_navigation_history_and_projection();
     check_scroll_resize_and_unread_state();
     check_headless_virtual_time_and_snapshots();
     return 0;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <variant>
 
@@ -40,8 +41,13 @@ struct SessionNotice {
     std::string text;
 };
 
+struct ModelSelected {
+    std::string name;
+    std::optional<std::string> effort;
+};
+
 using Event = std::variant<PromptSubmitted, AssistantTextDelta, AssistantSegmentCompleted, ToolStarted, ToolCompleted, TurnCompleted,
-                           TurnCancelled, TurnFailed, SessionNotice>;
+                           TurnCancelled, TurnFailed, SessionNotice, ModelSelected>;
 using EventSink = std::copyable_function<void(const Event &) const>;
 
 } // namespace liminal

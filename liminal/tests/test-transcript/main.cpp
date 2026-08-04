@@ -70,10 +70,19 @@ void check_cancelled_partial_output() {
             "cancellation must be recorded as a semantic notice");
 }
 
+void check_typed_model_selection() {
+    tui::Transcript transcript;
+    transcript.apply(ModelSelected{.name = "test-model", .effort = "high"});
+    require(transcript.blocks.size() == 1 && transcript.blocks[0].kind == tui::BlockKind::NOTICE &&
+                transcript.blocks[0].text == "Model: test-model@high",
+            "model selection must remain inspectable as a typed transcript event");
+}
+
 i32 run_all() {
     check_stream_consolidation();
     check_tool_lifecycle();
     check_cancelled_partial_output();
+    check_typed_model_selection();
     return 0;
 }
 

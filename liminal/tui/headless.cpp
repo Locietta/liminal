@@ -104,32 +104,43 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     ++action_count;
 
     if (action.type == "insert") {
-        screen.composer.insert(action.text);
-        screen.state = SessionState::EDITING;
+        screen.insert(action.text);
     } else if (action.type == "backspace") {
-        screen.composer.backspace();
-        screen.state = SessionState::EDITING;
+        screen.backspace();
     } else if (action.type == "delete") {
-        screen.composer.erase();
-        screen.state = SessionState::EDITING;
+        screen.erase();
+    } else if (action.type == "backspace_word") {
+        screen.backspace_word();
+    } else if (action.type == "delete_word") {
+        screen.erase_word();
     } else if (action.type == "left") {
-        screen.composer.move_left();
-        screen.state = SessionState::EDITING;
+        screen.move_left();
     } else if (action.type == "right") {
-        screen.composer.move_right();
-        screen.state = SessionState::EDITING;
+        screen.move_right();
+    } else if (action.type == "word_left") {
+        screen.move_word_left();
+    } else if (action.type == "word_right") {
+        screen.move_word_right();
+    } else if (action.type == "up") {
+        screen.move_up();
+    } else if (action.type == "down") {
+        screen.move_down();
     } else if (action.type == "home") {
-        screen.composer.move_home();
-        screen.state = SessionState::EDITING;
+        screen.move_home();
     } else if (action.type == "end") {
-        screen.composer.move_end();
-        screen.state = SessionState::EDITING;
+        screen.move_end();
+    } else if (action.type == "document_home") {
+        screen.move_document_home();
+    } else if (action.type == "document_end") {
+        screen.move_document_end();
     } else if (action.type == "clear") {
-        screen.composer.clear();
-        screen.state = SessionState::EDITING;
+        screen.clear_prompt();
     } else if (action.type == "submit") {
-        auto prompt = screen.composer.take();
-        if (!action.text.empty()) prompt = action.text;
+        auto prompt = screen.take_prompt();
+        if (!action.text.empty()) {
+            prompt = action.text;
+            screen.prompt_history.record(prompt);
+        }
         screen.apply(PromptSubmitted{.text = std::move(prompt)});
     } else if (action.type == "assistant_delta") {
         screen.apply(AssistantTextDelta{.text = action.text});
@@ -159,7 +170,7 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
         if (auto valid = validate_size(action.columns, action.rows); !valid) return valid;
         screen.resize({.columns = action.columns, .rows = action.rows});
     } else if (action.type == "set_model") {
-        screen.set_model(action.name, action.effort);
+        screen.apply(ModelSelected{.name = action.name, .effort = action.effort});
     } else if (action.type == "advance_time") {
         if (action.milliseconds < 0) return std::unexpected("virtual time cannot move backwards");
         now_ms += action.milliseconds;

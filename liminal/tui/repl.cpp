@@ -120,22 +120,27 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
         case TerminalEventKind::PASTE: return renderer.insert(event.text);
         case TerminalEventKind::KEY: {
             if (!event.pressed) return {};
+            const bool control = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::CONTROL);
+            const bool shift = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::SHIFT);
+            const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
             if (event.key == TerminalKey::ENTER) {
+                if (shift) return renderer.insert("\n");
                 prompts.push(finish_prompt(renderer.take_prompt()));
                 return renderer.redraw();
             }
-            if (event.key == TerminalKey::BACKSPACE) return renderer.backspace();
+            if (event.key == TerminalKey::BACKSPACE) return control ? renderer.backspace_word() : renderer.backspace();
             if (event.key == TerminalKey::TAB) return renderer.insert("\t");
-            if (event.key == TerminalKey::DELETE_KEY) return renderer.erase();
-            if (event.key == TerminalKey::ARROW_LEFT) return renderer.move_left();
-            if (event.key == TerminalKey::ARROW_RIGHT) return renderer.move_right();
-            if (event.key == TerminalKey::HOME) return renderer.move_home();
-            if (event.key == TerminalKey::END) return renderer.move_end();
+            if (event.key == TerminalKey::DELETE_KEY) return control ? renderer.erase_word() : renderer.erase();
+            if (event.key == TerminalKey::ARROW_LEFT) return control ? renderer.move_word_left() : renderer.move_left();
+            if (event.key == TerminalKey::ARROW_RIGHT) return control ? renderer.move_word_right() : renderer.move_right();
+            if (event.key == TerminalKey::ARROW_UP) return renderer.move_up();
+            if (event.key == TerminalKey::ARROW_DOWN) return renderer.move_down();
+            if (event.key == TerminalKey::HOME) return control ? renderer.move_document_home() : renderer.move_home();
+            if (event.key == TerminalKey::END) return control ? renderer.move_document_end() : renderer.move_end();
             if (event.key == TerminalKey::PAGE_UP || event.key == TerminalKey::PAGE_DOWN) {
                 return renderer.page(event.key == TerminalKey::PAGE_UP ? -1 : 1);
             }
-            const bool control = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::CONTROL);
-            const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
+            if (event.key == TerminalKey::CHARACTER && control && !alt_gr && event.text == "j") return renderer.insert("\n");
             if (event.key == TerminalKey::CHARACTER && !event.text.empty() && (!control || alt_gr)) {
                 return renderer.insert(event.text);
             }
@@ -346,12 +351,9 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                 continue;
             }
             agent.select_model(*std::move(next));
-            auto notice = "[model: " + agent.model.entry.id;
-            if (agent.model.reasoning_effort) {
-                notice += "@" + *agent.model.reasoning_effort;
-            }
-            notice += "]\n";
-            if (!rendered(renderer.notice(notice), "cannot render model selection")) co_return 1;
+            if (!rendered(renderer.render(ModelSelected{.name = agent.model.entry.id, .effort = agent.model.reasoning_effort}),
+                          "cannot render model selection"))
+                co_return 1;
             continue;
         }
 

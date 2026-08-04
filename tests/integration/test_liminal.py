@@ -138,6 +138,17 @@ def read_conpty_until(process, output, marker, timeout):
         output.extend(chunk)
 
 
+def read_conpty_until_fresh(process, output, marker, timeout):
+    deadline = time.monotonic() + timeout
+    start = len(output)
+    while marker not in output[start:]:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"fresh {marker!r} did not appear: {output!r}"
+        chunk = process.read(remaining)
+        assert chunk, f"ConPTY produced no fresh output before {marker!r}: {output!r}"
+        output.extend(chunk)
+
+
 def read_conpty_frame_without(process, output, marker, timeout):
     deadline = time.monotonic() + timeout
     start = len(output)
@@ -197,12 +208,18 @@ def check_conpty_terminal_session(tmp_path, base_url):
         process.write(b"/model\r")
         read_conpty_until(process, output, b"select with /model", 5)
 
+        process.write(b"\x1b[A")
+        read_conpty_until(process, output, b"test-model > /model", 5)
+        process.write(b"\x1b[B")
+        read_conpty_until_fresh(process, output, b"\rtest-model > ", 5)
+
         process.write(b"\x1b[5~")
         read_conpty_until(process, output, b"history", 5)
         process.write(b"\x1b[6~")
 
         process.write(b"\x1b[200~a\nb\x1b[201~")
-        read_conpty_until(process, output, b"a\\nb", 5)
+        read_conpty_until(process, output, b"\x1b[8;2H", 5)
+        assert b"test-model > a" in output
 
         redraws = output.count(b"\x1b[H")
         process.resize(50, 10)
@@ -704,6 +721,11 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             assert readable, f"model catalog did not enter the viewport: {output!r}"
             output.extend(os.read(master, 4096))
 
+        os.write(master, b"\x1b[A")
+        read_pty_until(master, output, b"test-model > /model", 5)
+        os.write(master, b"\x1b[B")
+        read_pty_frame_without(master, output, b"test-model > /model", 5)
+
         os.write(master, b"\x1b[5~")
         deadline = time.monotonic() + 5
         while b"history" not in output:
@@ -716,7 +738,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
 
         os.write(master, b"\x1b[200~a\nb\x1b[201~")
         deadline = time.monotonic() + 5
-        while b"a\\nb" not in output:
+        while b"\x1b[8;2H" not in output:
             remaining = deadline - time.monotonic()
             assert remaining > 0, (
                 f"multiline paste was not projected into the composer: {output!r}"
@@ -726,6 +748,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
                 f"multiline paste was not projected into the composer: {output!r}"
             )
             output.extend(os.read(master, 4096))
+        assert b"test-model > a" in output
 
         redraws = output.count(b"\x1b[H")
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 10, 50, 0, 0))

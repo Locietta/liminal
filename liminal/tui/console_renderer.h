@@ -28,10 +28,18 @@ struct ConsoleRenderer {
     lighter::Error insert(std::string_view text);
     lighter::Error backspace();
     lighter::Error erase();
+    lighter::Error backspace_word();
+    lighter::Error erase_word();
     lighter::Error move_left();
     lighter::Error move_right();
+    lighter::Error move_word_left();
+    lighter::Error move_word_right();
+    lighter::Error move_up();
+    lighter::Error move_down();
     lighter::Error move_home();
     lighter::Error move_end();
+    lighter::Error move_document_home();
+    lighter::Error move_document_end();
     lighter::Error page(i32 direction);
     lighter::Error resize(lighter::TerminalSize size);
     lighter::Error redraw();

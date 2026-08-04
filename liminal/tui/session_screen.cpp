@@ -1,6 +1,7 @@
 #include "session_screen.h"
 
 #include <algorithm>
+#include <cctype>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -155,54 +156,162 @@ std::vector<LayoutRow> visible_rows(const SessionScreen &screen) {
     return rows;
 }
 
-struct DisplayComposer {
-    std::string text;
-    i32 cursor_column = 0;
-};
-
-DisplayComposer display_composer(const Composer &composer) {
-    DisplayComposer display;
-    usize offset = 0;
-    while (offset < composer.text.size()) {
-        if (offset == composer.cursor) display.cursor_column = text_width(display.text);
-        const auto grapheme = next_grapheme(composer.text, offset);
-        const auto encoded = std::string_view(composer.text).substr(offset, grapheme.size);
-        offset += grapheme.size;
-        if (encoded == "\r") continue;
-        if (encoded == "\n") {
-            display.text += "\\n";
-        } else if (encoded == "\t") {
-            display.text += "\\t";
-        } else {
-            display.text += encoded;
-        }
-    }
-    if (composer.cursor == composer.text.size()) display.cursor_column = text_width(display.text);
-    return display;
+usize line_start(std::string_view text, usize cursor) {
+    if (cursor == 0) return 0;
+    const auto newline = text.rfind('\n', cursor - 1);
+    return newline == std::string_view::npos ? 0 : newline + 1;
 }
 
-std::string cell_slice(std::string_view text, i32 first, i32 width) {
-    std::string output;
-    i32 column = 0;
+usize line_end(std::string_view text, usize cursor) {
+    const auto newline = text.find('\n', cursor);
+    return newline == std::string_view::npos ? text.size() : newline;
+}
+
+i32 composer_width(std::string_view text) {
+    i32 width = 0;
     usize offset = 0;
-    while (offset < text.size() && text_width(output) < width) {
+    while (offset < text.size()) {
         const auto grapheme = next_grapheme(text, offset);
         const auto encoded = text.substr(offset, grapheme.size);
         offset += grapheme.size;
-        const auto cells = grapheme.width;
-        if (cells == 0) {
-            if (column >= first && !output.empty()) output += encoded;
-            continue;
-        }
-        if (column + cells <= first) {
-            column += cells;
-            continue;
-        }
-        if (column < first || text_width(output) + cells > width) break;
-        output += encoded;
-        column += cells;
+        if (encoded == "\r" || encoded == "\n") continue;
+        width += encoded == "\t" ? 2 : std::max(grapheme.width, 0);
     }
-    return output;
+    return width;
+}
+
+usize offset_at_column(std::string_view text, usize first, usize last, i32 column) {
+    i32 used = 0;
+    auto offset = first;
+    while (offset < last) {
+        const auto grapheme = next_grapheme(text, offset);
+        const auto encoded = text.substr(offset, grapheme.size);
+        const auto width = encoded == "\t" ? 2 : std::max(grapheme.width, 0);
+        if (width > 0 && used + width > column) break;
+        used += width;
+        offset += grapheme.size;
+    }
+    return offset;
+}
+
+bool space_grapheme(std::string_view value) {
+    return value == "\n" || value == "\r" || value == "\t" || value == " " ||
+           (value.size() == 1 && std::isspace(static_cast<unsigned char>(value.front())) != 0);
+}
+
+bool word_grapheme(std::string_view value) {
+    if (value.size() != 1) return !space_grapheme(value);
+    const auto character = static_cast<unsigned char>(value.front());
+    return std::isalnum(character) != 0 || character == '_';
+}
+
+usize previous_word_boundary(std::string_view text, usize cursor) {
+    auto offset = cursor;
+    while (offset > 0) {
+        const auto previous = previous_grapheme_boundary(text, offset);
+        if (!space_grapheme(text.substr(previous, offset - previous))) break;
+        offset = previous;
+    }
+    if (offset == 0) return 0;
+    auto previous = previous_grapheme_boundary(text, offset);
+    const bool word = word_grapheme(text.substr(previous, offset - previous));
+    while (offset > 0) {
+        previous = previous_grapheme_boundary(text, offset);
+        const auto value = text.substr(previous, offset - previous);
+        if (space_grapheme(value) || word_grapheme(value) != word) break;
+        offset = previous;
+    }
+    return offset;
+}
+
+usize next_word_boundary(std::string_view text, usize cursor) {
+    auto offset = cursor;
+    while (offset < text.size()) {
+        const auto grapheme = next_grapheme(text, offset);
+        const auto value = text.substr(offset, grapheme.size);
+        if (!space_grapheme(value)) break;
+        offset += grapheme.size;
+    }
+    if (offset == text.size()) return offset;
+    auto grapheme = next_grapheme(text, offset);
+    const bool word = word_grapheme(text.substr(offset, grapheme.size));
+    while (offset < text.size()) {
+        grapheme = next_grapheme(text, offset);
+        const auto value = text.substr(offset, grapheme.size);
+        if (space_grapheme(value) || word_grapheme(value) != word) break;
+        offset += grapheme.size;
+    }
+    return offset;
+}
+
+struct ComposerProjection {
+    std::vector<std::string> rows;
+    i32 cursor_row = 0;
+    i32 cursor_column = 0;
+};
+
+std::string composer_prefix(const SessionScreen &screen) {
+    auto prefix = screen.model;
+    if (screen.effort) prefix += "@" + *screen.effort;
+    prefix += " > ";
+    if (text_width(prefix) < screen.size.columns) return prefix;
+    return screen.size.columns >= 3 ? "> " : std::string{};
+}
+
+ComposerProjection project_composer(const SessionScreen &screen) {
+    ComposerProjection result;
+    const auto columns = std::max(screen.size.columns, 1);
+    std::string current = composer_prefix(screen);
+    i32 used = text_width(current);
+    bool cursor_set = false;
+    usize offset = 0;
+    while (offset < screen.composer.text.size()) {
+        const auto start = offset;
+        const auto grapheme = next_grapheme(screen.composer.text, offset);
+        const auto encoded = std::string_view(screen.composer.text).substr(offset, grapheme.size);
+        offset += grapheme.size;
+        if (encoded == "\r") continue;
+        if (encoded == "\n") {
+            if (screen.composer.cursor == start) {
+                result.cursor_row = static_cast<i32>(result.rows.size());
+                result.cursor_column = used;
+                cursor_set = true;
+            }
+            result.rows.push_back(std::move(current));
+            current.clear();
+            used = 0;
+            continue;
+        }
+
+        const auto displayed = encoded == "\t" ? std::string_view("\\t") : encoded;
+        const auto width = encoded == "\t" ? 2 : std::max(grapheme.width, 0);
+        if (width > 0 && used > 0 && used + width > columns) {
+            result.rows.push_back(std::move(current));
+            current.clear();
+            used = 0;
+        }
+        if (screen.composer.cursor == start) {
+            result.cursor_row = static_cast<i32>(result.rows.size());
+            result.cursor_column = used;
+            cursor_set = true;
+        }
+        current += displayed;
+        used += width;
+    }
+    if (!cursor_set || screen.composer.cursor == screen.composer.text.size()) {
+        result.cursor_row = static_cast<i32>(result.rows.size());
+        result.cursor_column = used;
+    }
+    result.rows.push_back(std::move(current));
+    return result;
+}
+
+i32 composer_height(const SessionScreen &screen, const ComposerProjection &projection) {
+    const auto header = screen.size.rows >= 2 ? 1 : 0;
+    const auto status = screen.size.rows >= 3 ? 1 : 0;
+    const auto available = std::max(screen.size.rows - header - status, 1);
+    const auto growth_limit = std::max(std::min(screen.size.rows / 3, 8), 1);
+    return std::min({static_cast<i32>(projection.rows.size()), growth_limit, available});
 }
 
 std::string trim_notice(std::string text) {
@@ -215,35 +324,154 @@ std::string trim_notice(std::string text) {
 void Composer::insert(std::string_view value) {
     text.insert(cursor, value);
     cursor += value.size();
+    preferred_column.reset();
 }
 
 void Composer::backspace() {
     const auto previous = previous_grapheme_boundary(text, cursor);
     text.erase(previous, cursor - previous);
     cursor = previous;
+    preferred_column.reset();
 }
 
 void Composer::erase() {
     const auto next = next_grapheme_boundary(text, cursor);
     text.erase(cursor, next - cursor);
+    preferred_column.reset();
 }
 
-void Composer::move_left() { cursor = previous_grapheme_boundary(text, cursor); }
+void Composer::backspace_word() {
+    const auto previous = previous_word_boundary(text, cursor);
+    text.erase(previous, cursor - previous);
+    cursor = previous;
+    preferred_column.reset();
+}
 
-void Composer::move_right() { cursor = next_grapheme_boundary(text, cursor); }
+void Composer::erase_word() {
+    const auto next = next_word_boundary(text, cursor);
+    text.erase(cursor, next - cursor);
+    preferred_column.reset();
+}
 
-void Composer::move_home() noexcept { cursor = 0; }
+void Composer::move_left() {
+    cursor = previous_grapheme_boundary(text, cursor);
+    preferred_column.reset();
+}
 
-void Composer::move_end() noexcept { cursor = text.size(); }
+void Composer::move_right() {
+    cursor = next_grapheme_boundary(text, cursor);
+    preferred_column.reset();
+}
+
+void Composer::move_word_left() {
+    cursor = previous_word_boundary(text, cursor);
+    preferred_column.reset();
+}
+
+void Composer::move_word_right() {
+    cursor = next_word_boundary(text, cursor);
+    preferred_column.reset();
+}
+
+bool Composer::move_up() {
+    const auto current_start = line_start(text, cursor);
+    if (current_start == 0) return false;
+    const auto target_column =
+        preferred_column.value_or(composer_width(std::string_view(text).substr(current_start, cursor - current_start)));
+    const auto previous_end = current_start - 1;
+    const auto previous_start = line_start(text, previous_end);
+    cursor = offset_at_column(text, previous_start, previous_end, target_column);
+    preferred_column = target_column;
+    return true;
+}
+
+bool Composer::move_down() {
+    const auto current_start = line_start(text, cursor);
+    const auto current_end = line_end(text, cursor);
+    if (current_end == text.size()) return false;
+    const auto target_column =
+        preferred_column.value_or(composer_width(std::string_view(text).substr(current_start, cursor - current_start)));
+    const auto next_start = current_end + 1;
+    const auto next_end = line_end(text, next_start);
+    cursor = offset_at_column(text, next_start, next_end, target_column);
+    preferred_column = target_column;
+    return true;
+}
+
+void Composer::move_home() {
+    cursor = line_start(text, cursor);
+    preferred_column.reset();
+}
+
+void Composer::move_end() {
+    cursor = line_end(text, cursor);
+    preferred_column.reset();
+}
+
+void Composer::move_document_home() noexcept {
+    cursor = 0;
+    preferred_column.reset();
+}
+
+void Composer::move_document_end() noexcept {
+    cursor = text.size();
+    preferred_column.reset();
+}
+
+void Composer::replace(std::string value) {
+    text = std::move(value);
+    cursor = text.size();
+    preferred_column.reset();
+}
 
 void Composer::clear() noexcept {
     text.clear();
     cursor = 0;
+    preferred_column.reset();
 }
 
 std::string Composer::take() {
     cursor = 0;
+    preferred_column.reset();
     return std::exchange(text, {});
+}
+
+void PromptHistory::record(const std::string &prompt) {
+    index.reset();
+    draft.clear();
+    if (prompt.empty() || (!entries.empty() && entries.back() == prompt)) return;
+    constexpr usize k_max_entries = 100;
+    if (entries.size() == k_max_entries) entries.erase(entries.begin());
+    entries.push_back(prompt);
+}
+
+bool PromptHistory::previous(Composer &composer) {
+    if (entries.empty()) return false;
+    if (!index) {
+        draft = composer.text;
+        index = entries.size();
+    }
+    if (*index == 0) return false;
+    --*index;
+    composer.replace(entries[*index]);
+    return true;
+}
+
+bool PromptHistory::next(Composer &composer) {
+    if (!index) return false;
+    ++*index;
+    if (*index < entries.size()) {
+        composer.replace(entries[*index]);
+        return true;
+    }
+    composer.replace(std::exchange(draft, {}));
+    index.reset();
+    return true;
+}
+
+void PromptHistory::edited() noexcept {
+    index.reset();
+    draft.clear();
 }
 
 void SessionScreen::resize(lighter::TerminalSize next) noexcept {
@@ -257,7 +485,12 @@ void SessionScreen::set_model(std::string_view name, const std::optional<std::st
 }
 
 void SessionScreen::apply(const Event &event) {
-    transcript.apply(event);
+    if (const auto *notice = std::get_if<SessionNotice>(&event)) {
+        transcript.apply(SessionNotice{.text = trim_notice(notice->text)});
+    } else {
+        transcript.apply(event);
+    }
+    if (const auto *selected = std::get_if<ModelSelected>(&event)) set_model(selected->name, selected->effort);
     if (std::holds_alternative<PromptSubmitted>(event)) state = SessionState::WAITING;
     if (std::holds_alternative<AssistantTextDelta>(event)) state = SessionState::STREAMING;
     if (std::holds_alternative<ToolStarted>(event)) state = SessionState::RUNNING_TOOLS;
@@ -269,6 +502,104 @@ void SessionScreen::apply(const Event &event) {
 }
 
 void SessionScreen::add_notice(std::string text) { apply(SessionNotice{.text = trim_notice(std::move(text))}); }
+
+void SessionScreen::insert(std::string_view text) {
+    prompt_history.edited();
+    composer.insert(text);
+    mark_editing();
+}
+
+void SessionScreen::backspace() {
+    prompt_history.edited();
+    composer.backspace();
+    mark_editing();
+}
+
+void SessionScreen::erase() {
+    prompt_history.edited();
+    composer.erase();
+    mark_editing();
+}
+
+void SessionScreen::backspace_word() {
+    prompt_history.edited();
+    composer.backspace_word();
+    mark_editing();
+}
+
+void SessionScreen::erase_word() {
+    prompt_history.edited();
+    composer.erase_word();
+    mark_editing();
+}
+
+void SessionScreen::move_left() {
+    composer.move_left();
+    mark_editing();
+}
+
+void SessionScreen::move_right() {
+    composer.move_right();
+    mark_editing();
+}
+
+void SessionScreen::move_word_left() {
+    composer.move_word_left();
+    mark_editing();
+}
+
+void SessionScreen::move_word_right() {
+    composer.move_word_right();
+    mark_editing();
+}
+
+void SessionScreen::move_up() {
+    if (!composer.move_up()) prompt_history.previous(composer);
+    mark_editing();
+}
+
+void SessionScreen::move_down() {
+    if (!composer.move_down()) prompt_history.next(composer);
+    mark_editing();
+}
+
+void SessionScreen::move_home() {
+    composer.move_home();
+    mark_editing();
+}
+
+void SessionScreen::move_end() {
+    composer.move_end();
+    mark_editing();
+}
+
+void SessionScreen::move_document_home() {
+    composer.move_document_home();
+    mark_editing();
+}
+
+void SessionScreen::move_document_end() {
+    composer.move_document_end();
+    mark_editing();
+}
+
+void SessionScreen::clear_prompt() {
+    prompt_history.edited();
+    composer.clear();
+    mark_editing();
+}
+
+std::string SessionScreen::take_prompt() {
+    auto prompt = composer.take();
+    prompt_history.record(prompt);
+    return prompt;
+}
+
+void SessionScreen::mark_editing() noexcept {
+    if (state != SessionState::WAITING && state != SessionState::STREAMING && state != SessionState::RUNNING_TOOLS) {
+        state = SessionState::EDITING;
+    }
+}
 
 std::vector<LayoutRow> SessionScreen::layout_block(const Block &block) const {
     const bool stable = block.state != BlockState::STREAMING && block.state != BlockState::RUNNING;
@@ -333,7 +664,12 @@ void SessionScreen::follow_tail() noexcept {
     unread = false;
 }
 
-i32 SessionScreen::viewport_rows() const noexcept { return std::max(size.rows - 3, 0); }
+i32 SessionScreen::viewport_rows() const {
+    const auto projection = project_composer(*this);
+    const auto header = size.rows >= 2 ? 1 : 0;
+    const auto status = size.rows >= 3 ? 1 : 0;
+    return std::max(size.rows - header - status - composer_height(*this, projection), 0);
+}
 
 Frame SessionScreen::frame() const {
     Frame result{.surface = Surface(size.columns, size.rows)};
@@ -341,7 +677,9 @@ Frame SessionScreen::frame() const {
 
     const bool header = size.rows >= 2;
     const bool status = size.rows >= 3;
-    const auto prompt_row = size.rows - 1;
+    const auto projected_composer = project_composer(*this);
+    const auto prompt_rows = composer_height(*this, projected_composer);
+    const auto prompt_row = size.rows - prompt_rows;
     if (header) {
         auto selection = model;
         if (effort) selection += "@" + *effort;
@@ -360,20 +698,22 @@ Frame SessionScreen::frame() const {
             status_text = "history";
             if (unread) status_text += " | new output";
         } else {
-            status_text = "PageUp/PageDown scroll";
+            status_text = "PageUp/PageDown scroll | Enter send | Ctrl+J newline";
         }
-        result.surface.write(size.rows - 2, 0, status_text, Style::MUTED);
+        result.surface.write(prompt_row - 1, 0, status_text, Style::MUTED);
     }
 
-    auto displayed = display_composer(composer);
-    auto prefix = model;
-    if (effort) prefix += "@" + *effort;
-    prefix += " > ";
-    const auto cursor = text_width(prefix) + displayed.cursor_column;
-    const auto first = std::max(cursor - size.columns + 1, 0);
-    const auto line = cell_slice(prefix + displayed.text, first, size.columns);
-    result.surface.write(prompt_row, 0, line, Style::NORMAL);
-    result.cursor = {.row = prompt_row, .column = std::clamp(cursor - first, 0, size.columns - 1), .visible = true};
+    const auto first_composer_row = std::max(projected_composer.cursor_row - prompt_rows + 1, 0);
+    for (i32 index = 0; index < prompt_rows; ++index) {
+        const auto source = first_composer_row + index;
+        if (source >= static_cast<i32>(projected_composer.rows.size())) break;
+        result.surface.write(prompt_row + index, 0, projected_composer.rows[static_cast<usize>(source)], Style::NORMAL);
+    }
+    result.cursor = {
+        .row = prompt_row + projected_composer.cursor_row - first_composer_row,
+        .column = std::clamp(projected_composer.cursor_column, 0, size.columns - 1),
+        .visible = true,
+    };
     return result;
 }
 

@@ -230,9 +230,14 @@ void TerminalInputDecoder::parse(bool flush_escape, std::function_ref<void(Termi
         }
 
         const auto byte = static_cast<u8>(input.front());
-        if (byte == '\r' || byte == '\n') {
+        if (byte == '\r') {
             input.erase(0, 1);
             emit(key_event(TerminalKey::ENTER));
+            continue;
+        }
+        if (byte == '\n') {
+            input.erase(0, 1);
+            emit(key_event(TerminalKey::CHARACTER, TerminalModifiers::CONTROL, "j"));
             continue;
         }
         if (byte == 0x7f || byte == 0x08) {

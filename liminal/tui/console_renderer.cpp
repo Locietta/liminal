@@ -34,6 +34,12 @@ lighter::Error render_plain(const Event &event) {
                 return write_stdout("\n[turn cancelled; discarded from history - command side effects may remain]\n");
             } else if constexpr (std::same_as<T, TurnFailed>) {
                 return write_stdout("\n[error: " + plain_text(value.message) + "]\n");
+            } else if constexpr (std::same_as<T, SessionNotice>) {
+                return write_stdout(plain_text(value.text));
+            } else if constexpr (std::same_as<T, ModelSelected>) {
+                auto selection = plain_text(value.name);
+                if (value.effort) selection += "@" + plain_text(*value.effort);
+                return write_stdout("[model: " + selection + "]\n");
             }
             return {};
         },
@@ -88,52 +94,80 @@ lighter::Error ConsoleRenderer::prompt(std::string_view model, const std::option
     return write_stdout("\n" + selection + " > ");
 }
 
-lighter::Error ConsoleRenderer::notice(std::string_view text) {
-    if (!terminal) return write(text);
-    screen.add_notice(std::string(text));
-    if (auto error = redraw()) return error;
-    return mirror_plain_output ? write_stdout(plain_text(text)) : lighter::Error{};
-}
+lighter::Error ConsoleRenderer::notice(std::string_view text) { return render(SessionNotice{.text = std::string(text)}); }
 
 lighter::Error ConsoleRenderer::insert(std::string_view text) {
-    screen.composer.insert(text);
-    screen.state = SessionState::EDITING;
+    screen.insert(text);
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::backspace() {
-    screen.composer.backspace();
-    screen.state = SessionState::EDITING;
+    screen.backspace();
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::erase() {
-    screen.composer.erase();
-    screen.state = SessionState::EDITING;
+    screen.erase();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::backspace_word() {
+    screen.backspace_word();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::erase_word() {
+    screen.erase_word();
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::move_left() {
-    screen.composer.move_left();
-    screen.state = SessionState::EDITING;
+    screen.move_left();
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::move_right() {
-    screen.composer.move_right();
-    screen.state = SessionState::EDITING;
+    screen.move_right();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::move_word_left() {
+    screen.move_word_left();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::move_word_right() {
+    screen.move_word_right();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::move_up() {
+    screen.move_up();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::move_down() {
+    screen.move_down();
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::move_home() {
-    screen.composer.move_home();
-    screen.state = SessionState::EDITING;
+    screen.move_home();
     return redraw();
 }
 
 lighter::Error ConsoleRenderer::move_end() {
-    screen.composer.move_end();
-    screen.state = SessionState::EDITING;
+    screen.move_end();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::move_document_home() {
+    screen.move_document_home();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::move_document_end() {
+    screen.move_document_end();
     return redraw();
 }
 
@@ -174,13 +208,12 @@ lighter::Error ConsoleRenderer::flush() {
 void ConsoleRenderer::set_redraw_scheduler(std::copyable_function<void()> scheduler) { redraw_scheduler = std::move(scheduler); }
 
 lighter::Error ConsoleRenderer::clear_prompt() {
-    screen.composer.clear();
-    screen.state = SessionState::EDITING;
+    screen.clear_prompt();
     return redraw();
 }
 
 bool ConsoleRenderer::prompt_empty() const noexcept { return screen.composer.empty(); }
 
-std::string ConsoleRenderer::take_prompt() { return screen.composer.take(); }
+std::string ConsoleRenderer::take_prompt() { return screen.take_prompt(); }
 
 } // namespace liminal::tui

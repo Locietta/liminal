@@ -66,6 +66,12 @@ void Transcript::apply_one(const SessionNotice &event) {
     append({.kind = BlockKind::NOTICE, .state = BlockState::COMPLETED, .text = event.text});
 }
 
+void Transcript::apply_one(const ModelSelected &event) {
+    auto selection = event.name;
+    if (event.effort) selection += "@" + *event.effort;
+    append({.kind = BlockKind::NOTICE, .state = BlockState::COMPLETED, .text = "Model: " + selection});
+}
+
 void Transcript::finish_streaming(BlockState state) {
     if (!blocks.empty() && blocks.back().kind == BlockKind::ASSISTANT && blocks.back().state == BlockState::STREAMING) {
         blocks.back().state = state;
