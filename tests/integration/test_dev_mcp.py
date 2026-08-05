@@ -3,6 +3,7 @@
 import ctypes
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -20,6 +21,7 @@ from binaries import find_binary
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+LAUNCHER = REPO_ROOT / "scripts" / "run_dev_mcp.py"
 
 
 BINARY = find_binary(REPO_ROOT, "liminal-dev-mcp", "LIMINAL_DEV_MCP_BINARY")
@@ -58,9 +60,9 @@ def run_server(messages, *, environment=None, timeout=20):
 
 
 @contextmanager
-def running_server(*, environment=None):
+def running_server(*, environment=None, command=None):
     process = subprocess.Popen(
-        [str(BINARY)],
+        command or [str(BINARY)],
         cwd=REPO_ROOT,
         env=environment,
         stdin=subprocess.PIPE,
@@ -257,6 +259,34 @@ def test_headless_session_can_be_discovered_reproduced_and_inspected():
     assert snapshot["ansi_operations"]
     assert snapshot["cells"]
     assert responses["close"]["result"]["structuredContent"]["closed"] is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows executable locking test")
+def test_windows_launcher_runs_a_replaceable_shadow_copy(tmp_path):
+    canonical = tmp_path / "liminal-dev-mcp.exe"
+    shutil.copy2(BINARY, canonical)
+    environment = os.environ.copy()
+    environment["LIMINAL_DEV_MCP_BINARY"] = str(canonical)
+
+    with running_server(
+        environment=environment, command=[sys.executable, str(LAUNCHER)]
+    ) as process:
+        discovered = exchange(process, request("discover", "server/discover"))
+        assert "2025-11-25" in discovered["result"]["supportedVersions"]
+
+        # This write fails with ERROR_SHARING_VIOLATION if the server is
+        # executing the canonical file instead of its runtime snapshot.
+        canonical.write_bytes(b"MZ replacement")
+        listed = exchange(process, request("list", "tools/list"))
+        assert any(
+            tool["name"] == "session_create" for tool in listed["result"]["tools"]
+        )
+
+    snapshots = list(
+        (tmp_path / ".liminal-dev-mcp-runtime").glob("liminal-dev-mcp-*.exe")
+    )
+    assert len(snapshots) == 1
+    assert snapshots[0].stat().st_size > canonical.stat().st_size
 
 
 def test_live_session_operates_real_liminal_process(openai_mock, tmp_path):

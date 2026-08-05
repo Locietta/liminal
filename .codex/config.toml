@@ -1,6 +1,7 @@
 [mcp_servers.liminal_dev]
 command = "pixi"
-args = ["run", "xmake", "run", "liminal-dev-mcp"]
+# Keep xmake output in build/; Windows runs a shadow copy so it remains replaceable.
+args = ["run", "python", "scripts/run_dev_mcp.py"]
 cwd = "."
 env_vars = [
   "http_proxy",
