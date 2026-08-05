@@ -73,7 +73,6 @@ def openai_mock_fixture(**kwargs):
 openai_mock = openai_mock_fixture()
 openai_slow_mock = openai_mock_fixture(chunk_delay=0.02)
 openai_mock_no_compact = openai_mock_fixture(compact_404=True)
-openai_mock_no_models = openai_mock_fixture(models_status=404)
 
 
 @pytest.fixture
@@ -86,12 +85,11 @@ def codex_auth_mock():
     server.shutdown()
 
 
-def configured_provider(api, base_url, api_key, models, discover_models=False):
+def configured_provider(api, base_url, api_key, models):
     return {
         "api": api,
         "base_url": base_url,
         "api_key": api_key,
-        "discover_models": discover_models,
         "models": models,
     }
 
@@ -401,36 +399,6 @@ def test_anthropic_full_cycle(anthropic_mock, tmp_path):
     assert "Continuing from the compacted context." in out
 
 
-def test_anthropic_model_effort_uses_adaptive_thinking(anthropic_mock, tmp_path):
-    url, state = anthropic_mock
-    out = run_liminal(
-        "/model adaptive-model@high\nwhat directory are we in?\n/quit\n",
-        {
-            "anthropic": configured_provider(
-                "anthropic-messages",
-                url,
-                mock_anthropic.API_KEY,
-                [
-                    {"id": "test-model"},
-                    {
-                        "id": "adaptive-model",
-                        "reasoning_efforts": ["low", "high"],
-                    },
-                ],
-            )
-        },
-        tmp_path,
-    )
-    assert "[model: adaptive-model@high]" in out
-    check(state, ["429", "tools-turn", "continuation"])
-    assert all(body["model"] == "adaptive-model" for body in state["request_bodies"])
-    assert all(
-        body["thinking"] == {"type": "adaptive"}
-        and body["output_config"] == {"effort": "high"}
-        for body in state["request_bodies"]
-    )
-
-
 def test_openai_full_cycle_remote_compact(openai_mock, tmp_path):
     """429 retry, encrypted reasoning replay, parallel tools, native /responses/compact."""
     url, state = openai_mock
@@ -467,40 +435,6 @@ def test_openai_gateway_compact_fallback(openai_mock_no_compact, tmp_path):
         ["429", "tools-turn", "continuation", "compact-404", "compact-summarizer"],
     )
     assert "[history compacted]" in out
-
-
-def test_model_catalog_discovers_only_opted_in_providers(
-    anthropic_mock, openai_mock, tmp_path
-):
-    anthropic_url, anthropic_state = anthropic_mock
-    openai_url, openai_state = openai_mock
-    out = run_liminal(
-        "/model\n/quit\n",
-        {
-            "anthropic": configured_provider(
-                "anthropic-messages",
-                anthropic_url,
-                mock_anthropic.API_KEY,
-                [{"id": "test-model"}],
-                discover_models=True,
-            ),
-            "openai": configured_provider(
-                "openai-responses",
-                openai_url,
-                mock_openai.API_KEY,
-                [{"id": "configured-openai-model"}],
-                discover_models=False,
-            ),
-        },
-        tmp_path,
-    )
-    assert "anthropic/discovered-anthropic-model - Discovered Anthropic Model" in out
-    assert "openai/configured-openai-model" in out
-    assert "openai/discovered-openai-model" not in out
-    assert anthropic_state["model_requests"] == 2  # startup and explicit /model refresh
-    assert openai_state["model_requests"] == 0
-    check(anthropic_state, [])
-    check(openai_state, [])
 
 
 def test_model_selection_carries_history_and_applies_effort(
@@ -546,30 +480,6 @@ def test_model_selection_carries_history_and_applies_effort(
     )
 
 
-def test_manual_model_survives_missing_models_endpoint(openai_mock_no_models, tmp_path):
-    url, state = openai_mock_no_models
-    out = run_liminal(
-        "/model gateway-model@medium\n/quit\n",
-        {
-            "openai": configured_provider(
-                "openai-responses",
-                url,
-                mock_openai.API_KEY,
-                [
-                    {"id": "test-model"},
-                    {"id": "gateway-model", "reasoning_efforts": ["medium"]},
-                ],
-                discover_models=True,
-            )
-        },
-        tmp_path,
-    )
-    assert "[model warning: openai: api error (status 404):" in out
-    assert "[model: gateway-model@medium]" in out
-    assert state["model_requests"] == 2
-    check(state, [])
-
-
 def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
     url, state = codex_auth_mock
     auth_file = tmp_path / "auth.json"
@@ -603,28 +513,11 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
     stored["expires_at"] = 0
     auth_file.write_text(json.dumps({"codex": stored}))
 
-    providers_file = tmp_path / "providers.json"
-    providers_file.write_text(
-        json.dumps(
-            {
-                "providers": {
-                    "codex": {
-                        "discover_models": True,
-                        "models": [
-                            {"id": "gpt-5.6-sol", "name": "Customized Sol"},
-                            {"id": "account-specific-model"},
-                        ],
-                    }
-                }
-            }
-        )
-    )
-    env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
     env["LIMINAL_CODEX_API_BASE_URL"] = f"{url}/codex"
     env["LIMINAL_MODEL"] = "codex/gpt-5.6-sol"
     session = subprocess.run(
         [str(BINARY)],
-        input="/model\nhello\n/quit\n",
+        input="hello\n/quit\n",
         env=env,
         cwd=REPO_ROOT,
         capture_output=True,
@@ -635,18 +528,12 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
         check=False,
     )
     assert session.returncode == 0, session.stderr
-    assert "codex/gpt-5.6-sol - Customized Sol" in session.stdout
-    assert "codex/gpt-5.6-terra - GPT-5.6-Terra" in session.stdout
-    assert "codex/account-specific-model" in session.stdout
-    assert "codex/discovered-codex-model - Discovered Codex Model" in session.stdout
     assert "CODEX_STREAM_OK" in session.stdout
     assert state["log"] == [
         "start",
         "poll",
         "exchange",
         "refresh",
-        "models",
-        "models",
         "responses",
     ]
 

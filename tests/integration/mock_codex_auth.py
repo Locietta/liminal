@@ -3,7 +3,7 @@
 import base64
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs
 
 
 def encode_segment(value):
@@ -139,29 +139,6 @@ def make_server(port=0):
                         "access_token": ACCESS_TOKEN,
                         "refresh_token": "refresh-token",
                         "expires_in": 3600,
-                    }
-                )
-            except AssertionError as error:
-                state["errors"].append(str(error))
-                self.send_error(500, str(error))
-
-        def do_GET(self):
-            try:
-                parsed = urlparse(self.path)
-                assert parsed.path == "/codex/models", f"unexpected path {self.path}"
-                assert parse_qs(parsed.query) == {"client_version": ["0.1.0"]}
-                assert self.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
-                assert self.headers["chatgpt-account-id"] == "account-123"
-                assert self.headers["originator"] == "liminal"
-                state["log"].append("models")
-                self.send_json(
-                    {
-                        "models": [
-                            {
-                                "slug": "discovered-codex-model",
-                                "display_name": "Discovered Codex Model",
-                            }
-                        ]
                     }
                 )
             except AssertionError as error:

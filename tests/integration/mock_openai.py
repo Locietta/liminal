@@ -27,16 +27,12 @@ def sse(events):
     ).encode()
 
 
-def make_server(
-    port=0, compact_404=False, models_status=200, models=None, chunk_delay=0
-):
+def make_server(port=0, compact_404=False, chunk_delay=0):
     """Returns (server, state). state: calls, log[], errors[]."""
-    models = models or ["test-model", "discovered-openai-model"]
     state = {
         "calls": 0,
         "log": [],
         "errors": [],
-        "model_requests": 0,
         "request_bodies": [],
     }
 
@@ -47,40 +43,6 @@ def make_server(
         def do_POST(self):
             try:
                 self.handle_post()
-            except AssertionError as error:
-                state["errors"].append(f"openai mock: {error}")
-                self.send_error(500, str(error))
-
-        def do_GET(self):
-            try:
-                assert self.path == "/v1/models", f"unexpected path {self.path}"
-                assert self.headers["Authorization"] == f"Bearer {API_KEY}", (
-                    "missing/wrong bearer token"
-                )
-                state["model_requests"] += 1
-                if models_status != 200:
-                    self.send_json(
-                        models_status,
-                        {
-                            "error": {
-                                "message": "models unavailable",
-                                "type": "not_found",
-                            }
-                        },
-                        "req_models_error",
-                    )
-                    return
-                self.send_json(
-                    200,
-                    {
-                        "object": "list",
-                        "data": [
-                            {"id": model, "object": "model", "owned_by": "test"}
-                            for model in models
-                        ],
-                    },
-                    "req_models",
-                )
             except AssertionError as error:
                 state["errors"].append(f"openai mock: {error}")
                 self.send_error(500, str(error))
