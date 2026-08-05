@@ -24,24 +24,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 import mock_anthropic
 import mock_codex_auth
 import mock_openai
+from binaries import find_binary
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TIMEOUT = 120
 
 
-def find_binary():
-    if override := os.environ.get("LIMINAL_BIN"):
-        return Path(override)
-    exe = "liminal.exe" if os.name == "nt" else "liminal"
-    for mode in ("releasedbg", "release"):
-        for platform_dir in (REPO_ROOT / "build").glob(f"*/*/{mode}"):
-            candidate = platform_dir / exe
-            if candidate.exists():
-                return candidate
-    return None
-
-
-BINARY = find_binary()
+BINARY = find_binary(REPO_ROOT, "liminal", "LIMINAL_BIN")
 pytestmark = pytest.mark.skipif(
     BINARY is None, reason="liminal binary not built (run `xmake build liminal`)"
 )

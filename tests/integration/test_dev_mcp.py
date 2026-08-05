@@ -16,27 +16,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 import mock_openai
+from binaries import find_binary
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def find_binary():
-    configured = os.environ.get("LIMINAL_DEV_MCP_BINARY")
-    if configured:
-        candidate = Path(configured)
-        if candidate.exists():
-            return candidate
-    executable = "liminal-dev-mcp.exe" if os.name == "nt" else "liminal-dev-mcp"
-    for mode in ("releasedbg", "release"):
-        for platform_dir in (REPO_ROOT / "build").glob(f"*/*/{mode}"):
-            candidate = platform_dir / executable
-            if candidate.exists():
-                return candidate
-    return None
-
-
-BINARY = find_binary()
+BINARY = find_binary(REPO_ROOT, "liminal-dev-mcp", "LIMINAL_DEV_MCP_BINARY")
 pytestmark = pytest.mark.skipif(
     BINARY is None, reason="liminal-dev-mcp not built (run `pixi run build`)"
 )
