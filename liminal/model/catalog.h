@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,10 +19,19 @@ struct RefreshResult {
     std::vector<std::string> warnings;
 };
 
+/// Injectable boundary for catalog loading and provider model discovery.
+struct CatalogSources {
+    std::copyable_function<Result<provider::Registry>() const> load;
+    std::copyable_function<lighter::Task<std::vector<provider::DiscoveredModel>, Error>(const provider::Registry &registry,
+                                                                                        const provider::Instance &provider) const>
+        discover;
+};
+
 /// Runtime model catalog. Bundled/configured entries are authoritative and
 /// provider discovery is opt-in and best-effort.
 struct Catalog {
     Catalog(std::filesystem::path providers_path, std::filesystem::path auth_path);
+    explicit Catalog(CatalogSources sources);
 
     lighter::Task<RefreshResult, Error> refresh();
     Result<Choice> select(std::string_view selector) const;
@@ -31,7 +41,7 @@ struct Catalog {
 
 private:
     std::filesystem::path providers_path;
-    std::filesystem::path auth_path;
+    CatalogSources sources;
     provider::Registry registry;
     std::vector<Entry> models;
 };

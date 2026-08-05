@@ -48,10 +48,17 @@ Result<ParsedSelector> parse_selector(std::string_view selector) {
 } // namespace
 
 Catalog::Catalog(std::filesystem::path providers_path, std::filesystem::path auth_path)
-    : providers_path(std::move(providers_path)), auth_path(std::move(auth_path)) {}
+    : providers_path(std::move(providers_path)),
+      sources({
+          .load = [providers_path = this->providers_path,
+                   auth_path = std::move(auth_path)]() { return provider::load_registry(providers_path, auth_path); },
+          .discover = [](const provider::Registry &registry, const provider::Instance &provider) { return registry.discover(provider); },
+      }) {}
+
+Catalog::Catalog(CatalogSources sources) : sources(std::move(sources)) {}
 
 lighter::Task<RefreshResult, Error> Catalog::refresh() {
-    auto next_registry = provider::load_registry(providers_path, auth_path);
+    auto next_registry = sources.load();
     if (!next_registry) co_await lighter::fail(std::move(next_registry).error());
 
     std::vector<Entry> refreshed;
@@ -60,7 +67,7 @@ lighter::Task<RefreshResult, Error> Catalog::refresh() {
         for (const auto &entry : provider.models) upsert(refreshed, entry);
         if (!provider.discover_models) continue;
 
-        auto discovered = co_await next_registry->discover(provider);
+        auto discovered = co_await sources.discover(*next_registry, provider);
         if (!discovered) {
             result.warnings.push_back(provider.id + ": " + discovered.error().message());
             continue;

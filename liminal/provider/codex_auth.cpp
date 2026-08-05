@@ -20,6 +20,8 @@
 #include <lighter/codec/json/json.h>
 #include <lighter/http/http.h>
 
+#include "liminal/provider/detail/codex_auth_flow.h"
+
 namespace liminal::codex {
 
 namespace http = lighter::http;
@@ -36,19 +38,11 @@ constexpr std::string_view k_device_redirect_uri = "https://auth.openai.com/devi
 constexpr auto k_login_timeout = std::chrono::minutes(15);
 constexpr auto k_refresh_margin = std::chrono::minutes(1);
 
-struct Credentials {
-    std::string type = "oauth";
-    std::string access_token;
-    std::string refresh_token;
-    i64 expires_at = 0;
-    std::string account_id;
-};
-
 struct AuthFile {
-    std::optional<Credentials> codex;
+    std::optional<detail::Credentials> codex;
 };
 
-struct DeviceStart {
+struct DeviceStartResponse {
     std::string device_auth_id;
     std::string user_code;
     std::variant<u64, std::string> interval;
@@ -63,46 +57,13 @@ struct DeviceTokenRequest {
     std::string user_code;
 };
 
-struct DeviceToken {
-    std::string authorization_code;
-    std::string code_verifier;
-};
-
-struct TokenResponse {
-    std::string access_token;
-    std::string refresh_token;
-    i64 expires_in = 0;
-};
-
-struct JwtAuthClaim {
-    std::string chatgpt_account_id;
-};
-
-struct JwtPayload {
-    JwtAuthClaim auth;
-};
-
 struct AuthState {
-    Credentials credentials;
+    detail::Credentials credentials;
     std::filesystem::path path;
     std::string auth_base_url;
 
     Task<provider::ResolvedAuth, Error> resolve();
 };
-
-} // namespace
-
-} // namespace liminal::codex
-
-template <>
-struct glz::meta<liminal::codex::JwtPayload> {
-    using T = liminal::codex::JwtPayload;
-    static constexpr auto value = object("https://api.openai.com/auth", &T::auth);
-};
-
-namespace liminal::codex {
-
-namespace {
 
 constexpr json::Opts k_json_options{{.null_terminated = false, .error_on_unknown_keys = false}};
 
@@ -139,7 +100,7 @@ Result<AuthFile> read_auth_file(const std::filesystem::path &path) {
     return parse_json<AuthFile>(text, "invalid auth file '" + path.string() + "'");
 }
 
-Result<void> write_auth_file(const std::filesystem::path &path, Credentials credentials) {
+Result<void> write_auth_file(const std::filesystem::path &path, detail::Credentials credentials) {
     std::error_code directory_error;
     if (!path.parent_path().empty()) {
         std::filesystem::create_directories(path.parent_path(), directory_error);
@@ -173,66 +134,7 @@ i64 unix_milliseconds() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-Result<std::string> decode_base64_url(std::string_view encoded) {
-    static constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string normalized(encoded);
-    for (auto &ch : normalized) {
-        if (ch == '-') ch = '+';
-        if (ch == '_') ch = '/';
-    }
-    while (normalized.size() % 4 != 0) normalized.push_back('=');
-
-    std::string decoded;
-    decoded.reserve(normalized.size() / 4 * 3);
-    u32 accumulator = 0;
-    int bits = 0;
-    for (char ch : normalized) {
-        if (ch == '=') break;
-        const auto index = alphabet.find(ch);
-        if (index == std::string_view::npos) {
-            return outcome_error(Error::config("Codex access token has invalid base64url payload"));
-        }
-        accumulator = (accumulator << 6) | static_cast<u32>(index);
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            decoded.push_back(static_cast<char>((accumulator >> bits) & 0xff));
-        }
-    }
-    return decoded;
-}
-
-Result<std::string> account_id_from_token(std::string_view token) {
-    const auto first = token.find('.');
-    const auto second = first == std::string_view::npos ? first : token.find('.', first + 1);
-    if (first == std::string_view::npos || second == std::string_view::npos) {
-        return outcome_error(Error::config("Codex access token is not a JWT"));
-    }
-    auto payload_text = decode_base64_url(token.substr(first + 1, second - first - 1));
-    if (!payload_text) return outcome_error(std::move(payload_text).error());
-    auto payload = parse_json<JwtPayload>(*payload_text, "invalid Codex access token payload");
-    if (!payload) return outcome_error(std::move(payload).error());
-    if (payload->auth.chatgpt_account_id.empty()) {
-        return outcome_error(Error::config("Codex access token has no ChatGPT account ID"));
-    }
-    return std::move(payload->auth.chatgpt_account_id);
-}
-
-Result<Credentials> credentials_from_token(TokenResponse token) {
-    if (token.access_token.empty() || token.refresh_token.empty() || token.expires_in <= 0) {
-        return outcome_error(Error::config("Codex token response is missing required fields"));
-    }
-    auto account_id = account_id_from_token(token.access_token);
-    if (!account_id) return outcome_error(std::move(account_id).error());
-    return Credentials{
-        .access_token = std::move(token.access_token),
-        .refresh_token = std::move(token.refresh_token),
-        .expires_at = unix_milliseconds() + token.expires_in * 1000,
-        .account_id = *std::move(account_id),
-    };
-}
-
-Task<TokenResponse, Error> exchange_code(std::string_view base_url, const DeviceToken &device) {
+Task<detail::TokenResponse, Error> exchange_code(std::string_view base_url, const detail::DeviceToken &device) {
     http::Client client;
     std::vector<http::QueryParam> fields;
     fields.push_back({.name = "grant_type", .value = "authorization_code"});
@@ -245,10 +147,10 @@ Task<TokenResponse, Error> exchange_code(std::string_view base_url, const Device
     auto sent = co_await std::move(request).send();
     if (!sent) co_await fail(Error::http(std::move(sent).error()));
     if (!sent->ok()) co_await fail(Error::http_status(sent->status, {}, sent->text_copy(), {}));
-    co_return co_await lighter::or_fail(parse_json<TokenResponse>(sent->text(), "invalid Codex token response"));
+    co_return co_await lighter::or_fail(parse_json<detail::TokenResponse>(sent->text(), "invalid Codex token response"));
 }
 
-Task<TokenResponse, Error> refresh_token(std::string_view base_url, std::string_view refresh) {
+Task<detail::TokenResponse, Error> refresh_token(std::string_view base_url, std::string_view refresh) {
     http::Client client;
     std::vector<http::QueryParam> fields;
     fields.push_back({.name = "grant_type", .value = "refresh_token"});
@@ -259,10 +161,10 @@ Task<TokenResponse, Error> refresh_token(std::string_view base_url, std::string_
     auto sent = co_await std::move(request).send();
     if (!sent) co_await fail(Error::http(std::move(sent).error()));
     if (!sent->ok()) co_await fail(Error::http_status(sent->status, {}, sent->text_copy(), {}));
-    co_return co_await lighter::or_fail(parse_json<TokenResponse>(sent->text(), "invalid Codex refresh response"));
+    co_return co_await lighter::or_fail(parse_json<detail::TokenResponse>(sent->text(), "invalid Codex refresh response"));
 }
 
-std::optional<u64> interval_seconds(const DeviceStart &start) {
+std::optional<u64> interval_seconds(const DeviceStartResponse &start) {
     if (const auto *number = std::get_if<u64>(&start.interval)) return *number;
     const auto &text = std::get<std::string>(start.interval);
     u64 value = 0;
@@ -271,21 +173,42 @@ std::optional<u64> interval_seconds(const DeviceStart &start) {
     return value;
 }
 
-Task<provider::ResolvedAuth, Error> AuthState::resolve() {
-    if (credentials.expires_at <= unix_milliseconds() + k_refresh_margin.count() * 60 * 1000) {
-        auto token = co_await refresh_token(auth_base_url, credentials.refresh_token).or_fail();
-        credentials = co_await lighter::or_fail(credentials_from_token(std::move(token)));
-        co_await lighter::or_fail(write_auth_file(path, credentials));
-    }
-    co_return provider::ResolvedAuth{
-        .bearer_token = credentials.access_token,
-        .headers =
-            {
-                {.name = "chatgpt-account-id", .value = credentials.account_id},
-                {.name = "originator", .value = "liminal"},
-                {.name = "OpenAI-Beta", .value = "responses=experimental"},
-            },
+Task<detail::DeviceStart, Error> start_device(std::string_view base_url) {
+    http::Client client;
+    auto body = json::to_string(DeviceStartRequest{.client_id = std::string(k_client_id)});
+    if (!body) co_await fail(Error::json(std::move(body).error(), "Codex device login request"));
+    auto sent = co_await client.on().post(std::string(base_url) + "/api/accounts/deviceauth/usercode").json_text(*body).send();
+    if (!sent) co_await fail(Error::http(std::move(sent).error()));
+    if (!sent->ok()) co_await fail(Error::http_status(sent->status, {}, sent->text_copy(), {}));
+
+    auto response = co_await lighter::or_fail(parse_json<DeviceStartResponse>(sent->text(), "invalid Codex device login response"));
+    auto interval = interval_seconds(response);
+    if (!interval) co_await fail(Error::config("Codex device login response is missing required fields"));
+    co_return detail::DeviceStart{
+        .verification_url = std::string(base_url) + "/codex/device",
+        .device_auth_id = std::move(response.device_auth_id),
+        .user_code = std::move(response.user_code),
+        .interval = std::chrono::seconds(*interval),
     };
+}
+
+Task<detail::DeviceToken, Error> poll_device(std::string_view base_url, const detail::DeviceStart &device) {
+    http::Client client;
+    auto body = json::to_string(DeviceTokenRequest{.device_auth_id = device.device_auth_id, .user_code = device.user_code});
+    if (!body) co_await fail(Error::json(std::move(body).error(), "Codex device token request"));
+    auto sent = co_await client.on().post(std::string(base_url) + "/api/accounts/deviceauth/token").json_text(*body).send();
+    if (!sent) co_await fail(Error::http(std::move(sent).error()));
+    if (!sent->ok()) co_await fail(Error::http_status(sent->status, {}, sent->text_copy(), {}));
+    co_return co_await lighter::or_fail(parse_json<detail::DeviceToken>(sent->text(), "invalid Codex device token response"));
+}
+
+Task<provider::ResolvedAuth, Error> AuthState::resolve() {
+    detail::RefreshAttempts attempts{
+        .refresh = [base_url = auth_base_url](const std::string &refresh) { return refresh_token(base_url, refresh); },
+        .save = [path = path](const detail::Credentials &updated) { return write_auth_file(path, updated); },
+        .now_unix_milliseconds = [] { return unix_milliseconds(); },
+    };
+    co_return co_await detail::resolve_auth(attempts, credentials, k_refresh_margin).or_fail();
 }
 
 } // namespace
@@ -328,51 +251,16 @@ Result<std::optional<provider::AuthResolver>> load_auth(const std::filesystem::p
 
 Task<void, Error> login_device(std::filesystem::path path, DeviceCodeNotice notice) {
     const auto base_url = auth_base_url();
-    http::Client client;
-    auto body = json::to_string(DeviceStartRequest{.client_id = std::string(k_client_id)});
-    if (!body) co_await fail(Error::json(std::move(body).error(), "Codex device login request"));
-    auto started = co_await client.on().post(base_url + "/api/accounts/deviceauth/usercode").json_text(*body).send();
-    if (!started) co_await fail(Error::http(std::move(started).error()));
-    if (!started->ok()) co_await fail(Error::http_status(started->status, {}, started->text_copy(), {}));
-    auto device = co_await lighter::or_fail(parse_json<DeviceStart>(started->text(), "invalid Codex device login response"));
-    auto parsed_interval = interval_seconds(device);
-    if (device.device_auth_id.empty() || device.user_code.empty() || !parsed_interval) {
-        co_await fail(Error::config("Codex device login response is missing required fields"));
-    }
-    auto interval = *parsed_interval;
-
-    const auto verification_url = base_url + "/codex/device";
-    notice(verification_url, device.user_code);
-    const auto deadline = std::chrono::steady_clock::now() + k_login_timeout;
-    DeviceToken device_token;
-    while (std::chrono::steady_clock::now() < deadline) {
-        co_await lighter::sleep(std::chrono::seconds(interval));
-        auto poll_body = json::to_string(DeviceTokenRequest{.device_auth_id = device.device_auth_id, .user_code = device.user_code});
-        if (!poll_body) co_await fail(Error::json(std::move(poll_body).error(), "Codex device token request"));
-        auto polled = co_await client.on().post(base_url + "/api/accounts/deviceauth/token").json_text(*poll_body).send();
-        if (!polled) co_await fail(Error::http(std::move(polled).error()));
-        if (polled->ok()) {
-            device_token = co_await lighter::or_fail(parse_json<DeviceToken>(polled->text(), "invalid Codex device token response"));
-            break;
-        }
-        const auto error_body = polled->text();
-        if (error_body.find("slow_down") != std::string_view::npos) {
-            interval += 5;
-            continue;
-        }
-        if (polled->status == 403 || polled->status == 404 ||
-            error_body.find("deviceauth_authorization_pending") != std::string_view::npos) {
-            continue;
-        }
-        co_await fail(Error::http_status(polled->status, {}, polled->text_copy(), {}));
-    }
-    if (device_token.authorization_code.empty() || device_token.code_verifier.empty()) {
-        co_await fail(Error::config("Codex device login timed out"));
-    }
-
-    auto token = co_await exchange_code(base_url, device_token).or_fail();
-    auto credentials = co_await lighter::or_fail(credentials_from_token(std::move(token)));
-    co_await lighter::or_fail(write_auth_file(path, std::move(credentials)));
+    detail::DeviceLoginAttempts attempts{
+        .start = [base_url] { return start_device(base_url); },
+        .poll = [base_url](const detail::DeviceStart &device) { return poll_device(base_url, device); },
+        .exchange = [base_url](const detail::DeviceToken &device) { return exchange_code(base_url, device); },
+        .sleep = [](std::chrono::seconds delay) { return lighter::sleep(delay); },
+        .save = [path = std::move(path)](const detail::Credentials &credentials) { return write_auth_file(path, credentials); },
+        .now = [] { return std::chrono::steady_clock::now(); },
+        .now_unix_milliseconds = [] { return unix_milliseconds(); },
+    };
+    co_return co_await detail::login_device(attempts, notice, k_login_timeout).or_fail();
 }
 
 } // namespace liminal::codex
