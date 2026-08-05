@@ -3,6 +3,7 @@
 #include <array>
 #include <concepts>
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <meta>
@@ -12,6 +13,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <lighter/types.hpp>
 
@@ -54,6 +56,16 @@ struct State<R(Args...)> {
         if (expected_calls && call_count > *expected_calls) {
             throw Error(call_count_message(member, *expected_calls, call_count));
         }
+        if (!actions.empty()) {
+            auto action = std::move(actions.front());
+            actions.pop_front();
+            if constexpr (std::is_void_v<R>) {
+                action(std::forward<Args>(args)...);
+                return;
+            } else {
+                return action(std::forward<Args>(args)...);
+            }
+        }
         if (!behavior) {
             throw Error(std::string(member) + ": unexpected call (no behavior configured)");
         }
@@ -65,22 +77,38 @@ struct State<R(Args...)> {
         }
     }
 
-    void verify() const {
+    [[nodiscard]] std::optional<std::string> verification_error() const {
         if (expected_calls && call_count != *expected_calls) {
-            throw Error(call_count_message(member, *expected_calls, call_count));
+            return call_count_message(member, *expected_calls, call_count);
+        }
+        return std::nullopt;
+    }
+
+    void expect() {
+        if (!expected_calls) {
+            expected_calls = 1;
+            inferred_count = true;
         }
     }
 
-    void configure_behavior() {
-        if (!expected_calls) {
-            expected_calls = 1;
+    void allow() {
+        expected_calls.reset();
+        inferred_count = false;
+    }
+
+    void add_action(std::move_only_function<R(Args...)> action) {
+        actions.push_back(std::move(action));
+        if (inferred_count) {
+            expected_calls = actions.size();
         }
     }
 
     std::string_view member;
     std::move_only_function<R(Args...)> behavior;
+    std::deque<std::move_only_function<R(Args...)>> actions;
     std::optional<usize> expected_calls;
     usize call_count = 0;
+    bool inferred_count = false;
 };
 
 template <std::meta::info Member>
@@ -109,7 +137,13 @@ struct Expectation<R(Args...)> {
         requires std::is_invocable_r_v<R, F &, Args...>
     Expectation &calls(F &&implementation) {
         state.behavior = std::forward<F>(implementation);
-        state.configure_behavior();
+        return *this;
+    }
+
+    template <typename F>
+        requires std::is_invocable_r_v<R, F &, Args...>
+    Expectation &then_calls(F &&implementation) {
+        state.add_action(std::move_only_function<R(Args...)>(std::forward<F>(implementation)));
         return *this;
     }
 
@@ -126,8 +160,22 @@ struct Expectation<R(Args...)> {
         return calls([](Args...) {});
     }
 
+    template <typename Value>
+        requires(!std::is_void_v<R> && !std::is_reference_v<R> && std::constructible_from<R, Value>)
+    Expectation &then_returns(Value &&value) {
+        R result(std::forward<Value>(value));
+        return then_calls([result = std::move(result)](Args...) mutable -> R { return std::move(result); });
+    }
+
+    Expectation &then_returns()
+        requires std::is_void_v<R>
+    {
+        return then_calls([](Args...) {});
+    }
+
     Expectation &times(usize count) {
         state.expected_calls = count;
+        state.inferred_count = false;
         return *this;
     }
 
@@ -140,8 +188,9 @@ private:
     template <typename>
     friend struct Mock;
 
-    explicit Expectation(detail::State<R(Args...)> &state) : state(state) {}
+    explicit Expectation(std::shared_ptr<detail::State<R(Args...)>> state) : owner(std::move(state)), state(*owner) {}
 
+    std::shared_ptr<detail::State<R(Args...)>> owner;
     detail::State<R(Args...)> &state;
 };
 
@@ -149,7 +198,7 @@ private:
 ///
 /// Port must be default-constructible and all of its direct, public data
 /// members must be std::copyable_function<R(Args...)> (optionally const).
-/// Mock owns the port and must outlive every reference to object().
+/// Handles copied from Mock share the controller's state and may outlive it.
 template <typename Port>
 struct Mock {
     Mock() {
@@ -161,27 +210,48 @@ struct Mock {
             auto state = std::make_shared<State>();
             state->member = detail::member_name<member>();
             states[index_of<member>()] = state;
-
-            port.[:member:] = [this](auto &&...args) -> decltype(auto) { return state_for<member>().invoke(decltype(args)(args)...); };
+            port.[:member:] = [state](auto &&...args) -> decltype(auto) { return state->invoke(decltype(args)(args)...); };
         }
     }
 
     Mock(const Mock &) = delete;
-    Mock(Mock &&) = delete;
+    Mock(Mock &&) noexcept = default;
     Mock &operator=(const Mock &) = delete;
-    Mock &operator=(Mock &&) = delete;
+    Mock &operator=(Mock &&) noexcept = default;
 
-    [[nodiscard]] Port &object() noexcept { return port; }
-    [[nodiscard]] const Port &object() const noexcept { return port; }
+    [[nodiscard]] Port handle() const { return port; }
 
     template <std::meta::info Member>
-    [[nodiscard]] auto on() {
+    [[nodiscard]] auto expect() {
         static_assert(contains<Member>(), "the reflected entity is not a direct public member of this mock's port");
-        return Expectation<detail::member_signature_t<Member>>(state_for<Member>());
+        auto state = state_for<Member>();
+        state->expect();
+        return Expectation<detail::member_signature_t<Member>>(std::move(state));
+    }
+
+    template <std::meta::info Member>
+    [[nodiscard]] auto allow() {
+        static_assert(contains<Member>(), "the reflected entity is not a direct public member of this mock's port");
+        auto state = state_for<Member>();
+        state->allow();
+        return Expectation<detail::member_signature_t<Member>>(std::move(state));
     }
 
     void verify() const {
-        template for (constexpr auto member : members()) { state_for<member>().verify(); }
+        std::vector<std::string> failures;
+        template for (constexpr auto member : members()) {
+            if (auto failure = state_for<member>()->verification_error()) {
+                failures.push_back(std::move(*failure));
+            }
+        }
+        if (failures.empty()) {
+            return;
+        }
+        std::string message = "mock verification failed:";
+        for (const auto &failure : failures) {
+            message += "\n  " + failure;
+        }
+        throw Error(std::move(message));
     }
 
 private:
@@ -212,13 +282,13 @@ private:
     }
 
     template <std::meta::info Member>
-    [[nodiscard]] detail::member_state_t<Member> &state_for() {
-        return *static_cast<detail::member_state_t<Member> *>(states[index_of<Member>()].get());
+    [[nodiscard]] std::shared_ptr<detail::member_state_t<Member>> state_for() {
+        return std::static_pointer_cast<detail::member_state_t<Member>>(states[index_of<Member>()]);
     }
 
     template <std::meta::info Member>
-    [[nodiscard]] const detail::member_state_t<Member> &state_for() const {
-        return *static_cast<const detail::member_state_t<Member> *>(states[index_of<Member>()].get());
+    [[nodiscard]] std::shared_ptr<const detail::member_state_t<Member>> state_for() const {
+        return std::static_pointer_cast<const detail::member_state_t<Member>>(states[index_of<Member>()]);
     }
 
     Port port{};

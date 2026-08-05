@@ -14,17 +14,17 @@ struct Files {
 };
 
 lighter::mock::Mock<Files> files;
-files.on<^^Files::read>().returns("contents").once();
-files.on<^^Files::remove>().never();
+files.expect<^^Files::read>().returns("contents").once();
+files.expect<^^Files::remove>().never();
 
-run(files.object());
+run(files.handle());
 files.verify();
 ```
 
 Use `calls` when behavior depends on arguments or the result is move-only:
 
 ```cpp
-files.on<^^Files::read>().calls([](std::string_view path) {
+files.expect<^^Files::read>().calls([](std::string_view path) {
     if (path != "settings.json") {
         throw std::runtime_error("unexpected path");
     }
@@ -32,10 +32,14 @@ files.on<^^Files::read>().calls([](std::string_view path) {
 });
 ```
 
-`calls` and `returns` expect one call by default. Override that with `times`,
-`once`, or `never`. `verify` checks expectations that were not already rejected
-at invocation time. The mock is deliberately non-movable because its generated
-dispatchers point back to it.
+`expect` expects one call by default. Override that with `times`, `once`, or
+`never`. Use `allow` to install behavior without constraining the call count.
+Ordered `then_calls` and `then_returns` actions infer their expected count and
+support one-shot move-only results. `verify` reports every unmet expectation.
+
+`handle()` returns a copyable port value. Its dispatchers share ownership of
+their state, so handles may outlive or be copied independently of the movable
+mock controller.
 
 ## Why this shape
 
@@ -57,7 +61,8 @@ foundation yet.
   signatures are accepted; `noexcept` is intentionally rejected because mock
   failures throw.
 - `returns(value)` requires a non-reference, copyable result because the same
-  behavior may run repeatedly. Use `calls` for references and move-only values.
+  behavior may run repeatedly. `then_returns(value)` accepts move-only results
+  because each ordered action runs once. Use callables for reference results.
 - Arguments are not copied into an implicit history. Assert on them inside
   `calls`; that avoids surprising copies, dangling references, and loss of
   move-only arguments.
@@ -70,10 +75,9 @@ foundation yet.
 ## Potential next steps
 
 Adopt callable ports on one dependency boundary with substantial fake
-boilerplate, then evaluate readability and compile-time cost. If the pattern is
-useful, useful extensions are ordered behaviors and opt-in argument capture.
-Avoid automatic deep equality, matcher DSLs, and destructor verification until
-real tests demonstrate a need.
+boilerplate, then evaluate readability and compile-time cost. Avoid automatic
+deep equality, matcher DSLs, implicit argument histories, and destructor
+verification until real tests demonstrate a need.
 
 ## Standards and compiler context
 
