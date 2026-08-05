@@ -15,6 +15,7 @@
 #include <lighter/codec/json/json.h>
 
 #include "liminal/provider/compact.h"
+#include "liminal/provider/detail/anthropic_protocol.h"
 
 // Anthropic Messages API wire types. Internal: the public surface speaks the
 // neutral transcript (provider/history.h); everything here is serialization
@@ -709,20 +710,19 @@ Task<wire::AssistantMessage, Error> attempt_stream(http::Client &http_client, co
 
 } // namespace
 
-Client::Client(ClientOptions options) : options(std::move(options)) {
-    while (!this->options.base_url.empty() && this->options.base_url.back() == '/') {
-        this->options.base_url.pop_back();
-    }
-}
+namespace protocol {
 
-Task<provider::TurnResponse, Error> Client::complete(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
-                                                     const provider::StreamCallbacks &callbacks) {
-    auto wire_history = co_await or_fail(to_wire(history));
+Result<std::string> encode_complete_request(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
+                                            const ClientOptions &options) {
+    auto wire_history = to_wire(history);
+    if (!wire_history) {
+        return outcome_error(std::move(wire_history).error());
+    }
     wire::MessageRequest request{
         .model = options.model,
         .max_tokens = options.max_tokens,
-        .system = std::move(wire_history.system),
-        .messages = std::move(wire_history.messages),
+        .system = std::move(wire_history->system),
+        .messages = std::move(wire_history->messages),
     };
     if (!tools.empty()) {
         request.tools = tools;
@@ -734,9 +734,39 @@ Task<provider::TurnResponse, Error> Client::complete(const provider::History &hi
 
     auto encoded = json::to_string(request);
     if (!encoded) {
-        co_await fail(Error::json(std::move(encoded).error(), "request body"));
+        return outcome_error(Error::json(std::move(encoded).error(), "request body"));
     }
-    const std::string body = *std::move(encoded);
+    return *std::move(encoded);
+}
+
+Result<provider::TurnResponse> decode_stream(std::span<const http::sse::Event> events, const provider::StreamCallbacks &callbacks,
+                                             std::string request_id) {
+    StreamAccumulator accumulator;
+    accumulator.message.request_id = std::move(request_id);
+    for (const auto &event : events) {
+        auto consumed = accumulator.consume(event, callbacks);
+        if (!consumed) {
+            return outcome_error(std::move(consumed).error());
+        }
+    }
+    auto message = std::move(accumulator).finish();
+    if (!message) {
+        return outcome_error(std::move(message).error());
+    }
+    return to_turn_response(*std::move(message));
+}
+
+} // namespace protocol
+
+Client::Client(ClientOptions options) : options(std::move(options)) {
+    while (!this->options.base_url.empty() && this->options.base_url.back() == '/') {
+        this->options.base_url.pop_back();
+    }
+}
+
+Task<provider::TurnResponse, Error> Client::complete(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
+                                                     const provider::StreamCallbacks &callbacks) {
+    const std::string body = co_await or_fail(protocol::encode_complete_request(history, tools, options));
 
     bool text_emitted = false;
     for (usize attempt = 0;; ++attempt) {
