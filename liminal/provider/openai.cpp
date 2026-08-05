@@ -17,6 +17,7 @@
 #include <lighter/codec/json/json.h>
 
 #include "liminal/provider/compact.h"
+#include "liminal/provider/detail/openai_protocol.h"
 #include "liminal/provider/provider.h"
 
 // OpenAI Responses API wire types. Internal: the public surface speaks the
@@ -721,18 +722,18 @@ bool selects_local_fallback(const Error &error) {
 
 } // namespace
 
-Client::Client(ClientOptions options) : options(std::move(options)) {
-    while (!this->options.base_url.empty() && this->options.base_url.back() == '/') {
-        this->options.base_url.pop_back();
-    }
-}
+namespace protocol {
 
-Task<provider::TurnResponse, Error> Client::complete(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
-                                                     const provider::StreamCallbacks &callbacks) {
+Result<std::string> encode_complete_request(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
+                                            const ClientOptions &options) {
+    auto input = to_wire(history);
+    if (!input) {
+        return outcome_error(std::move(input).error());
+    }
     wire::ResponseRequest request{
         .model = options.model,
         .max_output_tokens = options.max_output_tokens,
-        .input = co_await or_fail(to_wire(history)),
+        .input = *std::move(input),
         .tools = make_tools(tools),
     };
     if (options.reasoning_effort) {
@@ -741,9 +742,53 @@ Task<provider::TurnResponse, Error> Client::complete(const provider::History &hi
 
     auto encoded = json::to_string(request);
     if (!encoded) {
-        co_await fail(Error::json(std::move(encoded).error(), "response request body"));
+        return outcome_error(Error::json(std::move(encoded).error(), "response request body"));
     }
-    const std::string body = *std::move(encoded);
+    return *std::move(encoded);
+}
+
+Result<std::string> encode_compact_request(const provider::History &conversation, std::string_view instructions,
+                                           const ClientOptions &options) {
+    auto input = to_wire(conversation);
+    if (!input) {
+        return outcome_error(std::move(input).error());
+    }
+    wire::CompactRequest request{
+        .model = options.model,
+        .input = *std::move(input),
+        .instructions = std::string(instructions),
+    };
+    auto encoded = json::to_string(request);
+    if (!encoded) {
+        return outcome_error(Error::json(std::move(encoded).error(), "compact request body"));
+    }
+    return *std::move(encoded);
+}
+
+Result<provider::TurnResponse> decode_stream(std::span<const http::sse::Event> events, const provider::StreamCallbacks &callbacks,
+                                             std::string request_id) {
+    StreamAccumulator accumulator;
+    accumulator.response.request_id = std::move(request_id);
+    for (const auto &event : events) {
+        auto consumed = accumulator.consume(event, callbacks);
+        if (!consumed) {
+            return outcome_error(std::move(consumed).error());
+        }
+    }
+    return std::move(accumulator).finish();
+}
+
+} // namespace protocol
+
+Client::Client(ClientOptions options) : options(std::move(options)) {
+    while (!this->options.base_url.empty() && this->options.base_url.back() == '/') {
+        this->options.base_url.pop_back();
+    }
+}
+
+Task<provider::TurnResponse, Error> Client::complete(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
+                                                     const provider::StreamCallbacks &callbacks) {
+    const std::string body = co_await or_fail(protocol::encode_complete_request(history, tools, options));
 
     bool text_emitted = false;
     for (usize attempt = 0;; ++attempt) {
@@ -768,16 +813,7 @@ Task<void, Error> Client::compact(provider::History &history, std::string_view i
     const auto instruction_count = provider::instruction_prefix_size(history);
     if (instruction_count == history.size()) co_return;
     provider::History conversation(history.begin() + instruction_count, history.end());
-    wire::CompactRequest request{
-        .model = options.model,
-        .input = co_await or_fail(to_wire(conversation)),
-        .instructions = std::string(instructions),
-    };
-    auto encoded = json::to_string(request);
-    if (!encoded) {
-        co_await fail(Error::json(std::move(encoded).error(), "compact request body"));
-    }
-    const std::string body = *std::move(encoded);
+    const std::string body = co_await or_fail(protocol::encode_compact_request(conversation, instructions, options));
 
     for (usize attempt = 0;; ++attempt) {
         auto outcome = co_await attempt_remote_compact(http_client, options, body);
