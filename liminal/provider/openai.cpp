@@ -17,6 +17,8 @@
 #include <lighter/codec/json/json.h>
 
 #include "liminal/provider/compact.h"
+#include "liminal/provider/detail/completion_retry.h"
+#include "liminal/provider/detail/openai_compaction.h"
 #include "liminal/provider/detail/openai_protocol.h"
 #include "liminal/provider/provider.h"
 
@@ -681,8 +683,8 @@ struct CompactEnvelope {
 /// One attempt against OpenAI's proprietary `POST /responses/compact`
 /// (stateless: full input in, compacted items out). Modeled on codex's
 /// remote-compaction path.
-Task<std::vector<wire::ResponseItem>, Error> attempt_remote_compact(http::Client &http_client, const ClientOptions &options,
-                                                                    const std::string &body) {
+Task<std::vector<provider::OpaquePart>, Error> attempt_remote_compact(http::Client &http_client, const ClientOptions &options,
+                                                                      const std::string &body) {
     auto request = http_client.on().post(options.base_url + "/responses/compact");
     request.json_text(body);
     apply_auth_headers(request, co_await resolve_auth(options).or_fail());
@@ -701,23 +703,17 @@ Task<std::vector<wire::ResponseItem>, Error> attempt_remote_compact(http::Client
     if (!envelope) {
         co_await fail(std::move(envelope).error());
     }
-    std::vector<wire::ResponseItem> output;
+    std::vector<provider::OpaquePart> output;
     output.reserve(envelope->output.size());
     for (const auto &value : envelope->output) {
-        output.push_back(co_await or_fail(parse_item(value)));
+        auto item = co_await or_fail(parse_item(value));
+        auto payload = co_await or_fail(encode_opaque(item));
+        output.push_back({
+            .provider_tag = std::string(k_provider_tag),
+            .payload = std::move(payload),
+        });
     }
     co_return output;
-}
-
-/// The compat question: gateways speaking the OpenAI dialect usually lack the
-/// proprietary compact endpoint. Anything that reads as "no such endpoint /
-/// bad request shape" selects the local fallback; transient failures (429,
-/// 5xx, transport) do not - the endpoint exists, so report them.
-bool selects_local_fallback(const Error &error) {
-    if (error.kind != ErrorKind::HTTP_STATUS) {
-        return false;
-    }
-    return error.status == 400 || error.status == 404 || error.status == 405 || error.status == 501;
 }
 
 } // namespace
@@ -789,24 +785,15 @@ Client::Client(ClientOptions options) : options(std::move(options)) {
 Task<provider::TurnResponse, Error> Client::complete(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
                                                      const provider::StreamCallbacks &callbacks) {
     const std::string body = co_await or_fail(protocol::encode_complete_request(history, tools, options));
-
-    bool text_emitted = false;
-    for (usize attempt = 0;; ++attempt) {
-        auto outcome = co_await attempt_stream(http_client, options, body, callbacks, text_emitted);
-        if (outcome) {
-            co_return *std::move(outcome);
-        }
-        auto error = std::move(outcome).error();
-
-        // Once output reached the user we cannot transparently re-send:
-        // the duplicated prefix would be visible. Surface the error instead.
-        bool can_retry = attempt < options.max_retries && error.retryable() && !text_emitted;
-        if (!can_retry) {
-            co_await fail(std::move(error));
-        }
-        auto delay = error.retry_after.value_or(options.initial_retry_delay * (1 << attempt));
-        co_await lighter::sleep(delay);
-    }
+    provider::detail::CompletionAttempts attempts{
+        .stream = [this](const std::string &request_body, const provider::StreamCallbacks &stream_callbacks,
+                         bool &text_emitted) -> Task<provider::TurnResponse, Error> {
+            return attempt_stream(http_client, options, request_body, stream_callbacks, text_emitted);
+        },
+        .sleep = [](std::chrono::milliseconds delay) { return lighter::sleep(delay); },
+    };
+    co_return co_await provider::detail::complete_with_retry(attempts, body, callbacks, options.max_retries, options.initial_retry_delay)
+        .or_fail();
 }
 
 Task<void, Error> Client::compact(provider::History &history, std::string_view instructions) {
@@ -814,38 +801,15 @@ Task<void, Error> Client::compact(provider::History &history, std::string_view i
     if (instruction_count == history.size()) co_return;
     provider::History conversation(history.begin() + instruction_count, history.end());
     const std::string body = co_await or_fail(protocol::encode_compact_request(conversation, instructions, options));
-
-    for (usize attempt = 0;; ++attempt) {
-        auto outcome = co_await attempt_remote_compact(http_client, options, body);
-        if (outcome) {
-            // The compacted items (typically one encrypted compaction item)
-            // replace the conversation, while the instruction prefix remains
-            // explicit and provider-neutral.
-            provider::History compacted;
-            compacted.reserve(instruction_count + 1);
-            compacted.insert(compacted.end(), std::make_move_iterator(history.begin()),
-                             std::make_move_iterator(history.begin() + instruction_count));
-            compacted.push_back({.role = provider::Role::USER});
-            for (auto &item : *outcome) {
-                auto payload = co_await or_fail(encode_opaque(item));
-                compacted.back().parts.push_back(provider::OpaquePart{
-                    .provider_tag = std::string(k_provider_tag),
-                    .payload = std::move(payload),
-                });
-            }
-            history = std::move(compacted);
-            co_return;
-        }
-        auto error = std::move(outcome).error();
-        if (selects_local_fallback(error)) {
-            co_return co_await provider::local_compact(this, history, instructions).or_fail();
-        }
-        if (attempt >= options.max_retries || !error.retryable()) {
-            co_await fail(std::move(error));
-        }
-        auto delay = error.retry_after.value_or(options.initial_retry_delay * (1 << attempt));
-        co_await lighter::sleep(delay);
-    }
+    detail::CompactionAttempts attempts{
+        .remote = [this](const std::string &request_body) { return attempt_remote_compact(http_client, options, request_body); },
+        .local = [this](provider::History &target,
+                        std::string_view compact_instructions) { return provider::local_compact(this, target, compact_instructions); },
+        .sleep = [](std::chrono::milliseconds delay) { return lighter::sleep(delay); },
+    };
+    co_return co_await detail::compact_with_retry(attempts, history, instruction_count, body, std::string(instructions),
+                                                  options.max_retries, options.initial_retry_delay)
+        .or_fail();
 }
 
 Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options) {

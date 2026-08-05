@@ -15,6 +15,7 @@
 #include <lighter/codec/json/json.h>
 
 #include "liminal/provider/compact.h"
+#include "liminal/provider/detail/completion_retry.h"
 #include "liminal/provider/detail/anthropic_protocol.h"
 
 // Anthropic Messages API wire types. Internal: the public surface speaks the
@@ -767,25 +768,16 @@ Client::Client(ClientOptions options) : options(std::move(options)) {
 Task<provider::TurnResponse, Error> Client::complete(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
                                                      const provider::StreamCallbacks &callbacks) {
     const std::string body = co_await or_fail(protocol::encode_complete_request(history, tools, options));
-
-    bool text_emitted = false;
-    for (usize attempt = 0;; ++attempt) {
-        auto outcome = co_await attempt_stream(http_client, options, body, callbacks, text_emitted);
-        if (outcome) {
-            co_return co_await or_fail(to_turn_response(*std::move(outcome)));
-        }
-        auto error = std::move(outcome).error();
-
-        // Once output reached the user we cannot transparently re-send:
-        // the duplicated prefix would be visible. Surface the error instead.
-        bool can_retry = attempt < options.max_retries && error.retryable() && !text_emitted;
-        if (!can_retry) {
-            co_await fail(std::move(error));
-        }
-
-        auto delay = error.retry_after.value_or(options.initial_retry_delay * (1 << attempt));
-        co_await lighter::sleep(delay);
-    }
+    provider::detail::CompletionAttempts attempts{
+        .stream = [this](const std::string &request_body, const provider::StreamCallbacks &stream_callbacks,
+                         bool &text_emitted) -> Task<provider::TurnResponse, Error> {
+            auto message = co_await attempt_stream(http_client, options, request_body, stream_callbacks, text_emitted).or_fail();
+            co_return co_await or_fail(to_turn_response(std::move(message)));
+        },
+        .sleep = [](std::chrono::milliseconds delay) { return lighter::sleep(delay); },
+    };
+    co_return co_await provider::detail::complete_with_retry(attempts, body, callbacks, options.max_retries, options.initial_retry_delay)
+        .or_fail();
 }
 
 Task<void, Error> Client::compact(provider::History &history, std::string_view instructions) {

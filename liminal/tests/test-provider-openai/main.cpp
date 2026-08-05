@@ -1,3 +1,4 @@
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -6,13 +7,20 @@
 #include <glaze/json.hpp>
 
 #include <lighter/http/sse.h>
+#include <lighter/async/io/loop.h>
+#include <lighter/async/runtime/task.h>
+#include <lighter/mock/mock.h>
 
+#include <liminal/provider/detail/completion_retry.h>
+#include <liminal/provider/detail/openai_compaction.h>
 #include <liminal/provider/detail/openai_protocol.h>
 
 namespace {
 
 using namespace lighter::types;
 using namespace liminal;
+using namespace std::chrono_literals;
+namespace mock = lighter::mock;
 
 void require(bool condition, std::string_view message) {
     if (!condition) {
@@ -147,6 +155,110 @@ void test_invalid_instruction_order() {
     require(!encoded && encoded.error().detail.contains("must precede"), "invalid instruction order was accepted");
 }
 
+void test_completion_retry_is_scriptable() {
+    mock::Mock<provider::detail::CompletionAttempts> attempts;
+    attempts.expect<^^provider::detail::CompletionAttempts::stream>()
+        .then_calls([](const std::string &, const provider::StreamCallbacks &, bool &) -> lighter::Task<provider::TurnResponse, Error> {
+            co_await lighter::fail(Error::http_status(429, "rate_limit_error", "slow down", "req_1", 7ms));
+        })
+        .then_calls([](const std::string &body, const provider::StreamCallbacks &, bool &) -> lighter::Task<provider::TurnResponse, Error> {
+            require(body == "encoded request", "retry changed the request body");
+            co_return provider::TurnResponse{.stop = provider::StopKind::DONE, .model = "test-model"};
+        });
+    attempts.expect<^^provider::detail::CompletionAttempts::sleep>().calls([](std::chrono::milliseconds delay) -> lighter::Task<> {
+        require(delay == 7ms, "retry-after delay was not honored");
+        co_return;
+    });
+    auto handle = attempts.handle();
+
+    auto task = provider::detail::complete_with_retry(handle, "encoded request", {}, 2, 500ms);
+    lighter::EventLoop loop;
+    loop.schedule(task);
+    loop.run();
+    auto result = task.result();
+
+    require(result && result->model == "test-model", "retry did not return the successful attempt");
+    attempts.verify();
+}
+
+void test_completion_does_not_retry_visible_output() {
+    mock::Mock<provider::detail::CompletionAttempts> attempts;
+    attempts.expect<^^provider::detail::CompletionAttempts::stream>().calls(
+        [](const std::string &, const provider::StreamCallbacks &, bool &text_emitted) -> lighter::Task<provider::TurnResponse, Error> {
+            text_emitted = true;
+            co_await lighter::fail(Error::http_status(500, "server_error", "failed after text", "req_1"));
+        });
+    attempts.expect<^^provider::detail::CompletionAttempts::sleep>().never();
+    auto handle = attempts.handle();
+
+    auto task = provider::detail::complete_with_retry(handle, "encoded request", {}, 2, 1ms);
+    lighter::EventLoop loop;
+    loop.schedule(task);
+    loop.run();
+    auto result = task.result();
+
+    require(!result && result.error().status == 500, "visible output failure was retried or lost");
+    attempts.verify();
+}
+
+void test_compaction_falls_back_for_missing_endpoint() {
+    mock::Mock<openai::detail::CompactionAttempts> attempts;
+    attempts.expect<^^openai::detail::CompactionAttempts::remote>().calls(
+        [](const std::string &) -> lighter::Task<std::vector<provider::OpaquePart>, Error> {
+            co_await lighter::fail(Error::http_status(404, "not_found", "missing", "req_compact"));
+        });
+    attempts.expect<^^openai::detail::CompactionAttempts::local>().calls(
+        [](provider::History &history, std::string_view instructions) -> lighter::Task<void, Error> {
+            require(instructions == "keep decisions", "fallback received the wrong instructions");
+            history.resize(1);
+            provider::append_user(history, "SUMMARY");
+            co_return;
+        });
+    attempts.expect<^^openai::detail::CompactionAttempts::sleep>().never();
+    auto handle = attempts.handle();
+    auto history = base_history();
+
+    auto task = openai::detail::compact_with_retry(handle, history, 2, "compact body", "keep decisions", 2, 1ms);
+    lighter::EventLoop loop;
+    loop.schedule(task);
+    loop.run();
+    auto result = task.result();
+
+    require(result.has_value() && history.size() == 2, "missing compact endpoint did not use local fallback");
+    attempts.verify();
+}
+
+void test_native_compaction_retries_and_replaces_conversation() {
+    mock::Mock<openai::detail::CompactionAttempts> attempts;
+    attempts.expect<^^openai::detail::CompactionAttempts::remote>()
+        .then_calls([](const std::string &) -> lighter::Task<std::vector<provider::OpaquePart>, Error> {
+            co_await lighter::fail(Error::http_status(500, "server_error", "retry", "req_compact", 3ms));
+        })
+        .then_calls([](const std::string &) -> lighter::Task<std::vector<provider::OpaquePart>, Error> {
+            co_return std::vector<provider::OpaquePart>{{.provider_tag = "openai", .payload = "encrypted-compaction"}};
+        });
+    attempts.expect<^^openai::detail::CompactionAttempts::local>().never();
+    attempts.expect<^^openai::detail::CompactionAttempts::sleep>().calls([](std::chrono::milliseconds delay) -> lighter::Task<> {
+        require(delay == 3ms, "compact retry-after delay was not honored");
+        co_return;
+    });
+    auto handle = attempts.handle();
+    auto history = base_history();
+
+    auto task = openai::detail::compact_with_retry(handle, history, 2, "compact body", "keep decisions", 2, 1ms);
+    lighter::EventLoop loop;
+    loop.schedule(task);
+    loop.run();
+    auto result = task.result();
+
+    require(result.has_value(), "native compaction retry failed");
+    require(history.size() == 3 && history[0].role == provider::Role::SYSTEM && history[1].role == provider::Role::DEVELOPER,
+            "native compaction did not preserve the instruction prefix");
+    const auto *opaque = std::get_if<provider::OpaquePart>(&history.back().parts.front());
+    require(opaque && opaque->payload == "encrypted-compaction", "native compaction did not replace the conversation");
+    attempts.verify();
+}
+
 } // namespace
 
 int main() {
@@ -154,4 +266,8 @@ int main() {
     test_stream_decoding_and_replay();
     test_invalid_event_order();
     test_invalid_instruction_order();
+    test_completion_retry_is_scriptable();
+    test_completion_does_not_retry_visible_output();
+    test_compaction_falls_back_for_missing_endpoint();
+    test_native_compaction_retries_and_replaces_conversation();
 }
