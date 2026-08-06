@@ -72,7 +72,7 @@ bool matches_instruction(const provider::Item &item, const InstructionSource &so
     return text && text->text == source.content;
 }
 
-usize estimated_part_bytes(const provider::Part &part) {
+usize part_bytes(const provider::Part &part) {
     return std::visit(
         [](const auto &value) -> usize {
             using T = std::remove_cvref_t<decltype(value)>;
@@ -90,14 +90,33 @@ usize estimated_part_bytes(const provider::Part &part) {
         part);
 }
 
-usize estimated_history_bytes(const provider::History &history) {
-    usize size = 0;
-    for (const auto &item : history) {
-        for (const auto &part : item.parts) {
-            size += estimated_part_bytes(part);
+ContextUsage estimate_usage(const provider::History &history, const ContextBudget &budget) {
+    ContextUsage usage;
+    usize part_count = 0;
+    const auto instruction_count = provider::instruction_prefix_size(history);
+    for (usize item_index = 0; item_index < history.size(); ++item_index) {
+        for (const auto &part : history[item_index].parts) {
+            ++part_count;
+            const auto bytes = part_bytes(part);
+            if (item_index < instruction_count) {
+                usage.instruction_bytes += bytes;
+            } else if (std::holds_alternative<provider::ToolCall>(part) || std::holds_alternative<provider::ToolResult>(part)) {
+                usage.tool_bytes += bytes;
+            } else if (std::holds_alternative<provider::OpaquePart>(part)) {
+                usage.opaque_bytes += bytes;
+            } else {
+                usage.conversation_bytes += bytes;
+            }
         }
     }
-    return size;
+    const auto total_bytes = usage.instruction_bytes + usage.conversation_bytes + usage.tool_bytes + usage.opaque_bytes;
+    usage.estimated_input_tokens = (total_bytes + 3) / 4 + history.size() * 4 + part_count * 2;
+    if (budget.context_window_tokens) {
+        const auto unavailable = static_cast<u64>(budget.reserved_output_tokens) + budget.safety_margin_tokens;
+        usage.input_budget_tokens = unavailable < *budget.context_window_tokens ? *budget.context_window_tokens - unavailable : 0;
+        usage.remaining_input_tokens = static_cast<i64>(*usage.input_budget_tokens) - static_cast<i64>(usage.estimated_input_tokens);
+    }
+    return usage;
 }
 
 std::string_view authority_name(InstructionAuthority authority) {
@@ -135,12 +154,13 @@ void append_entry_ids(std::string &description, std::span<const session::EntryId
 
 } // namespace
 
-Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource> sources, const session::Session &session) const {
+Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource> sources, const session::Session &session,
+                                              ContextBudget budget) const {
     std::vector<InstructionSource> ordered(sources.begin(), sources.end());
     std::stable_sort(ordered.begin(), ordered.end(),
                      [](const auto &left, const auto &right) { return authority_rank(left.authority) < authority_rank(right.authority); });
 
-    ContextManifest manifest{.session_id = session.id};
+    ContextManifest manifest{.session_id = session.id, .budget = budget};
     manifest.instructions.reserve(ordered.size());
     manifest.omitted_duplicates.reserve(ordered.size());
     for (auto &source : ordered) {
@@ -172,7 +192,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
         manifest.session_entries.push_back(branch[index]->id);
         append_entry(manifest.provider_history, *branch[index]);
     }
-    manifest.estimated_context_bytes = estimated_history_bytes(manifest.provider_history);
+    manifest.usage = estimate_usage(manifest.provider_history, manifest.budget);
     return manifest;
 }
 
@@ -201,7 +221,19 @@ std::string describe(const ContextManifest &manifest) {
     description += "\nsession entries omitted: " + std::to_string(manifest.omitted_session_entries) + "\n";
     description += manifest.active_checkpoint ? "active checkpoint: " + std::to_string(manifest.active_checkpoint->value) + "\n" :
                                                 "active checkpoint: none\n";
-    description += "estimated context payload: " + std::to_string(manifest.estimated_context_bytes) + " bytes\n";
+    description += "estimated input: " + std::to_string(manifest.usage.estimated_input_tokens) + " tokens\n";
+    if (manifest.budget.context_window_tokens) {
+        description += "context window: " + std::to_string(*manifest.budget.context_window_tokens) + " tokens\n";
+        description += "reserved output: " + std::to_string(manifest.budget.reserved_output_tokens) + " tokens\n";
+        description += "safety margin: " + std::to_string(manifest.budget.safety_margin_tokens) + " tokens\n";
+        description += "input budget: " + std::to_string(*manifest.usage.input_budget_tokens) + " tokens\n";
+        description += "input remaining: " + std::to_string(*manifest.usage.remaining_input_tokens) + " tokens\n";
+    } else {
+        description += "context window: unknown (automatic budgeting disabled)\n";
+    }
+    description += "payload bytes: instructions " + std::to_string(manifest.usage.instruction_bytes) + ", conversation " +
+                   std::to_string(manifest.usage.conversation_bytes) + ", tools " + std::to_string(manifest.usage.tool_bytes) +
+                   ", opaque " + std::to_string(manifest.usage.opaque_bytes) + "\n";
     return description;
 }
 

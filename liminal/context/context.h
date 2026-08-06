@@ -42,6 +42,22 @@ struct InstructionSource {
     std::string content;
 };
 
+struct ContextBudget {
+    std::optional<u32> context_window_tokens;
+    u32 reserved_output_tokens = 0;
+    u32 safety_margin_tokens = 0;
+};
+
+struct ContextUsage {
+    usize instruction_bytes = 0;
+    usize conversation_bytes = 0;
+    usize tool_bytes = 0;
+    usize opaque_bytes = 0;
+    usize estimated_input_tokens = 0;
+    std::optional<usize> input_budget_tokens;
+    std::optional<i64> remaining_input_tokens;
+};
+
 /// Inspectable description of the context selected for one provider call.
 /// `provider_history` is derived request state, not the agent's source of
 /// truth.
@@ -52,9 +68,8 @@ struct ContextManifest {
     std::vector<session::EntryId> session_entries;
     usize omitted_session_entries = 0;
     std::optional<session::EntryId> active_checkpoint;
-    /// Approximate serialized payload size. This is diagnostic information,
-    /// not a provider tokenizer result.
-    usize estimated_context_bytes = 0;
+    ContextBudget budget;
+    ContextUsage usage;
     provider::History provider_history;
 };
 
@@ -62,7 +77,8 @@ struct ContextManifest {
 std::string describe(const ContextManifest &manifest);
 
 struct ContextBuilder {
-    Result<ContextManifest> build(std::span<const InstructionSource> sources, const session::Session &session) const;
+    Result<ContextManifest> build(std::span<const InstructionSource> sources, const session::Session &session,
+                                  ContextBudget budget = {}) const;
 
     /// Converts a provider compaction result into a semantic checkpoint after
     /// verifying that its resolved instruction prefix is unchanged.

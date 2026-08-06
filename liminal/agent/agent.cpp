@@ -30,6 +30,14 @@ session::AgentOutput agent_output(provider::TurnResponse response) {
     };
 }
 
+context::ContextBudget context_budget(const model::Entry &model) {
+    return {
+        .context_window_tokens = model.context_window,
+        .reserved_output_tokens = model.max_output_tokens,
+        .safety_margin_tokens = model.context_safety_margin_tokens,
+    };
+}
+
 /// Runs one tool call, converting infrastructure failures into is_error
 /// results so one bad call never aborts its siblings. Cancellation still
 /// unwinds normally.
@@ -72,7 +80,9 @@ Agent::Agent(model::Choice model, ToolSet &tools)
 Agent::Agent(model::Choice model, ToolSet &tools, std::vector<context::InstructionSource> instructions)
     : model(std::move(model)), tools(&tools), instructions(std::move(instructions)) {}
 
-Result<context::ContextManifest> Agent::context_manifest() const { return context::ContextBuilder{}.build(instructions, session); }
+Result<context::ContextManifest> Agent::context_manifest() const {
+    return context::ContextBuilder{}.build(instructions, session, context_budget(model.entry));
+}
 
 Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
     // Transactional: staged session entries replace committed state only
@@ -89,7 +99,7 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
     usize tool_calls_used = 0;
     lighter::Semaphore tool_slots(static_cast<isize>(tools->policy.max_parallel_calls));
     for (i32 iteration = 0; iteration < k_max_iterations; ++iteration) {
-        auto built = context::ContextBuilder{}.build(instructions, staged);
+        auto built = context::ContextBuilder{}.build(instructions, staged, context_budget(model.entry));
         if (!built) {
             co_await fail(std::move(built).error());
         }

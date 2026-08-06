@@ -157,19 +157,24 @@ void test_manifest_deduplication_and_redacted_description() {
     const auto checkpoint_id = session_log.append(std::move(checkpoint));
     session_log.append(session::UserMessage{.text = "CURRENT SECRET"});
 
-    auto manifest = context::ContextBuilder{}.build(instructions, session_log);
+    auto manifest = context::ContextBuilder{}.build(
+        instructions, session_log, {.context_window_tokens = 100, .reserved_output_tokens = 10, .safety_margin_tokens = 5});
     require(manifest.has_value(), "context builder rejected a valid manifest");
     require(manifest->instructions.size() == 1 && manifest->omitted_duplicates.size() == 1,
             "context builder did not deduplicate identical instruction content");
     require(manifest->omitted_session_entries == 1 && manifest->session_entries.size() == 2 && manifest->active_checkpoint == checkpoint_id,
             "context manifest did not expose checkpoint selection");
-    require(manifest->estimated_context_bytes >= std::string_view("SECRET POLICYSUMMARY SECRETCURRENT SECRET").size(),
-            "context manifest underestimated its text payload");
+    require(manifest->usage.instruction_bytes == std::string_view("SECRET POLICY").size() &&
+                manifest->usage.conversation_bytes == std::string_view("SUMMARY SECRETCURRENT SECRET").size() &&
+                manifest->usage.input_budget_tokens == 85 && manifest->usage.remaining_input_tokens.has_value(),
+            "context manifest reported the wrong budget breakdown");
 
     const auto description = context::describe(*manifest);
     require(description.contains("builtin:test") && description.contains("project:workspace/AGENTS.md") &&
                 description.contains("active checkpoint: 2") && description.contains("session entries selected: 2"),
             "context description omitted provenance or selection metadata");
+    require(description.contains("input budget: 85 tokens") && description.contains("payload bytes: instructions 13"),
+            "context description omitted model budget metadata");
     require(!description.contains("SECRET POLICY") && !description.contains("SUMMARY SECRET") && !description.contains("CURRENT SECRET") &&
                 !description.contains("OLD SECRET"),
             "context description exposed instruction or session contents");
