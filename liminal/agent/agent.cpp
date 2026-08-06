@@ -129,7 +129,6 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
             }
             staged.append(*std::move(checkpoint));
             automatically_compacted = true;
-            emit(events, SessionNotice{.text = "[history compacted automatically]\n"});
 
             built = builder.build(instructions, staged, context_budget(model.entry));
             if (!built) {
@@ -147,6 +146,9 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
             case provider::StopKind::DONE:
                 staged.append(agent_output(std::move(response)));
                 session = std::move(staged);
+                if (automatically_compacted) {
+                    emit(events, SessionNotice{.text = "[history compacted automatically]\n"});
+                }
                 emit(events, TurnCompleted{});
                 co_return;
             case provider::StopKind::NEEDS_TOOL_RESULTS: break;

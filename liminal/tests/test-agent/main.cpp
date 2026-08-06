@@ -209,12 +209,50 @@ void test_automatic_compaction() {
     loop.run();
 
     require(task.result().has_value(), "automatic compaction turn failed");
-    require(events.size() == 3 && std::holds_alternative<SessionNotice>(events[0]) &&
-                std::holds_alternative<AssistantSegmentCompleted>(events[1]) && std::holds_alternative<TurnCompleted>(events[2]),
+    require(events.size() == 3 && std::holds_alternative<AssistantSegmentCompleted>(events[0]) &&
+                std::holds_alternative<SessionNotice>(events[1]) && std::holds_alternative<TurnCompleted>(events[2]),
             "automatic compaction emitted the wrong lifecycle events");
     require(agent.session.entries.size() == 5 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
                 std::holds_alternative<session::AgentOutput>(agent.session.entries[4].payload),
             "automatic compaction did not commit a semantic checkpoint with the turn");
+    provider_mock.verify();
+}
+
+void test_failed_turn_does_not_report_staged_compaction() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompactDispatch>().calls([](provider::History &history, std::string_view) -> lighter::Task<void, Error> {
+        auto latest = std::move(history.back());
+        history.resize(provider::instruction_prefix_size(history));
+        provider::append_user(history, "SUMMARY");
+        history.push_back(std::move(latest));
+        co_return;
+    });
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [](const provider::History &, const std::vector<provider::ToolDefinition> &,
+           const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+            co_return provider::TurnResponse{.stop = provider::StopKind::CONTEXT_EXHAUSTED};
+        });
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 80, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools);
+    agent.session.append(session::UserMessage{.text = std::string(100, 'u')});
+    agent.session.append(session::AgentOutput{.parts = {provider::TextPart{.text = std::string(100, 'a')}}});
+
+    std::vector<Event> events;
+    lighter::EventLoop loop;
+    auto task = agent.run_turn("latest", [&events](const Event &event) { events.push_back(event); });
+    loop.schedule(task);
+    loop.run();
+    auto outcome = task.result();
+
+    require(outcome.has_error() && outcome.error().detail.contains("context window exhausted"),
+            "failed completion did not report context exhaustion");
+    require(agent.session.entries.size() == 2, "failed turn committed its staged compaction checkpoint");
+    require(events.size() == 1 && std::holds_alternative<AssistantSegmentCompleted>(events[0]),
+            "failed turn reported an uncommitted automatic compaction");
     provider_mock.verify();
 }
 
@@ -253,6 +291,7 @@ i32 run_all() {
     test_successful_turn();
     test_tool_call_budget();
     test_automatic_compaction();
+    test_failed_turn_does_not_report_staged_compaction();
     test_context_manifest();
     return 0;
 }
