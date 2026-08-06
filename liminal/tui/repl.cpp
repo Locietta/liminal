@@ -288,6 +288,16 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
         if (prompt == "/quit" || prompt == "/exit") {
             co_return 0;
         }
+        if (prompt == "/context") {
+            auto manifest = agent.context_manifest();
+            if (!manifest) {
+                if (!rendered(renderer.notice("[context error: " + manifest.error().message() + "]\n"), "cannot render context error"))
+                    co_return 1;
+            } else if (!rendered(renderer.notice(context::describe(*manifest)), "cannot render context manifest")) {
+                co_return 1;
+            }
+            continue;
+        }
         if (prompt == "/compact" || prompt.starts_with("/compact ")) {
             auto instructions =
                 prompt == "/compact" ? std::string(k_default_compact_instructions) : prompt.substr(std::string_view("/compact ").size());

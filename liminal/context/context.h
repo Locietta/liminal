@@ -51,8 +51,15 @@ struct ContextManifest {
     session::SessionId session_id;
     std::vector<session::EntryId> session_entries;
     usize omitted_session_entries = 0;
+    std::optional<session::EntryId> active_checkpoint;
+    /// Approximate serialized payload size. This is diagnostic information,
+    /// not a provider tokenizer result.
+    usize estimated_context_bytes = 0;
     provider::History provider_history;
 };
+
+/// Formats manifest metadata without exposing instruction or tool contents.
+std::string describe(const ContextManifest &manifest);
 
 struct ContextBuilder {
     Result<ContextManifest> build(std::span<const InstructionSource> sources, const session::Session &session) const;

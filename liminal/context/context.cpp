@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <concepts>
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
 #include <lighter/async/vocab/outcome.h>
+#include <lighter/codec/json/json.h>
 
 namespace liminal::context {
 
@@ -69,6 +72,67 @@ bool matches_instruction(const provider::Item &item, const InstructionSource &so
     return text && text->text == source.content;
 }
 
+usize estimated_part_bytes(const provider::Part &part) {
+    return std::visit(
+        [](const auto &value) -> usize {
+            using T = std::remove_cvref_t<decltype(value)>;
+            if constexpr (std::same_as<T, provider::TextPart>) {
+                return value.text.size();
+            } else if constexpr (std::same_as<T, provider::ToolCall>) {
+                auto input = lighter::codec::json::to_string(value.input);
+                return value.id.size() + value.name.size() + (input ? input->size() : 0);
+            } else if constexpr (std::same_as<T, provider::ToolResult>) {
+                return value.call_id.size() + value.content.size();
+            } else if constexpr (std::same_as<T, provider::OpaquePart>) {
+                return value.provider_tag.size() + value.payload.size();
+            }
+        },
+        part);
+}
+
+usize estimated_history_bytes(const provider::History &history) {
+    usize size = 0;
+    for (const auto &item : history) {
+        for (const auto &part : item.parts) {
+            size += estimated_part_bytes(part);
+        }
+    }
+    return size;
+}
+
+std::string_view authority_name(InstructionAuthority authority) {
+    switch (authority) {
+        case InstructionAuthority::RUNTIME: return "runtime";
+        case InstructionAuthority::APPLICATION: return "application";
+        case InstructionAuthority::PROJECT: return "project";
+    }
+    std::unreachable();
+}
+
+std::string_view trust_name(InstructionTrust trust) {
+    switch (trust) {
+        case InstructionTrust::PLATFORM: return "platform";
+        case InstructionTrust::OPERATOR: return "operator";
+        case InstructionTrust::WORKSPACE: return "workspace";
+    }
+    std::unreachable();
+}
+
+void append_entry_ids(std::string &description, std::span<const session::EntryId> entries) {
+    constexpr usize k_display_limit = 16;
+    description += " [";
+    const auto displayed = std::min(entries.size(), k_display_limit);
+    for (usize index = 0; index < displayed; ++index) {
+        if (index != 0) description += ", ";
+        description += std::to_string(entries[index].value);
+    }
+    if (entries.size() > displayed) {
+        if (displayed != 0) description += ", ";
+        description += "... +" + std::to_string(entries.size() - displayed);
+    }
+    description += "]";
+}
+
 } // namespace
 
 Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource> sources, const session::Session &session) const {
@@ -94,6 +158,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
     for (usize index = 0; index < branch.size(); ++index) {
         if (std::holds_alternative<session::ContextCheckpoint>(branch[index]->payload)) {
             start = index;
+            manifest.active_checkpoint = branch[index]->id;
         }
     }
     manifest.omitted_session_entries = start;
@@ -107,7 +172,37 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
         manifest.session_entries.push_back(branch[index]->id);
         append_entry(manifest.provider_history, *branch[index]);
     }
+    manifest.estimated_context_bytes = estimated_history_bytes(manifest.provider_history);
     return manifest;
+}
+
+std::string describe(const ContextManifest &manifest) {
+    std::string description = "context\n";
+    description += "session: " + std::to_string(manifest.session_id.value) + "\n";
+    description += "instructions: " + std::to_string(manifest.instructions.size()) + "\n";
+    for (const auto &source : manifest.instructions) {
+        description +=
+            "- " + std::string(authority_name(source.authority)) + " / " + std::string(trust_name(source.trust)) + " / " + source.origin;
+        if (source.scope) {
+            description += " / scope " + source.scope->generic_string();
+        } else {
+            description += " / global";
+        }
+        description += " / " + std::to_string(source.content.size()) + " bytes\n";
+    }
+    if (!manifest.omitted_duplicates.empty()) {
+        description += "duplicate instructions omitted: " + std::to_string(manifest.omitted_duplicates.size()) + "\n";
+        for (const auto &source : manifest.omitted_duplicates) {
+            description += "- " + source.origin + "\n";
+        }
+    }
+    description += "session entries selected: " + std::to_string(manifest.session_entries.size());
+    append_entry_ids(description, manifest.session_entries);
+    description += "\nsession entries omitted: " + std::to_string(manifest.omitted_session_entries) + "\n";
+    description += manifest.active_checkpoint ? "active checkpoint: " + std::to_string(manifest.active_checkpoint->value) + "\n" :
+                                                "active checkpoint: none\n";
+    description += "estimated context payload: " + std::to_string(manifest.estimated_context_bytes) + " bytes\n";
+    return description;
 }
 
 Result<session::ContextCheckpoint> ContextBuilder::take_checkpoint(provider::History history, const ContextManifest &manifest) const {
