@@ -22,7 +22,9 @@ The larger architectural change is to stop using provider message roles as the p
 - Phase 1 is complete: instructions have semantic authority and provenance, agent conversation is separate from instructions, and each provider call uses an inspectable context manifest.
 - Phase 2 is in progress: the agent now owns an in-memory semantic session log with session and entry IDs, parent links, an active leaf, branch projection, and append-only compaction checkpoints.
 - Durable session storage and recovery remain to complete Phase 2.
-- Context budgets, automatic compaction, agent profiles, and child-agent execution remain future phases.
+- Phase 3 is complete: model-aware input budgets, categorized context estimates, atomic recent-turn selection, context inspection, and
+  automatic semantic checkpoints are implemented.
+- Agent profiles and child-agent execution remain future phases.
 
 ## Goals
 

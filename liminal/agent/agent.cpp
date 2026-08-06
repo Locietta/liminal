@@ -15,6 +15,10 @@ using lighter::WhenAll;
 
 namespace {
 
+constexpr std::string_view k_automatic_compact_instructions =
+    "Preserve the user's goals, constraints, decisions, important tool results, modified files, unresolved issues, and the context needed "
+    "to continue the active task.";
+
 void emit(const EventSink &events, Event event) {
     if (events) {
         events(event);
@@ -97,11 +101,43 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
 
     constexpr i32 k_max_iterations = 32;
     usize tool_calls_used = 0;
+    bool automatically_compacted = false;
     lighter::Semaphore tool_slots(static_cast<isize>(tools->policy.max_parallel_calls));
     for (i32 iteration = 0; iteration < k_max_iterations; ++iteration) {
-        auto built = context::ContextBuilder{}.build(instructions, staged, context_budget(model.entry));
+        context::ContextBuilder builder;
+        auto built = builder.build(instructions, staged, context_budget(model.entry));
         if (!built) {
             co_await fail(std::move(built).error());
+        }
+        if (built->omitted_budget_entries != 0) {
+            if (automatically_compacted) {
+                co_await fail(Error::protocol("context exceeded the model input budget again after automatic compaction"));
+            }
+            auto full = builder.build(instructions, staged);
+            if (!full) {
+                co_await fail(std::move(full).error());
+            }
+            auto full_manifest = *std::move(full);
+            auto compacted = std::move(full_manifest.provider_history);
+            co_await model.handle->compact(compacted, k_automatic_compact_instructions).or_fail();
+            auto checkpoint = builder.take_checkpoint(std::move(compacted), full_manifest);
+            if (!checkpoint) {
+                co_await fail(std::move(checkpoint).error());
+            }
+            if (checkpoint->items.empty()) {
+                co_await fail(Error::protocol("automatic compaction produced an empty checkpoint"));
+            }
+            staged.append(*std::move(checkpoint));
+            automatically_compacted = true;
+            emit(events, SessionNotice{.text = "[history compacted automatically]\n"});
+
+            built = builder.build(instructions, staged, context_budget(model.entry));
+            if (!built) {
+                co_await fail(std::move(built).error());
+            }
+            if (built->omitted_budget_entries != 0) {
+                co_await fail(Error::protocol("automatic compaction did not reduce context below the model input budget"));
+            }
         }
         auto response = co_await model.handle->complete(built->provider_history, tools->definitions(), stream).or_fail();
         auto calls = provider::tool_calls(response);
