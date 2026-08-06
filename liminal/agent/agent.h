@@ -10,6 +10,7 @@
 #include <liminal/error.h>
 #include <liminal/event.h>
 #include <liminal/model/model.h>
+#include <liminal/session/session.h>
 #include <liminal/tools/tools.h>
 
 namespace liminal {
@@ -31,7 +32,7 @@ struct Agent {
     model::Choice model;
     ToolSet *tools;
     std::vector<context::InstructionSource> instructions;
-    provider::History conversation;
+    session::Session session;
 };
 
 } // namespace liminal

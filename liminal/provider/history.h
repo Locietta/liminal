@@ -17,9 +17,10 @@ namespace liminal::provider {
 
 using namespace lighter::types;
 
-// Provider-neutral transcript. This is the history liminal owns; concrete
-// clients translate it to/from their wire formats on every request. Provider
-// switching, persistence, and compaction all operate on this representation.
+// Provider request projection. ContextBuilder lowers Liminal's semantic
+// instructions and session entries into this representation; concrete clients
+// then translate it to/from their wire formats. Persistence and branching
+// operate on session::Session instead.
 
 enum struct Role {
     SYSTEM,
@@ -32,11 +33,12 @@ struct TextPart {
     std::string text;
 };
 
-/// Provider-private state carried opaquely through the transcript: thinking
-/// blocks + signatures (Anthropic), encrypted reasoning and compaction items
-/// (OpenAI), ... Only the provider whose `provider_tag` matches interprets
-/// `payload` (its own serialized wire form); everyone else preserves it
-/// verbatim and drops it when replaying to a *different* provider.
+/// Provider-private state carried opaquely through semantic session entries
+/// and request projections: thinking blocks + signatures (Anthropic),
+/// encrypted reasoning and compaction items (OpenAI), ... Only the provider
+/// whose `provider_tag` matches interprets `payload` (its own serialized wire
+/// form); everyone else preserves it verbatim and drops it when replaying to a
+/// *different* provider.
 struct OpaquePart {
     std::string provider_tag;
     std::string payload;
@@ -132,7 +134,7 @@ inline std::vector<const ToolCall *> tool_calls(const TurnResponse &response) {
 
 } // namespace liminal::provider
 
-// Tagged so the neutral transcript can be persisted/debugged as JSON(L).
+// Tagged so semantic session payloads and provider projections can be encoded.
 template <>
 struct glz::meta<liminal::provider::Part> {
     static constexpr std::string_view tag = "type";

@@ -21,6 +21,15 @@ void emit(const EventSink &events, Event event) {
     }
 }
 
+session::AgentOutput agent_output(provider::TurnResponse response) {
+    return {
+        .parts = std::move(response.parts),
+        .usage = response.usage,
+        .model = std::move(response.model),
+        .request_id = std::move(response.request_id),
+    };
+}
+
 /// Runs one tool call, converting infrastructure failures into is_error
 /// results so one bad call never aborts its siblings. Cancellation still
 /// unwinds normally.
@@ -62,18 +71,14 @@ Agent::Agent(model::Choice model, ToolSet &tools)
 Agent::Agent(model::Choice model, ToolSet &tools, std::vector<context::InstructionSource> instructions)
     : model(std::move(model)), tools(&tools), instructions(std::move(instructions)) {}
 
-Result<context::ContextManifest> Agent::context_manifest() const { return context::ContextBuilder{}.build(instructions, conversation); }
+Result<context::ContextManifest> Agent::context_manifest() const { return context::ContextBuilder{}.build(instructions, session); }
 
 Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
-    // Transactional: staged history only replaces committed history after a
-    // complete terminal response. The UI transcript intentionally remains.
-    auto built = context_manifest();
-    if (!built) {
-        co_await fail(std::move(built).error());
-    }
-    auto manifest = *std::move(built);
-    auto staged = std::move(manifest.provider_history);
-    provider::append_user(staged, std::move(prompt));
+    // Transactional: staged session entries replace committed state only
+    // after a complete terminal response. The UI transcript intentionally
+    // remains.
+    auto staged = session;
+    staged.append(session::UserMessage{.text = std::move(prompt)});
 
     provider::StreamCallbacks stream{
         .on_text_delta = [&events](std::string_view text) { emit(events, AssistantTextDelta{.text = std::string(text)}); },
@@ -83,20 +88,18 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
     usize tool_calls_used = 0;
     lighter::Semaphore tool_slots(static_cast<isize>(tools->policy.max_parallel_calls));
     for (i32 iteration = 0; iteration < k_max_iterations; ++iteration) {
-        auto response = co_await model.handle->complete(staged, tools->definitions(), stream).or_fail();
+        auto built = context::ContextBuilder{}.build(instructions, staged);
+        if (!built) {
+            co_await fail(std::move(built).error());
+        }
+        auto response = co_await model.handle->complete(built->provider_history, tools->definitions(), stream).or_fail();
         auto calls = provider::tool_calls(response);
         emit(events, AssistantSegmentCompleted{});
 
         switch (response.stop) {
             case provider::StopKind::DONE:
-                provider::append_response(staged, std::move(response));
-                {
-                    auto extracted = context::ContextBuilder{}.take_conversation(std::move(staged), manifest);
-                    if (!extracted) {
-                        co_await fail(std::move(extracted).error());
-                    }
-                    conversation = *std::move(extracted);
-                }
+                staged.append(agent_output(std::move(response)));
+                session = std::move(staged);
                 emit(events, TurnCompleted{});
                 co_return;
             case provider::StopKind::NEEDS_TOOL_RESULTS: break;
@@ -123,13 +126,13 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
         }
         auto joined = co_await WhenAll(std::move(pending));
 
-        provider::append_response(staged, std::move(response));
+        staged.append(agent_output(std::move(response)));
         std::vector<provider::ToolResult> results;
         results.reserve(joined.size());
         for (auto &result : joined) {
             results.push_back(std::move(result));
         }
-        provider::append_tool_results(staged, std::move(results));
+        staged.append(session::ToolResults{.results = std::move(results)});
     }
     co_await fail(Error::protocol("exceeded " + std::to_string(k_max_iterations) + " tool iterations in one turn"));
 }
@@ -142,11 +145,15 @@ Task<void, Error> Agent::compact(std::string_view instructions) {
     auto manifest = *std::move(built);
     auto compacted = std::move(manifest.provider_history);
     co_await model.handle->compact(compacted, instructions).or_fail();
-    auto extracted = context::ContextBuilder{}.take_conversation(std::move(compacted), manifest);
-    if (!extracted) {
-        co_await fail(std::move(extracted).error());
+    auto checkpoint = context::ContextBuilder{}.take_checkpoint(std::move(compacted), manifest);
+    if (!checkpoint) {
+        co_await fail(std::move(checkpoint).error());
     }
-    conversation = *std::move(extracted);
+    if (!checkpoint->items.empty()) {
+        auto staged = session;
+        staged.append(*std::move(checkpoint));
+        session = std::move(staged);
+    }
 }
 
 } // namespace liminal

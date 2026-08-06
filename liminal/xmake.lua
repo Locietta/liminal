@@ -2,7 +2,7 @@ add_requires("libunicode 0.9.2", "ngcpp-proxy")
 
 target("liminal-core")
     set_kind("static")
-    add_files("agent/*.cpp", "context/*.cpp", "model/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "tools/*.cpp", "tui/*.cpp")
+    add_files("agent/*.cpp", "context/*.cpp", "model/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "session/*.cpp", "tools/*.cpp", "tui/*.cpp")
     add_deps("lighter")
     add_packages("libunicode", "ngcpp-proxy", {public = true})
 

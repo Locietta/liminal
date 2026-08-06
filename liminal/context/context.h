@@ -4,10 +4,15 @@
 #include <string>
 #include <vector>
 
+#include <lighter/types.hpp>
+
 #include <liminal/error.h>
 #include <liminal/provider/history.h>
+#include <liminal/session/session.h>
 
 namespace liminal::context {
+
+using namespace lighter::types;
 
 /// Liminal-owned instruction precedence. Provider adapters lower these
 /// semantic authorities to the closest wire-protocol role.
@@ -29,16 +34,18 @@ struct InstructionSource {
 struct ContextManifest {
     std::vector<InstructionSource> instructions;
     std::vector<InstructionSource> omitted_duplicates;
+    session::SessionId session_id;
+    std::vector<session::EntryId> session_entries;
+    usize omitted_session_entries = 0;
     provider::History provider_history;
 };
 
 struct ContextBuilder {
-    Result<ContextManifest> build(std::span<const InstructionSource> sources, const provider::History &conversation) const;
+    Result<ContextManifest> build(std::span<const InstructionSource> sources, const session::Session &session) const;
 
-    /// Removes the resolved instruction prefix after a provider operation.
-    /// This also verifies that providers did not move instructions into the
-    /// mutable conversation.
-    Result<provider::History> take_conversation(provider::History history, const ContextManifest &manifest) const;
+    /// Converts a provider compaction result into a semantic checkpoint after
+    /// verifying that its resolved instruction prefix is unchanged.
+    Result<session::ContextCheckpoint> take_checkpoint(provider::History history, const ContextManifest &manifest) const;
 };
 
 } // namespace liminal::context

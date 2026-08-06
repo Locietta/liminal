@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -10,6 +11,7 @@
 #include <proxy/proxy.h>
 
 #include <lighter/async/io/loop.h>
+#include <lighter/mock/mock.h>
 #include <lighter/types.hpp>
 
 #include <liminal/agent/agent.h>
@@ -27,75 +29,73 @@ void require(bool condition, std::string message) {
     }
 }
 
-struct FakeProvider {
-    lighter::Task<provider::TurnResponse, Error> complete(const provider::History &history, const std::vector<provider::ToolDefinition> &,
-                                                          const provider::StreamCallbacks &callbacks) {
-        require(history.size() >= 2 && history[0].role == provider::Role::DEVELOPER,
-                "each request must begin with the agent's developer instruction");
-        require(history[1].role == provider::Role::USER, "the task must remain a user message");
-        if (calls++ == 0) {
-            callbacks.on_text_delta("checking");
-            glz::generic input;
-            auto parse_error = glz::read_json(input, R"({"path":"README.md"})");
-            require(!parse_error, "failed to create read_file input");
+struct ProviderPort {
+    std::copyable_function<lighter::Task<provider::TurnResponse, Error>(
+        const provider::History &, const std::vector<provider::ToolDefinition> &, const provider::StreamCallbacks &)>
+        complete;
+    std::copyable_function<lighter::Task<void, Error>(provider::History &, std::string_view)> compact;
+};
 
-            provider::TurnResponse response{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+glz::generic read_file_input() {
+    glz::generic input;
+    auto parse_error = glz::read_json(input, R"({"path":"README.md"})");
+    require(!parse_error, "failed to create read_file input");
+    return input;
+}
+
+void test_successful_turn() {
+    ToolSet tools(std::filesystem::current_path().string());
+    lighter::mock::Mock<ProviderPort> provider_mock;
+    provider_mock.expect<^^ProviderPort::complete>()
+        .then_calls([](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::TurnResponse, Error> {
+            require(history.size() == 2 && history[0].role == provider::Role::DEVELOPER && history[1].role == provider::Role::USER,
+                    "initial request used the wrong instruction or task roles");
+            callbacks.on_text_delta("checking");
+            provider::TurnResponse response{
+                .stop = provider::StopKind::NEEDS_TOOL_RESULTS,
+                .usage = {.input_tokens = 10, .output_tokens = 5},
+                .model = "fake-model",
+                .request_id = "request-1",
+            };
             response.parts.push_back(provider::TextPart{.text = "checking"});
             response.parts.push_back(provider::ToolCall{
                 .id = "call-1",
                 .name = "read_file",
-                .input = std::move(input),
+                .input = read_file_input(),
             });
             co_return response;
-        }
-
-        require(history.size() == 4 && history[2].role == provider::Role::ASSISTANT && history[3].role == provider::Role::USER,
-                "generated output and tool results used the wrong message roles");
-
-        callbacks.on_text_delta("done");
-        provider::TurnResponse response{.stop = provider::StopKind::DONE};
-        response.parts.push_back(provider::TextPart{.text = "done"});
-        co_return response;
-    }
-
-    lighter::Task<void, Error> compact(provider::History &history, std::string_view) {
-        const auto instruction_count = provider::instruction_prefix_size(history);
-        history.resize(instruction_count);
-        provider::append_user(history, "SUMMARY");
-        co_return;
-    }
-
-    usize calls = 0;
-};
-
-struct OverBudgetProvider {
-    lighter::Task<provider::TurnResponse, Error> complete(const provider::History &, const std::vector<provider::ToolDefinition> &,
-                                                          const provider::StreamCallbacks &) {
-        provider::TurnResponse response{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
-        for (usize index = 0; index < 2; ++index) {
-            glz::generic input;
-            auto parse_error = glz::read_json(input, R"({"path":"README.md"})");
-            require(!parse_error, "failed to create budget test input");
-            response.parts.push_back(provider::ToolCall{
-                .id = "call-" + std::to_string(index),
-                .name = "read_file",
-                .input = std::move(input),
-            });
-        }
-        co_return response;
-    }
-
-    lighter::Task<void, Error> compact(provider::History &, std::string_view) { co_return; }
-};
-
-void test_successful_turn() {
-    ToolSet tools(std::filesystem::current_path().string());
+        })
+        .then_calls([](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::TurnResponse, Error> {
+            require(history.size() == 4 && history[0].role == provider::Role::DEVELOPER && history[1].role == provider::Role::USER &&
+                        history[2].role == provider::Role::ASSISTANT && history[3].role == provider::Role::USER,
+                    "tool continuation used the wrong message roles");
+            callbacks.on_text_delta("done");
+            provider::TurnResponse response{
+                .stop = provider::StopKind::DONE,
+                .usage = {.input_tokens = 20, .output_tokens = 3},
+                .model = "fake-model",
+                .request_id = "request-2",
+            };
+            response.parts.push_back(provider::TextPart{.text = "done"});
+            co_return response;
+        });
+    provider_mock.expect<^^ProviderPort::compact>().calls(
+        [](provider::History &history, std::string_view instructions) -> lighter::Task<void, Error> {
+            require(instructions == "keep decisions", "compaction received the wrong instructions");
+            const auto instruction_count = provider::instruction_prefix_size(history);
+            history.resize(instruction_count);
+            provider::append_user(history, "SUMMARY");
+            co_return;
+        });
+    auto provider_handle = provider_mock.handle();
     model::Choice choice{
-        .handle = pro::make_proxy<provider::ProviderFacade, FakeProvider>(),
+        .handle = pro::make_proxy<provider::ProviderFacade, ProviderPort>(std::move(provider_handle)),
         .entry = {.provider = "fake", .id = "test"},
     };
     Agent agent(std::move(choice), tools);
-    require(agent.conversation.empty(), "instructions must not be stored as conversation");
+    require(agent.session.entries.empty(), "instructions must not be stored as session entries");
     auto initial_context = agent.context_manifest();
     require(initial_context && initial_context->instructions.size() == 1 &&
                 initial_context->instructions[0].origin == "builtin:default-agent" &&
@@ -120,29 +120,53 @@ void test_successful_turn() {
     require(std::holds_alternative<AssistantTextDelta>(events[4]), "continuation text delta is missing");
     require(std::holds_alternative<AssistantSegmentCompleted>(events[5]), "continuation segment completion is missing");
     require(std::holds_alternative<TurnCompleted>(events[6]), "turn completion event is missing");
-    require(agent.conversation.size() == 4, "transactional conversation has the wrong number of items");
-    require(agent.conversation[0].role == provider::Role::USER && agent.conversation[1].role == provider::Role::ASSISTANT &&
-                agent.conversation[2].role == provider::Role::USER && agent.conversation[3].role == provider::Role::ASSISTANT,
-            "conversation roles do not preserve user, assistant, tool-result, assistant order");
+    require(agent.session.entries.size() == 4, "transactional session has the wrong number of entries");
+    require(std::holds_alternative<session::UserMessage>(agent.session.entries[0].payload) &&
+                std::holds_alternative<session::AgentOutput>(agent.session.entries[1].payload) &&
+                std::holds_alternative<session::ToolResults>(agent.session.entries[2].payload) &&
+                std::holds_alternative<session::AgentOutput>(agent.session.entries[3].payload),
+            "session entries do not preserve user, agent-output, tool-result, agent-output semantics");
+    const auto &first_output = std::get<session::AgentOutput>(agent.session.entries[1].payload);
+    require(first_output.usage.input_tokens == 10 && first_output.usage.output_tokens == 5 && first_output.model == "fake-model" &&
+                first_output.request_id == "request-1",
+            "session did not retain normalized response usage and provenance");
 
     auto compact = agent.compact("keep decisions");
     lighter::EventLoop compact_loop;
     compact_loop.schedule(compact);
     compact_loop.run();
     require(compact.result().has_value(), "agent compaction failed");
-    require(agent.conversation.size() == 1 && agent.conversation[0].role == provider::Role::USER,
-            "compaction must commit only mutable conversation state");
+    require(agent.session.entries.size() == 5 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries.back().payload),
+            "compaction must append a checkpoint without deleting session entries");
     auto compacted_context = agent.context_manifest();
     require(compacted_context && compacted_context->provider_history.size() == 2 &&
-                compacted_context->provider_history[0].role == provider::Role::DEVELOPER,
+                compacted_context->provider_history[0].role == provider::Role::DEVELOPER &&
+                compacted_context->omitted_session_entries == 4 && compacted_context->session_entries.size() == 1,
             "compaction did not reconstruct the instruction prefix");
+    provider_mock.verify();
 }
 
 void test_tool_call_budget() {
     ToolPolicy policy{.max_calls_per_turn = 1};
     ToolSet tools(std::filesystem::current_path(), policy);
+    lighter::mock::Mock<ProviderPort> provider_mock;
+    provider_mock.expect<^^ProviderPort::complete>().calls(
+        [](const provider::History &, const std::vector<provider::ToolDefinition> &,
+           const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+            provider::TurnResponse response{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+            for (usize index = 0; index < 2; ++index) {
+                response.parts.push_back(provider::ToolCall{
+                    .id = "call-" + std::to_string(index),
+                    .name = "read_file",
+                    .input = read_file_input(),
+                });
+            }
+            co_return response;
+        });
+    provider_mock.expect<^^ProviderPort::compact>().never();
+    auto provider_handle = provider_mock.handle();
     model::Choice choice{
-        .handle = pro::make_proxy<provider::ProviderFacade, OverBudgetProvider>(),
+        .handle = pro::make_proxy<provider::ProviderFacade, ProviderPort>(std::move(provider_handle)),
         .entry = {.provider = "fake", .id = "test"},
     };
     Agent agent(std::move(choice), tools);
@@ -155,7 +179,8 @@ void test_tool_call_budget() {
 
     require(outcome.has_error() && outcome.error().kind == ErrorKind::TOOL && outcome.error().detail.contains("budget exceeded"),
             "an over-budget provider response must fail before executing tools");
-    require(agent.conversation.empty(), "an over-budget turn must not commit conversation state");
+    require(agent.session.entries.empty(), "an over-budget turn must not commit session entries");
+    provider_mock.verify();
 }
 
 void test_context_manifest() {
@@ -165,10 +190,10 @@ void test_context_manifest() {
         {.authority = context::InstructionAuthority::RUNTIME, .origin = "runtime:liminal", .content = "platform policy"},
         {.authority = context::InstructionAuthority::PROJECT, .origin = "project:duplicate", .content = "project policy"},
     };
-    provider::History conversation;
-    provider::append_user(conversation, "change the project");
+    session::Session session_log({.value = 42});
+    session_log.append(session::UserMessage{.text = "change the project"});
 
-    auto manifest = context::ContextBuilder{}.build(instructions, conversation);
+    auto manifest = context::ContextBuilder{}.build(instructions, session_log);
     require(manifest.has_value(), "failed to build a valid context manifest");
     require(manifest->instructions.size() == 3 && manifest->omitted_duplicates.size() == 1, "context instructions were not deduplicated");
     require(manifest->instructions[0].origin == "runtime:liminal" && manifest->instructions[1].origin == "profile:coding" &&
@@ -179,15 +204,12 @@ void test_context_manifest() {
                 manifest->provider_history[2].role == provider::Role::DEVELOPER &&
                 manifest->provider_history[3].role == provider::Role::USER,
             "context manifest lowered semantic instruction authority incorrectly");
-
-    provider::append_developer(conversation, "misplaced policy");
-    auto invalid = context::ContextBuilder{}.build(instructions, conversation);
-    require(!invalid && invalid.error().detail.contains("must use sourced context"),
-            "context builder accepted an instruction in mutable conversation");
+    require(manifest->session_id.value == 42 && manifest->session_entries.size() == 1 && manifest->session_entries[0].value == 1,
+            "context manifest did not report its selected session entries");
 
     auto altered_history = manifest->provider_history;
     std::get<provider::TextPart>(altered_history.front().parts.front()).text = "altered platform policy";
-    auto altered = context::ContextBuilder{}.take_conversation(std::move(altered_history), *manifest);
+    auto altered = context::ContextBuilder{}.take_checkpoint(std::move(altered_history), *manifest);
     require(!altered && altered.error().detail.contains("changed the resolved instruction prefix"),
             "context builder accepted altered instructions from a provider operation");
 }
