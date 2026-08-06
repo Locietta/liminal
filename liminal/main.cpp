@@ -10,6 +10,7 @@
 
 #include <liminal/agent/agent.h>
 #include <liminal/context/context.h>
+#include <liminal/context/project_instructions.h>
 #include <liminal/model/catalog.h>
 #include <liminal/provider/codex_auth.h>
 #include <liminal/provider/registry.h>
@@ -65,6 +66,16 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
         .origin = developer && *developer ? "environment:LIMINAL_DEVELOPER_PROMPT" : "builtin:default-agent",
         .content = developer && *developer ? developer : "You are a helpful coding assistant.",
     });
+    auto instruction_files = pro::make_proxy<context::InstructionFilesFacade, context::LocalInstructionFiles>();
+    auto project_instructions =
+        context::ProjectInstructionResolver{}.resolve(tools.working_directory, tools.working_directory, instruction_files);
+    if (!project_instructions) {
+        std::fprintf(stderr, "error: %s\n", project_instructions.error().message().c_str());
+        co_return 1;
+    }
+    for (auto &instruction : *project_instructions) {
+        instructions.push_back(std::move(instruction));
+    }
     Agent agent(*std::move(initial), tools, std::move(instructions));
     co_return co_await tui::run_repl(agent, interrupts, models);
 }
