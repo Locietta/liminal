@@ -1,25 +1,59 @@
 # Reflection-driven mocking
 
-## Recommendation
-
-C++26 reflection can remove the handwritten fake for a **callable port**: a
-plain struct whose public data members are `std::copyable_function` operations.
-`lighter::mock::Mock<Port>` reflects those members, binds a correctly typed
-dispatcher to each one, and uses the reflected member name in failures.
+`lighter::mock::Mock<Contract>` generates a callable mock port from either a
+plain method contract or an `ngcpp-proxy` facade. The user declares each
+operation only once and refers to that declaration when configuring behavior.
+Ordinary data members on a plain contract are ignored.
 
 ```cpp
 struct Files {
-    std::copyable_function<std::string(std::string_view) const> read;
-    std::copyable_function<void(std::string_view) const> remove;
+    int open_count = 0; // Not part of the generated port.
+
+    std::string read(std::string_view path) const;
+    void remove(std::string_view path) const;
 };
 
 lighter::mock::Mock<Files> files;
-files.expect<^^Files::read>().returns("contents").once();
+files.expect<^^Files::read>().returns("contents");
 files.expect<^^Files::remove>().never();
 
 run(files.handle());
 files.verify();
 ```
+
+The methods need declarations but not definitions. `Mock<Files>::Port` is a
+generated aggregate with `read` and `remove` callable fields, normally backed
+by `std::copyable_function`. Its call syntax matches the declared methods, so
+it fits structurally injected dependencies and `ngcpp-proxy` targets. It is not
+a `Files` object and cannot replace a concrete parameter of type `Files&`.
+
+For an `ngcpp-proxy` facade, pass the facade directly and select operations by
+their dispatch types. No parallel method-contract struct is needed:
+
+```cpp
+PRO_DEF_MEM_DISPATCH(ReadDispatch, read);
+PRO_DEF_MEM_DISPATCH(RemoveDispatch, remove);
+
+struct FilesFacade
+    : pro::facade_builder
+          ::add_convention<ReadDispatch,
+                           std::string(std::string_view) const>
+          ::add_convention<RemoveDispatch,
+                           void(std::string_view) const>
+          ::build {};
+
+lighter::mock::Mock<FilesFacade> files;
+files.expect<ReadDispatch>().returns("contents");
+files.expect<RemoveDispatch>().never();
+
+auto provider = pro::make_proxy<FilesFacade>(files.handle());
+provider->read("settings.json");
+files.verify();
+```
+
+`Mock` reflects `FilesFacade::convention_types`, obtaining the operation name
+and signature from each dispatch accessor. The generated port therefore
+satisfies the facade without duplicating its declarations.
 
 Use `calls` when behavior depends on arguments or the result is move-only:
 
@@ -37,52 +71,47 @@ files.expect<^^Files::read>().calls([](std::string_view path) {
 Ordered `then_calls` and `then_returns` actions infer their expected count and
 support one-shot move-only results. `verify` reports every unmet expectation.
 
-`handle()` returns a copyable port value. Its dispatchers share ownership of
-their state, so handles may outlive or be copied independently of the movable
-mock controller.
+`handle()` returns an owning port value. Its dispatchers share ownership of
+their state, so handles may outlive the movable mock controller. A normal port
+can also be copied independently.
 
-## Why this shape
-
-C++26 reflection is strong at introspection: it can enumerate a type's members,
-recover their types and identifiers, and splice an existing member into an
-expression. It cannot synthesize member functions. `define_aggregate` only
-defines data members, so the standard facilities cannot generate a drop-in fake
-for a conventional virtual interface, a plain struct with methods, or an
-`ngcpp-proxy` facade.
-
-Function synthesis has been proposed separately in P3157, but it is not part of
-C++26 or GCC 16. A method-generating mock should therefore not be the project's
-foundation yet.
+`Port` is intentionally an implementation detail of `Mock`. Production APIs
+should express their boundary as a facade or as a constrained generic
+interface rather than naming the generated function table. A generated port
+can satisfy such a structural interface or be stored in an `ngcpp-proxy`.
 
 ## Design boundaries
 
-- A port must be default-constructible and contain only direct, public
-  `std::copyable_function<R(Args...)>` members. Both unqualified and `const`
-  signatures are accepted; `noexcept` is intentionally rejected because mock
-  failures throw.
+- Plain contracts and facades currently require one non-overloaded ordinary
+  member operation per name. Facades support indirect member conventions;
+  direct and free-function conventions are rejected. `noexcept`, volatile,
+  and ref-qualified operations are also rejected because the generated
+  aggregate needs one callable field per operation and mock failures may
+  throw.
+- `std::function_ref` is deliberately not used for port fields. It is
+  non-owning and non-default-constructible, so a returned or coroutine-stored
+  handle could outlive the controller and dangle.
+- Port dispatchers use `std::copyable_function`. Move-only configured behavior
+  is still supported because actions are owned separately by the mock state;
+  making the generated handle itself move-only would add restrictions without
+  enabling another use case.
 - `returns(value)` requires a non-reference, copyable result because the same
   behavior may run repeatedly. `then_returns(value)` accepts move-only results
   because each ordered action runs once. Use callables for reference results.
 - Arguments are not copied into an implicit history. Assert on them inside
-  `calls`; that avoids surprising copies, dangling references, and loss of
+  `calls`; this avoids surprising copies, dangling references, and loss of
   move-only arguments.
-- Verification is explicit. Destructors do not throw and do not hide a failure
+- Verification is explicit. Destructors do not throw and do not hide failures
   during stack unwinding.
-- This is a good fit for dependency boundaries that are naturally function
-  tables. Keep `ngcpp-proxy` for open-ended runtime polymorphism and use small
-  handwritten fakes there until function synthesis becomes standardized.
 
-## Potential next steps
-
-Adopt callable ports on one dependency boundary with substantial fake
-boilerplate, then evaluate readability and compile-time cost. Avoid automatic
-deep equality, matcher DSLs, implicit argument histories, and destructor
-verification until real tests demonstrate a need.
+C++26 reflection still cannot synthesize member functions. The generated port
+therefore remains an aggregate of callable data members; `define_aggregate`
+cannot create a drop-in subclass or concrete implementation of `Contract`.
 
 ## Standards and compiler context
 
-This prototype targets the repository's pinned GCC 16.1 and P2996R13 reflection
-surface. Relevant upstream material:
+This implementation targets the repository's pinned GCC 16.1 and P2996R13
+reflection surface.
 
 - [P2996R13, Reflection for C++26](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2025/p2996r13.html)
 - [P3157R1, Generative Extensions for Reflection](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2024/p3157r1.html)

@@ -1,6 +1,5 @@
 #include <cstdio>
 #include <filesystem>
-#include <functional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -29,13 +28,6 @@ void require(bool condition, std::string message) {
     }
 }
 
-struct ProviderPort {
-    std::copyable_function<lighter::Task<provider::TurnResponse, Error>(
-        const provider::History &, const std::vector<provider::ToolDefinition> &, const provider::StreamCallbacks &)>
-        complete;
-    std::copyable_function<lighter::Task<void, Error>(provider::History &, std::string_view)> compact;
-};
-
 glz::generic read_file_input() {
     glz::generic input;
     auto parse_error = glz::read_json(input, R"({"path":"README.md"})");
@@ -45,8 +37,8 @@ glz::generic read_file_input() {
 
 void test_successful_turn() {
     ToolSet tools(std::filesystem::current_path().string());
-    lighter::mock::Mock<ProviderPort> provider_mock;
-    provider_mock.expect<^^ProviderPort::complete>()
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>()
         .then_calls([](const provider::History &history, const std::vector<provider::ToolDefinition> &,
                        const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::TurnResponse, Error> {
             require(history.size() == 2 && history[0].role == provider::Role::DEVELOPER && history[1].role == provider::Role::USER,
@@ -81,7 +73,7 @@ void test_successful_turn() {
             response.parts.push_back(provider::TextPart{.text = "done"});
             co_return response;
         });
-    provider_mock.expect<^^ProviderPort::compact>().calls(
+    provider_mock.expect<provider::CompactDispatch>().calls(
         [](provider::History &history, std::string_view instructions) -> lighter::Task<void, Error> {
             require(instructions == "keep decisions", "compaction received the wrong instructions");
             const auto instruction_count = provider::instruction_prefix_size(history);
@@ -91,7 +83,7 @@ void test_successful_turn() {
         });
     auto provider_handle = provider_mock.handle();
     model::Choice choice{
-        .handle = pro::make_proxy<provider::ProviderFacade, ProviderPort>(std::move(provider_handle)),
+        .handle = pro::make_proxy<provider::ProviderFacade>(std::move(provider_handle)),
         .entry = {.provider = "fake", .id = "test"},
     };
     Agent agent(std::move(choice), tools);
@@ -149,8 +141,8 @@ void test_successful_turn() {
 void test_tool_call_budget() {
     ToolPolicy policy{.max_calls_per_turn = 1};
     ToolSet tools(std::filesystem::current_path(), policy);
-    lighter::mock::Mock<ProviderPort> provider_mock;
-    provider_mock.expect<^^ProviderPort::complete>().calls(
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>().calls(
         [](const provider::History &, const std::vector<provider::ToolDefinition> &,
            const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
             provider::TurnResponse response{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
@@ -163,10 +155,10 @@ void test_tool_call_budget() {
             }
             co_return response;
         });
-    provider_mock.expect<^^ProviderPort::compact>().never();
+    provider_mock.expect<provider::CompactDispatch>().never();
     auto provider_handle = provider_mock.handle();
     model::Choice choice{
-        .handle = pro::make_proxy<provider::ProviderFacade, ProviderPort>(std::move(provider_handle)),
+        .handle = pro::make_proxy<provider::ProviderFacade>(std::move(provider_handle)),
         .entry = {.provider = "fake", .id = "test"},
     };
     Agent agent(std::move(choice), tools);

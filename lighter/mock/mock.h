@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -27,20 +28,124 @@ struct Error : std::runtime_error {
 namespace detail {
 
 template <typename T>
-struct CopyableFunctionTraits;
-
-template <typename R, typename... Args>
-struct CopyableFunctionTraits<std::copyable_function<R(Args...)>> {
-    using signature = R(Args...);
+concept FacadeContract = requires {
+    typename T::convention_types;
+    typename T::reflection_types;
 };
 
-template <typename R, typename... Args>
-struct CopyableFunctionTraits<std::copyable_function<R(Args...) const>> {
-    using signature = R(Args...);
+template <typename Convention, typename Overloads = typename Convention::overload_types>
+struct ConventionTraits;
+
+struct AccessorProbe;
+
+template <typename Convention, typename... Overloads>
+struct ConventionTraits<Convention, std::tuple<Overloads...>> {
+    using dispatch_type = typename Convention::dispatch_type;
+    using accessor_type = typename dispatch_type::template accessor<AccessorProbe, dispatch_type, Overloads...>;
 };
+
+template <typename Convention>
+using convention_dispatch_t = typename ConventionTraits<Convention>::dispatch_type;
+
+template <typename Convention>
+consteval std::meta::info convention_method() {
+    if constexpr (Convention::is_direct) {
+        throw "lighter::mock::Mock supports only indirect facade conventions";
+    }
+
+    using Accessor = ConventionTraits<Convention>::accessor_type;
+    std::vector<std::meta::info> methods;
+    for (auto member : std::meta::members_of(^^Accessor, std::meta::access_context::unchecked())) {
+        if (std::meta::is_function(member) && std::meta::has_identifier(member)) {
+            methods.push_back(member);
+        }
+    }
+    if (methods.size() != 1) {
+        throw "lighter::mock::Mock facade conventions must contain one non-overloaded member dispatch";
+    }
+    return methods.front();
+}
+
+template <typename Contract>
+consteval std::vector<std::meta::info> methods() {
+    std::vector<std::meta::info> result;
+    if constexpr (FacadeContract<Contract>) {
+        using Conventions = typename Contract::convention_types;
+        template for (constexpr auto convention :
+                      std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^Conventions)))) {
+            using Convention = [:convention:];
+            result.push_back(convention_method<Convention>());
+        }
+    } else {
+        for (auto member : std::meta::members_of(^^Contract, std::meta::access_context::unprivileged())) {
+            if (std::meta::is_function(member) && std::meta::has_identifier(member)) {
+                result.push_back(member);
+            }
+        }
+    }
+    return result;
+}
+
+template <typename Contract, std::meta::info Operation>
+consteval std::meta::info resolve_method() {
+    if constexpr (FacadeContract<Contract>) {
+        static_assert(std::meta::is_type(Operation), "a facade mock operation must be a reflected dispatch type");
+        using Conventions = typename Contract::convention_types;
+        template for (constexpr auto convention :
+                      std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^Conventions)))) {
+            using Convention = [:convention:];
+            if (std::meta::dealias(^^convention_dispatch_t<Convention>) == std::meta::dealias(Operation)) {
+                return convention_method<Convention>();
+            }
+        }
+        throw "the reflected dispatch is not an indirect convention of this mock's facade";
+    } else {
+        for (auto method : methods<Contract>()) {
+            if (method == Operation) {
+                return method;
+            }
+        }
+        throw "the reflected entity is not a direct public method of this mock's contract";
+    }
+}
+
+template <typename Contract>
+consteval std::vector<std::meta::info> port_members() {
+    std::vector<std::meta::info> members;
+    for (auto method : methods<Contract>()) {
+        if (std::meta::is_noexcept(method)) {
+            throw "lighter::mock::Mock does not support noexcept functions because mock failures throw";
+        }
+        if (std::meta::is_volatile(method) || std::meta::is_lvalue_reference_qualified(method) ||
+            std::meta::is_rvalue_reference_qualified(method)) {
+            throw "lighter::mock::Mock supports only unqualified or const member functions";
+        }
+
+        const auto name = std::meta::identifier_of(method);
+        for (auto member : members) {
+            if (std::meta::identifier_of(member) == name) {
+                throw "lighter::mock::Mock cannot represent overloaded member functions";
+            }
+        }
+
+        const std::array arguments{std::meta::type_of(method)};
+        members.push_back(std::meta::data_member_spec(std::meta::substitute(^^std::copyable_function, arguments), {.name = name}));
+    }
+    return members;
+}
 
 template <typename T>
-concept CopyableFunction = requires { typename CopyableFunctionTraits<T>::signature; };
+struct MethodTraits;
+
+template <typename R, typename... Args>
+struct MethodTraits<R(Args...)> {
+    using signature = R(Args...);
+};
+
+template <typename R, typename... Args>
+struct MethodTraits<R(Args...) const> {
+    using signature = R(Args...);
+};
 
 inline std::string call_count_message(std::string_view member, usize expected, usize actual) {
     return std::string(member) + ": expected " + std::to_string(expected) + " call(s), observed " + std::to_string(actual);
@@ -111,19 +216,19 @@ struct State<R(Args...)> {
     bool inferred_count = false;
 };
 
-template <std::meta::info Member>
-consteval std::string_view member_name() {
-    return std::meta::identifier_of(Member);
+template <std::meta::info Method>
+consteval std::string_view method_name() {
+    return std::meta::identifier_of(Method);
 }
 
-template <std::meta::info Member>
-using member_type_t = [:std::meta::type_of(Member):];
+template <std::meta::info Method>
+using method_type_t = [:std::meta::type_of(Method):];
 
-template <std::meta::info Member>
-using member_signature_t = typename CopyableFunctionTraits<member_type_t<Member>>::signature;
+template <std::meta::info Method>
+using method_signature_t = typename MethodTraits<method_type_t<Method>>::signature;
 
-template <std::meta::info Member>
-using member_state_t = State<member_signature_t<Member>>;
+template <std::meta::info Method>
+using method_state_t = State<method_signature_t<Method>>;
 
 } // namespace detail
 
@@ -194,23 +299,20 @@ private:
     detail::State<R(Args...)> &state;
 };
 
-/// Reflection-driven mock for a callable port.
-///
-/// Port must be default-constructible and all of its direct, public data
-/// members must be std::copyable_function<R(Args...)> (optionally const).
-/// Handles copied from Mock share the controller's state and may outlive it.
-template <typename Port>
+/// Reflection-driven mock for a plain method contract or ngcpp-proxy facade.
+/// Operations become owning callable fields on Port. Every handle owns shared
+/// dispatcher state and may outlive the controller.
+template <typename Contract>
 struct Mock {
-    Mock() {
-        template for (constexpr auto member : members()) {
-            using MemberType = detail::member_type_t<member>;
-            static_assert(detail::CopyableFunction<MemberType>, "lighter::mock::Mock port members must be std::copyable_function objects");
+    struct Port;
+    consteval { std::meta::define_aggregate(^^Port, detail::port_members<Contract>()); }
 
-            using State = detail::member_state_t<member>;
+    Mock() {
+        template for (constexpr auto method : methods()) {
+            using State = detail::method_state_t<method>;
             auto state = std::make_shared<State>();
-            state->member = detail::member_name<member>();
-            states[index_of<member>()] = state;
-            port.[:member:] = [state](auto &&...args) -> decltype(auto) { return state->invoke(decltype(args)(args)...); };
+            state->member = detail::method_name<method>();
+            states[index_of<method>()] = state;
         }
     }
 
@@ -219,28 +321,48 @@ struct Mock {
     Mock &operator=(const Mock &) = delete;
     Mock &operator=(Mock &&) noexcept = default;
 
-    [[nodiscard]] Port handle() const { return port; }
-
-    template <std::meta::info Member>
-    [[nodiscard]] auto expect() {
-        static_assert(contains<Member>(), "the reflected entity is not a direct public member of this mock's port");
-        auto state = state_for<Member>();
-        state->expect();
-        return Expectation<detail::member_signature_t<Member>>(std::move(state));
+    [[nodiscard]] Port handle() const {
+        Port result{};
+        template for (constexpr auto method : methods()) {
+            constexpr auto port_member = port_members()[index_of<method>()];
+            auto state = state_for<method>();
+            result.[:port_member:] = [state](auto &&...args) -> decltype(auto) { return state->invoke(decltype(args)(args)...); };
+        }
+        return result;
     }
 
-    template <std::meta::info Member>
+    template <std::meta::info Operation>
+    [[nodiscard]] auto expect() {
+        constexpr auto method = detail::resolve_method<Contract, Operation>();
+        auto state = state_for<method>();
+        state->expect();
+        return Expectation<detail::method_signature_t<method>>(std::move(state));
+    }
+
+    template <typename Dispatch>
+        requires detail::FacadeContract<Contract>
+    [[nodiscard]] auto expect() {
+        return expect<^^Dispatch>();
+    }
+
+    template <std::meta::info Operation>
     [[nodiscard]] auto allow() {
-        static_assert(contains<Member>(), "the reflected entity is not a direct public member of this mock's port");
-        auto state = state_for<Member>();
+        constexpr auto method = detail::resolve_method<Contract, Operation>();
+        auto state = state_for<method>();
         state->allow();
-        return Expectation<detail::member_signature_t<Member>>(std::move(state));
+        return Expectation<detail::method_signature_t<method>>(std::move(state));
+    }
+
+    template <typename Dispatch>
+        requires detail::FacadeContract<Contract>
+    [[nodiscard]] auto allow() {
+        return allow<^^Dispatch>();
     }
 
     void verify() const {
         std::vector<std::string> failures;
-        template for (constexpr auto member : members()) {
-            if (auto failure = state_for<member>()->verification_error()) {
+        template for (constexpr auto method : methods()) {
+            if (auto failure = state_for<method>()->verification_error()) {
                 failures.push_back(std::move(*failure));
             }
         }
@@ -255,44 +377,35 @@ struct Mock {
     }
 
 private:
-    static consteval auto members() {
+    static consteval auto methods() { return std::define_static_array(detail::methods<Contract>()); }
+
+    static consteval auto port_members() {
         return std::define_static_array(std::meta::nonstatic_data_members_of(^^Port, std::meta::access_context::unprivileged()));
     }
 
-    template <std::meta::info Member>
-    static consteval bool contains() {
-        template for (constexpr auto candidate : members()) {
-            if (candidate == Member) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    template <std::meta::info Member>
+    template <std::meta::info Method>
     static consteval usize index_of() {
         usize index = 0;
-        template for (constexpr auto candidate : members()) {
-            if (candidate == Member) {
+        template for (constexpr auto candidate : methods()) {
+            if (candidate == Method) {
                 return index;
             }
             ++index;
         }
-        throw "the reflected entity is not a member of this mock's port";
+        throw "the reflected entity is not a method of this mock's contract";
     }
 
-    template <std::meta::info Member>
-    [[nodiscard]] std::shared_ptr<detail::member_state_t<Member>> state_for() {
-        return std::static_pointer_cast<detail::member_state_t<Member>>(states[index_of<Member>()]);
+    template <std::meta::info Method>
+    [[nodiscard]] std::shared_ptr<detail::method_state_t<Method>> state_for() {
+        return std::static_pointer_cast<detail::method_state_t<Method>>(states[index_of<Method>()]);
     }
 
-    template <std::meta::info Member>
-    [[nodiscard]] std::shared_ptr<const detail::member_state_t<Member>> state_for() const {
-        return std::static_pointer_cast<const detail::member_state_t<Member>>(states[index_of<Member>()]);
+    template <std::meta::info Method>
+    [[nodiscard]] std::shared_ptr<detail::method_state_t<Method>> state_for() const {
+        return std::static_pointer_cast<detail::method_state_t<Method>>(states[index_of<Method>()]);
     }
 
-    Port port{};
-    std::array<std::shared_ptr<void>, members().size()> states;
+    std::array<std::shared_ptr<void>, methods().size()> states;
 };
 
 } // namespace lighter::mock

@@ -1,8 +1,10 @@
-#include <functional>
+#include <concepts>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+
+#include <proxy/proxy.h>
 
 #include <lighter/mock/mock.h>
 
@@ -10,10 +12,27 @@ namespace {
 
 using namespace lighter;
 
-struct ServicePort {
-    std::copyable_function<int(int) const> transform;
-    std::copyable_function<void(std::string_view) const> notify;
-    std::copyable_function<std::unique_ptr<int>() const> acquire;
+struct Service {
+    int count = 0;
+    std::unique_ptr<int> internal_data;
+
+    int transform(int) const;
+    void notify(std::string_view) const;
+    std::unique_ptr<int> acquire() const;
+};
+
+PRO_DEF_MEM_DISPATCH(TransformDispatch, transform);
+PRO_DEF_MEM_DISPATCH(NotifyDispatch, notify);
+
+struct ServiceFacade
+    : pro::facade_builder::add_convention<TransformDispatch, int(int) const>::add_convention<NotifyDispatch,
+                                                                                             void(std::string_view) const>::build {};
+
+template <typename T>
+concept ServiceLike = requires(const T &service) {
+    { service.transform(1) } -> std::same_as<int>;
+    service.notify("message");
+    { service.acquire() } -> std::same_as<std::unique_ptr<int>>;
 };
 
 void require(bool condition, std::string_view message) {
@@ -22,36 +41,36 @@ void require(bool condition, std::string_view message) {
     }
 }
 
-int use_service(const ServicePort &service, int input) {
+int use_service(const ServiceLike auto &service, int input) {
     service.notify("transforming");
     return service.transform(input);
 }
 
 void test_behavior_and_verification() {
-    mock::Mock<ServicePort> service;
-    service.expect<^^ServicePort::transform>().calls([](int value) { return value * 2; }).times(2);
-    service.expect<^^ServicePort::notify>()
+    mock::Mock<Service> service;
+    service.expect<^^Service::transform>().calls([](int value) { return value * 2; }).times(2);
+    service.expect<^^Service::notify>()
         .calls([](std::string_view message) { require(message == "transforming", "mock received the wrong argument"); })
         .times(2);
 
     auto handle = service.handle();
     require(use_service(handle, 3) == 6, "mock returned the wrong first result");
     require(use_service(handle, 4) == 8, "mock returned the wrong second result");
-    require(service.expect<^^ServicePort::transform>().call_count() == 2, "mock recorded the wrong call count");
+    require(service.expect<^^Service::transform>().call_count() == 2, "mock recorded the wrong call count");
     service.verify();
 }
 
 void test_fixed_return() {
-    mock::Mock<ServicePort> service;
-    service.expect<^^ServicePort::transform>().returns(42);
-    service.expect<^^ServicePort::notify>().returns();
+    mock::Mock<Service> service;
+    service.expect<^^Service::transform>().returns(42);
+    service.expect<^^Service::notify>().returns();
 
     require(use_service(service.handle(), 7) == 42, "fixed return behavior failed");
     service.verify();
 }
 
 void test_unexpected_call() {
-    mock::Mock<ServicePort> service;
+    mock::Mock<Service> service;
     bool rejected = false;
     try {
         (void) service.handle().transform(1);
@@ -62,8 +81,8 @@ void test_unexpected_call() {
 }
 
 void test_missing_call() {
-    mock::Mock<ServicePort> service;
-    service.expect<^^ServicePort::transform>().returns(1).once();
+    mock::Mock<Service> service;
+    service.expect<^^Service::transform>().returns(1).once();
 
     bool rejected = false;
     try {
@@ -75,8 +94,8 @@ void test_missing_call() {
 }
 
 void test_never() {
-    mock::Mock<ServicePort> service;
-    service.expect<^^ServicePort::transform>().never();
+    mock::Mock<Service> service;
+    service.expect<^^Service::transform>().never();
 
     bool rejected = false;
     try {
@@ -88,8 +107,8 @@ void test_never() {
 }
 
 void test_allowed_behavior_is_unrestricted() {
-    mock::Mock<ServicePort> service;
-    service.allow<^^ServicePort::transform>().calls([](int value) { return value + 1; });
+    mock::Mock<Service> service;
+    service.allow<^^Service::transform>().calls([](int value) { return value + 1; });
     auto handle = service.handle();
 
     require(handle.transform(1) == 2, "allowed behavior returned the wrong first value");
@@ -98,9 +117,9 @@ void test_allowed_behavior_is_unrestricted() {
 }
 
 void test_ordered_and_move_only_results() {
-    mock::Mock<ServicePort> service;
-    service.expect<^^ServicePort::transform>().then_returns(3).then_calls([](int value) { return value * 2; });
-    service.expect<^^ServicePort::acquire>().then_returns(std::make_unique<int>(9));
+    mock::Mock<Service> service;
+    service.expect<^^Service::transform>().then_returns(3).then_calls([](int value) { return value * 2; });
+    service.expect<^^Service::acquire>().then_returns(std::make_unique<int>(9));
     auto handle = service.handle();
 
     require(handle.transform(100) == 3, "ordered fixed result was not used first");
@@ -111,9 +130,9 @@ void test_ordered_and_move_only_results() {
 }
 
 void test_handle_outlives_controller() {
-    ServicePort handle = [] {
-        mock::Mock<ServicePort> service;
-        service.allow<^^ServicePort::transform>().returns(17);
+    auto handle = [] {
+        mock::Mock<Service> service;
+        service.allow<^^Service::transform>().returns(17);
         return service.handle();
     }();
 
@@ -121,8 +140,8 @@ void test_handle_outlives_controller() {
 }
 
 void test_mock_is_movable() {
-    mock::Mock<ServicePort> original;
-    original.expect<^^ServicePort::transform>().returns(5);
+    mock::Mock<Service> original;
+    original.expect<^^Service::transform>().returns(5);
     auto moved = std::move(original);
 
     require(moved.handle().transform(0) == 5, "moved mock lost its dispatcher state");
@@ -130,9 +149,9 @@ void test_mock_is_movable() {
 }
 
 void test_verification_reports_all_failures() {
-    mock::Mock<ServicePort> service;
-    service.expect<^^ServicePort::transform>().returns(1);
-    service.expect<^^ServicePort::notify>().returns();
+    mock::Mock<Service> service;
+    service.expect<^^Service::transform>().returns(1);
+    service.expect<^^Service::notify>().returns();
 
     bool complete = false;
     try {
@@ -142,6 +161,32 @@ void test_verification_reports_all_failures() {
         complete = message.contains("transform") && message.contains("notify");
     }
     require(complete, "verification must report every unmet expectation");
+}
+
+void test_automatic_port() {
+    mock::Mock<Service> service;
+    service.expect<^^Service::transform>().calls([](int value) { return value + 2; });
+    service.expect<^^Service::notify>().returns();
+    service.expect<^^Service::acquire>().then_returns(std::make_unique<int>(8));
+    auto handle = service.handle();
+
+    handle.notify("generated");
+    require(handle.transform(3) == 5, "generated port lost the reflected method signature");
+    auto acquired = handle.acquire();
+    require(acquired && *acquired == 8, "generated port lost the reflected move-only result");
+    service.verify();
+}
+
+void test_facade_contract() {
+    mock::Mock<ServiceFacade> service;
+    service.expect<TransformDispatch>().calls([](int value) { return value + 4; });
+    service.expect<NotifyDispatch>().calls(
+        [](std::string_view message) { require(message == "facade", "facade mock received the wrong argument"); });
+
+    auto proxy = pro::make_proxy<ServiceFacade>(service.handle());
+    proxy->notify("facade");
+    require(proxy->transform(3) == 7, "facade mock returned the wrong value");
+    service.verify();
 }
 
 } // namespace
@@ -157,4 +202,6 @@ int main() {
     test_handle_outlives_controller();
     test_mock_is_movable();
     test_verification_reports_all_failures();
+    test_automatic_port();
+    test_facade_contract();
 }
