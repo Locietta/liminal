@@ -2,6 +2,7 @@ add_requires("pixi::libcurl", {alias = "libcurl"})
 add_requires("pixi::libiconv", {alias = "libiconv"})
 add_requires("pixi::libuv", {alias = "libuv"})
 add_requires("glaze")
+add_requires("ngcpp-proxy")
 
 target("lighter")
     set_kind("static")
@@ -10,6 +11,7 @@ target("lighter")
     add_packages("libiconv")
     add_syslinks("stdc++exp", {public = true})
     add_packages("libcurl", {public = true})
+    add_packages("ngcpp-proxy", {public = true})
     -- codec/json is header-only over glaze, so consumers need its headers too
     add_packages("glaze", {public = true})
     if is_os("windows") then

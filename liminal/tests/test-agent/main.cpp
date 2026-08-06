@@ -7,8 +7,6 @@
 #include <vector>
 
 #include <glaze/json.hpp>
-#include <proxy/proxy.h>
-
 #include <lighter/async/io/loop.h>
 #include <lighter/mock/mock.h>
 #include <lighter/types.hpp>
@@ -81,9 +79,8 @@ void test_successful_turn() {
             provider::append_user(history, "SUMMARY");
             co_return;
         });
-    auto provider_handle = provider_mock.handle();
     model::Choice choice{
-        .handle = pro::make_proxy<provider::ProviderFacade>(std::move(provider_handle)),
+        .handle = provider_mock.handle(),
         .entry = {.provider = "fake", .id = "test"},
     };
     Agent agent(std::move(choice), tools);
@@ -156,9 +153,8 @@ void test_tool_call_budget() {
             co_return response;
         });
     provider_mock.expect<provider::CompactDispatch>().never();
-    auto provider_handle = provider_mock.handle();
     model::Choice choice{
-        .handle = pro::make_proxy<provider::ProviderFacade>(std::move(provider_handle)),
+        .handle = provider_mock.handle(),
         .entry = {.provider = "fake", .id = "test"},
     };
     Agent agent(std::move(choice), tools);

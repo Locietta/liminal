@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <concepts>
 #include <cstddef>
 #include <deque>
@@ -15,6 +16,8 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#include <proxy/proxy.h>
 
 #include <lighter/types.hpp>
 
@@ -40,19 +43,18 @@ struct AccessorProbe;
 
 template <typename Convention, typename... Overloads>
 struct ConventionTraits<Convention, std::tuple<Overloads...>> {
+    static_assert(sizeof...(Overloads) == 1, "lighter::mock::Mock facade conventions cannot be overloaded");
+
     using dispatch_type = typename Convention::dispatch_type;
     using accessor_type = typename dispatch_type::template accessor<AccessorProbe, dispatch_type, Overloads...>;
+    using overload_type = std::tuple_element_t<0, std::tuple<Overloads...>>;
 };
 
 template <typename Convention>
 using convention_dispatch_t = typename ConventionTraits<Convention>::dispatch_type;
 
 template <typename Convention>
-consteval std::meta::info convention_method() {
-    if constexpr (Convention::is_direct) {
-        throw "lighter::mock::Mock cannot generate direct facade conventions because they operate on the proxy's pointer wrapper";
-    }
-
+consteval std::string_view convention_name() {
     using Accessor = ConventionTraits<Convention>::accessor_type;
     std::vector<std::meta::info> methods;
     for (auto member : std::meta::members_of(^^Accessor, std::meta::access_context::unchecked())) {
@@ -60,61 +62,68 @@ consteval std::meta::info convention_method() {
             methods.push_back(member);
         }
     }
-    if (methods.empty()) {
-        throw "lighter::mock::Mock cannot generate free-function facade conventions because they require an ADL-visible function";
+    if (methods.size() == 1) {
+        return std::meta::identifier_of(methods.front());
     }
-    if (methods.size() != 1) {
-        throw "lighter::mock::Mock facade member conventions cannot be overloaded";
+    if (!methods.empty()) {
+        throw "lighter::mock::Mock facade conventions cannot be overloaded";
     }
-    return methods.front();
+    constexpr auto dispatch = std::meta::dealias(^^convention_dispatch_t<Convention>);
+    if constexpr (std::meta::has_identifier(dispatch)) {
+        return std::meta::identifier_of(dispatch);
+    }
+    return "facade convention";
+}
+
+template <typename Contract>
+consteval std::vector<std::meta::info> facade_conventions() {
+    std::vector<std::meta::info> result;
+    using Conventions = typename Contract::convention_types;
+    for (auto convention : std::meta::template_arguments_of(std::meta::dealias(^^Conventions))) {
+        result.push_back(convention);
+    }
+    return result;
 }
 
 template <typename Contract>
 consteval std::vector<std::meta::info> methods() {
     std::vector<std::meta::info> result;
-    if constexpr (FacadeContract<Contract>) {
-        using Conventions = typename Contract::convention_types;
-        template for (constexpr auto convention :
-                      std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^Conventions)))) {
-            using Convention = [:convention:];
-            result.push_back(convention_method<Convention>());
-        }
-    } else {
-        for (auto member : std::meta::members_of(^^Contract, std::meta::access_context::unprivileged())) {
-            if (std::meta::is_function(member) && std::meta::has_identifier(member)) {
-                result.push_back(member);
-            }
+    for (auto member : std::meta::members_of(^^Contract, std::meta::access_context::unprivileged())) {
+        if (std::meta::is_function(member) && std::meta::has_identifier(member)) {
+            result.push_back(member);
         }
     }
     return result;
 }
 
-template <typename Contract, std::meta::info Operation>
-consteval std::meta::info resolve_method() {
-    if constexpr (FacadeContract<Contract>) {
-        static_assert(std::meta::is_type(Operation), "a facade mock operation must be a reflected dispatch type");
-        using Conventions = typename Contract::convention_types;
-        template for (constexpr auto convention :
-                      std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^Conventions)))) {
-            using Convention = [:convention:];
-            if (std::meta::dealias(^^convention_dispatch_t<Convention>) == std::meta::dealias(Operation)) {
-                return convention_method<Convention>();
-            }
+template <typename Contract, std::meta::info Dispatch>
+consteval std::meta::info resolve_convention() {
+    static_assert(std::meta::is_type(Dispatch), "a facade mock operation must be a reflected dispatch type");
+    template for (constexpr auto convention : std::define_static_array(facade_conventions<Contract>())) {
+        using Convention = [:convention:];
+        if (std::meta::dealias(^^convention_dispatch_t<Convention>) == std::meta::dealias(Dispatch)) {
+            return convention;
         }
-        throw "the reflected dispatch is not an indirect convention of this mock's facade";
-    } else {
-        for (auto method : methods<Contract>()) {
-            if (method == Operation) {
-                return method;
-            }
-        }
-        throw "the reflected entity is not a direct public method of this mock's contract";
     }
+    throw "the reflected dispatch is not a convention of this mock's facade";
+}
+
+template <typename Contract, std::meta::info Method>
+consteval std::meta::info resolve_method() {
+    for (auto candidate : methods<Contract>()) {
+        if (candidate == Method) {
+            return candidate;
+        }
+    }
+    throw "the reflected entity is not a direct public method of this mock's contract";
 }
 
 template <typename Contract>
 consteval std::vector<std::meta::info> port_members() {
     std::vector<std::meta::info> members;
+    if constexpr (FacadeContract<Contract>) {
+        return members;
+    }
     for (auto method : methods<Contract>()) {
         if (std::meta::is_volatile(method) || std::meta::is_lvalue_reference_qualified(method) ||
             std::meta::is_rvalue_reference_qualified(method)) {
@@ -280,6 +289,135 @@ using method_signature_t = typename MethodTraits<method_type_t<Method>>::signatu
 template <std::meta::info Method>
 using method_state_t = State<method_signature_t<Method>>;
 
+template <typename Convention>
+using convention_type_t = typename ConventionTraits<Convention>::overload_type;
+
+template <typename Convention>
+using convention_signature_t = typename MethodTraits<convention_type_t<Convention>>::signature;
+
+template <typename Convention>
+using convention_state_t = State<convention_signature_t<Convention>>;
+
+template <typename Contract>
+using facade_states_t = std::array<std::shared_ptr<void>, std::tuple_size_v<typename Contract::convention_types>>;
+
+template <typename Contract, typename Convention>
+consteval usize convention_index() {
+    usize index = 0;
+    template for (constexpr auto candidate : std::define_static_array(facade_conventions<Contract>())) {
+        if (candidate == ^^Convention) {
+            return index;
+        }
+        ++index;
+    }
+    throw "the convention is not part of this mock's facade";
+}
+
+template <typename Contract, typename Convention>
+struct FacadeDispatch {
+    template <typename Self, typename... Args>
+        requires requires(Self &&self, Args &&...args) {
+            std::forward<Self>(self).template invoke<Convention>(std::forward<Args>(args)...);
+        }
+    decltype(auto) operator()(Self &&self, Args &&...args) const
+        noexcept(noexcept(std::forward<Self>(self).template invoke<Convention>(std::forward<Args>(args)...))) {
+        return std::forward<Self>(self).template invoke<Convention>(std::forward<Args>(args)...);
+    }
+};
+
+template <typename Dispatch, typename Overload, typename Self, typename... Args>
+    requires requires(Self &&self, Args &&...args) { Dispatch{}(std::forward<Self>(self), std::forward<Args>(args)...); }
+decltype(auto) invoke(Self &&self, Args &&...args) noexcept(noexcept(Dispatch{}(std::forward<Self>(self), std::forward<Args>(args)...))) {
+    return Dispatch{}(std::forward<Self>(self), std::forward<Args>(args)...);
+}
+
+template <bool Enabled, typename Owner, typename Contract, typename Convention, typename Overloads = typename Convention::overload_types>
+struct ConventionAccessor {};
+
+template <typename Owner, typename Contract, typename Convention, typename... Overloads>
+struct ConventionAccessor<true, Owner, Contract, Convention, std::tuple<Overloads...>>
+    : Convention::dispatch_type::template accessor<Owner, FacadeDispatch<Contract, Convention>, Overloads...> {};
+
+template <typename Owner, typename Contract, bool Direct, typename Conventions = typename Contract::convention_types>
+struct FacadeAccessors;
+
+template <typename Owner, typename Contract, bool Direct, typename... Conventions>
+struct FacadeAccessors<Owner, Contract, Direct, std::tuple<Conventions...>>
+    : ConventionAccessor<Conventions::is_direct == Direct, Owner, Contract, Conventions>... {};
+
+template <typename Contract>
+struct FacadePointee : FacadeAccessors<FacadePointee<Contract>, Contract, false> {
+    explicit FacadePointee(facade_states_t<Contract> states) : states(std::move(states)) {}
+
+    template <typename Convention, typename... Args>
+    decltype(auto) invoke(Args &&...args) const
+        noexcept(noexcept(std::declval<convention_state_t<Convention> &>().invoke(std::forward<Args>(args)...))) {
+        auto state = std::static_pointer_cast<convention_state_t<Convention>>(states[convention_index<Contract, Convention>()]);
+        return state->invoke(std::forward<Args>(args)...);
+    }
+
+    void retain() noexcept { references.fetch_add(1, std::memory_order_relaxed); }
+
+    void release() noexcept {
+        if (references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            delete this;
+        }
+    }
+
+    facade_states_t<Contract> states;
+    std::atomic<usize> references{1};
+};
+
+template <typename Contract>
+struct FacadePointer : FacadeAccessors<FacadePointer<Contract>, Contract, true> {
+    using element_type = FacadePointee<Contract>;
+
+    explicit FacadePointer(facade_states_t<Contract> states) : pointee(new element_type(std::move(states))) {}
+
+    FacadePointer(const FacadePointer &other) noexcept : pointee(other.pointee) {
+        if (pointee) {
+            pointee->retain();
+        }
+    }
+
+    FacadePointer(FacadePointer &&other) noexcept : pointee(std::exchange(other.pointee, nullptr)) {}
+
+    FacadePointer &operator=(const FacadePointer &other) noexcept {
+        auto *replacement = other.pointee;
+        if (replacement) {
+            replacement->retain();
+        }
+        if (pointee) {
+            pointee->release();
+        }
+        pointee = replacement;
+        return *this;
+    }
+
+    FacadePointer &operator=(FacadePointer &&other) noexcept {
+        std::swap(pointee, other.pointee);
+        return *this;
+    }
+
+    ~FacadePointer() {
+        if (pointee) {
+            pointee->release();
+        }
+    }
+
+    element_type &operator*() & noexcept { return *pointee; }
+    const element_type &operator*() const & noexcept { return *pointee; }
+    element_type &&operator*() && noexcept { return std::move(*pointee); }
+    const element_type &&operator*() const && noexcept { return std::move(*pointee); }
+
+    template <typename Convention, typename... Args>
+    decltype(auto) invoke(Args &&...args) const noexcept(noexcept(pointee->template invoke<Convention>(std::forward<Args>(args)...))) {
+        return pointee->template invoke<Convention>(std::forward<Args>(args)...);
+    }
+
+    element_type *pointee;
+};
+
 } // namespace detail
 
 /// Typed configuration and observation handle for one reflected port member.
@@ -415,19 +553,33 @@ private:
 };
 
 /// Reflection-driven mock for a plain method contract or ngcpp-proxy facade.
-/// Operations become owning callable fields on Port. Every handle owns shared
-/// dispatcher state and may outlive the controller.
+/// Every generated handle owns shared dispatcher state and may outlive the
+/// controller.
 template <typename Contract>
 struct Mock {
     struct Port;
-    consteval { std::meta::define_aggregate(^^Port, detail::port_members<Contract>()); }
+    consteval {
+        if constexpr (!detail::FacadeContract<Contract>) {
+            std::meta::define_aggregate(^^Port, detail::port_members<Contract>());
+        }
+    }
 
     Mock() {
-        template for (constexpr auto method : methods()) {
-            using State = detail::method_state_t<method>;
-            auto state = std::make_shared<State>();
-            state->member = detail::method_name<method>();
-            states[index_of<method>()] = state;
+        if constexpr (detail::FacadeContract<Contract>) {
+            template for (constexpr auto convention : conventions()) {
+                using Convention = [:convention:];
+                using State = detail::convention_state_t<Convention>;
+                auto state = std::make_shared<State>();
+                state->member = detail::convention_name<Convention>();
+                states[detail::convention_index<Contract, Convention>()] = state;
+            }
+        } else {
+            template for (constexpr auto method : methods()) {
+                using State = detail::method_state_t<method>;
+                auto state = std::make_shared<State>();
+                state->member = detail::method_name<method>();
+                states[index_of<method>()] = state;
+            }
         }
     }
 
@@ -436,24 +588,36 @@ struct Mock {
     Mock &operator=(const Mock &) = delete;
     Mock &operator=(Mock &&) noexcept = default;
 
-    [[nodiscard]] Port handle() const {
-        Port result{};
-        template for (constexpr auto method : methods()) {
-            constexpr auto port_member = port_members()[index_of<method>()];
-            auto state = state_for<method>();
-            result.[:port_member:] = [state](auto &&...args) noexcept(std::meta::is_noexcept(method)) -> decltype(auto) {
-                return state->invoke(decltype(args)(args)...);
-            };
+    [[nodiscard]] auto handle() const {
+        if constexpr (detail::FacadeContract<Contract>) {
+            return pro::proxy<Contract>(detail::FacadePointer<Contract>(states));
+        } else {
+            Port result{};
+            template for (constexpr auto method : methods()) {
+                constexpr auto port_member = port_members()[index_of<method>()];
+                auto state = state_for<method>();
+                result.[:port_member:] = [state](auto &&...args) noexcept(std::meta::is_noexcept(method)) -> decltype(auto) {
+                    return state->invoke(decltype(args)(args)...);
+                };
+            }
+            return result;
         }
-        return result;
     }
 
     template <std::meta::info Operation>
     [[nodiscard]] auto expect() {
-        constexpr auto method = detail::resolve_method<Contract, Operation>();
-        auto state = state_for<method>();
-        state->expect();
-        return Expectation<detail::method_signature_t<method>>(std::move(state));
+        if constexpr (detail::FacadeContract<Contract>) {
+            constexpr auto convention = detail::resolve_convention<Contract, Operation>();
+            using Convention = [:convention:];
+            auto state = facade_state_for<Convention>();
+            state->expect();
+            return Expectation<detail::convention_signature_t<Convention>>(std::move(state));
+        } else {
+            constexpr auto method = detail::resolve_method<Contract, Operation>();
+            auto state = state_for<method>();
+            state->expect();
+            return Expectation<detail::method_signature_t<method>>(std::move(state));
+        }
     }
 
     template <typename Dispatch>
@@ -464,10 +628,18 @@ struct Mock {
 
     template <std::meta::info Operation>
     [[nodiscard]] auto allow() {
-        constexpr auto method = detail::resolve_method<Contract, Operation>();
-        auto state = state_for<method>();
-        state->allow();
-        return Expectation<detail::method_signature_t<method>>(std::move(state));
+        if constexpr (detail::FacadeContract<Contract>) {
+            constexpr auto convention = detail::resolve_convention<Contract, Operation>();
+            using Convention = [:convention:];
+            auto state = facade_state_for<Convention>();
+            state->allow();
+            return Expectation<detail::convention_signature_t<Convention>>(std::move(state));
+        } else {
+            constexpr auto method = detail::resolve_method<Contract, Operation>();
+            auto state = state_for<method>();
+            state->allow();
+            return Expectation<detail::method_signature_t<method>>(std::move(state));
+        }
     }
 
     template <typename Dispatch>
@@ -478,9 +650,18 @@ struct Mock {
 
     void verify() const {
         std::vector<std::string> failures;
-        template for (constexpr auto method : methods()) {
-            if (auto failure = state_for<method>()->verification_error()) {
-                failures.push_back(std::move(*failure));
+        if constexpr (detail::FacadeContract<Contract>) {
+            template for (constexpr auto convention : conventions()) {
+                using Convention = [:convention:];
+                if (auto failure = facade_state_for<Convention>()->verification_error()) {
+                    failures.push_back(std::move(*failure));
+                }
+            }
+        } else {
+            template for (constexpr auto method : methods()) {
+                if (auto failure = state_for<method>()->verification_error()) {
+                    failures.push_back(std::move(*failure));
+                }
             }
         }
         if (failures.empty()) {
@@ -495,6 +676,12 @@ struct Mock {
 
 private:
     static consteval auto methods() { return std::define_static_array(detail::methods<Contract>()); }
+
+    static consteval auto conventions()
+        requires detail::FacadeContract<Contract>
+    {
+        return std::define_static_array(detail::facade_conventions<Contract>());
+    }
 
     static consteval auto port_members() {
         return std::define_static_array(std::meta::nonstatic_data_members_of(^^Port, std::meta::access_context::unprivileged()));
@@ -522,7 +709,27 @@ private:
         return std::static_pointer_cast<detail::method_state_t<Method>>(states[index_of<Method>()]);
     }
 
-    std::array<std::shared_ptr<void>, methods().size()> states;
+    template <typename Convention>
+        requires detail::FacadeContract<Contract>
+    [[nodiscard]] std::shared_ptr<detail::convention_state_t<Convention>> facade_state_for() const {
+        return std::static_pointer_cast<detail::convention_state_t<Convention>>(states[detail::convention_index<Contract, Convention>()]);
+    }
+
+    static consteval usize operation_count() {
+        if constexpr (detail::FacadeContract<Contract>) {
+            return std::tuple_size_v<typename Contract::convention_types>;
+        } else {
+            return methods().size();
+        }
+    }
+
+    std::array<std::shared_ptr<void>, operation_count()> states;
 };
 
 } // namespace lighter::mock
+
+template <typename Contract>
+struct pro::is_bitwise_trivially_relocatable<lighter::mock::detail::FacadePointer<Contract>>
+    : std::bool_constant<pro::is_bitwise_trivially_relocatable_v<
+          lighter::mock::detail::FacadeAccessors<lighter::mock::detail::FacadePointer<Contract>, Contract, true>
+      >> {};

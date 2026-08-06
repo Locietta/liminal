@@ -24,10 +24,14 @@ struct Service {
 PRO_DEF_MEM_DISPATCH(TransformDispatch, transform);
 PRO_DEF_MEM_DISPATCH(NotifyDispatch, notify);
 PRO_DEF_MEM_DISPATCH(NoexceptTransformDispatch, transform);
+PRO_DEF_FREE_DISPATCH(FreeTransformDispatch, free_transform);
+PRO_DEF_MEM_DISPATCH(DirectTransformDispatch, direct_transform);
 
 struct ServiceFacade
-    : pro::facade_builder::add_convention<TransformDispatch, int(int) const>::add_convention<NotifyDispatch,
-                                                                                             void(std::string_view) const>::build {};
+    : pro::facade_builder::add_convention<TransformDispatch, int(int) const>::add_convention<NotifyDispatch, void(std::string_view) const>::
+          add_convention<FreeTransformDispatch, int(int) const noexcept>::
+              add_direct_convention<DirectTransformDispatch, int(int) const noexcept>::support_copy<pro::constraint_level::nothrow>::build {
+};
 
 struct NoexceptServiceFacade : pro::facade_builder::add_convention<NoexceptTransformDispatch, int(int) const noexcept>::build {};
 
@@ -182,13 +186,21 @@ void test_automatic_port() {
 
 void test_facade_contract() {
     mock::Mock<ServiceFacade> service;
-    service.expect<TransformDispatch>().calls([](int value) { return value + 4; });
+    service.expect<TransformDispatch>().calls([](int value) { return value + 4; }).times(2);
     service.expect<NotifyDispatch>().calls(
         [](std::string_view message) { require(message == "facade", "facade mock received the wrong argument"); });
+    service.expect<FreeTransformDispatch>().calls([](int value) noexcept { return value * 2; });
+    service.expect<DirectTransformDispatch>().calls([](int value) noexcept { return value * 3; });
 
-    auto proxy = pro::make_proxy<ServiceFacade>(service.handle());
+    auto proxy = service.handle();
+    auto copied_proxy = proxy;
     proxy->notify("facade");
     require(proxy->transform(3) == 7, "facade mock returned the wrong value");
+    static_assert(noexcept(free_transform(*proxy, 3)));
+    static_assert(noexcept(proxy.direct_transform(3)));
+    require(free_transform(*proxy, 3) == 6, "free facade convention returned the wrong value");
+    require(proxy.direct_transform(3) == 9, "direct facade convention returned the wrong value");
+    require(copied_proxy->transform(4) == 8, "copied facade mock lost its state");
     service.verify();
 }
 
@@ -196,7 +208,7 @@ void test_noexcept_facade_contract() {
     mock::Mock<NoexceptServiceFacade> service;
     service.expect<NoexceptTransformDispatch>().calls([](int value) noexcept { return value * 3; });
 
-    auto proxy = pro::make_proxy<NoexceptServiceFacade>(service.handle());
+    auto proxy = service.handle();
     static_assert(noexcept(proxy->transform(2)));
     require(proxy->transform(2) == 6, "noexcept facade mock returned the wrong value");
     service.verify();
@@ -205,7 +217,7 @@ void test_noexcept_facade_contract() {
 void test_noexcept_failure_is_deferred() {
     mock::Mock<NoexceptServiceFacade> service;
     service.expect<NoexceptTransformDispatch>().never();
-    auto proxy = pro::make_proxy<NoexceptServiceFacade>(service.handle());
+    auto proxy = service.handle();
 
     require(proxy->transform(2) == 0, "unconfigured noexcept mock did not return its safe fallback");
     bool rejected = false;
