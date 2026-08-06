@@ -82,12 +82,18 @@ can satisfy such a structural interface or be stored in an `ngcpp-proxy`.
 
 ## Design boundaries
 
-- Plain contracts and facades currently require one non-overloaded ordinary
-  member operation per name. Facades support indirect member conventions;
-  direct and free-function conventions are rejected. `noexcept`, volatile,
-  and ref-qualified operations are also rejected because the generated
-  aggregate needs one callable field per operation and mock failures may
-  throw.
+- Plain contracts and facades require one non-overloaded ordinary member
+  operation per name. Facades support indirect member conventions. A direct
+  convention operates on proxy's stored pointer wrapper rather than the
+  pointee, while a free convention requires an actual ADL-visible function;
+  neither can be represented by `define_aggregate` data members in C++26.
+- `noexcept` operations are supported when their result is `void` or
+  nothrow-default-constructible. Their `calls` and `then_calls`
+  implementations must be nothrow-invocable. Because an exception cannot
+  escape such a call, immediate mock violations are recorded and reported by
+  `verify()`; an unconfigured non-void call returns `R{}` in the meantime.
+- Volatile and ref-qualified operations are rejected because the generated
+  aggregate needs one callable field per operation.
 - `std::function_ref` is deliberately not used for port fields. It is
   non-owning and non-default-constructible, so a returned or coroutine-stored
   handle could outlive the controller and dangle.

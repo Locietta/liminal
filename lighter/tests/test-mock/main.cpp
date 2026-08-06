@@ -23,10 +23,13 @@ struct Service {
 
 PRO_DEF_MEM_DISPATCH(TransformDispatch, transform);
 PRO_DEF_MEM_DISPATCH(NotifyDispatch, notify);
+PRO_DEF_MEM_DISPATCH(NoexceptTransformDispatch, transform);
 
 struct ServiceFacade
     : pro::facade_builder::add_convention<TransformDispatch, int(int) const>::add_convention<NotifyDispatch,
                                                                                              void(std::string_view) const>::build {};
+
+struct NoexceptServiceFacade : pro::facade_builder::add_convention<NoexceptTransformDispatch, int(int) const noexcept>::build {};
 
 template <typename T>
 concept ServiceLike = requires(const T &service) {
@@ -189,6 +192,31 @@ void test_facade_contract() {
     service.verify();
 }
 
+void test_noexcept_facade_contract() {
+    mock::Mock<NoexceptServiceFacade> service;
+    service.expect<NoexceptTransformDispatch>().calls([](int value) noexcept { return value * 3; });
+
+    auto proxy = pro::make_proxy<NoexceptServiceFacade>(service.handle());
+    static_assert(noexcept(proxy->transform(2)));
+    require(proxy->transform(2) == 6, "noexcept facade mock returned the wrong value");
+    service.verify();
+}
+
+void test_noexcept_failure_is_deferred() {
+    mock::Mock<NoexceptServiceFacade> service;
+    service.expect<NoexceptTransformDispatch>().never();
+    auto proxy = pro::make_proxy<NoexceptServiceFacade>(service.handle());
+
+    require(proxy->transform(2) == 0, "unconfigured noexcept mock did not return its safe fallback");
+    bool rejected = false;
+    try {
+        service.verify();
+    } catch (const mock::Error &error) {
+        rejected = std::string_view(error.what()).contains("unexpected call");
+    }
+    require(rejected, "noexcept mock did not defer its failure to verification");
+}
+
 } // namespace
 
 int main() {
@@ -204,4 +232,6 @@ int main() {
     test_verification_reports_all_failures();
     test_automatic_port();
     test_facade_contract();
+    test_noexcept_facade_contract();
+    test_noexcept_failure_is_deferred();
 }

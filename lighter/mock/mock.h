@@ -50,7 +50,7 @@ using convention_dispatch_t = typename ConventionTraits<Convention>::dispatch_ty
 template <typename Convention>
 consteval std::meta::info convention_method() {
     if constexpr (Convention::is_direct) {
-        throw "lighter::mock::Mock supports only indirect facade conventions";
+        throw "lighter::mock::Mock cannot generate direct facade conventions because they operate on the proxy's pointer wrapper";
     }
 
     using Accessor = ConventionTraits<Convention>::accessor_type;
@@ -60,8 +60,11 @@ consteval std::meta::info convention_method() {
             methods.push_back(member);
         }
     }
+    if (methods.empty()) {
+        throw "lighter::mock::Mock cannot generate free-function facade conventions because they require an ADL-visible function";
+    }
     if (methods.size() != 1) {
-        throw "lighter::mock::Mock facade conventions must contain one non-overloaded member dispatch";
+        throw "lighter::mock::Mock facade member conventions cannot be overloaded";
     }
     return methods.front();
 }
@@ -113,9 +116,6 @@ template <typename Contract>
 consteval std::vector<std::meta::info> port_members() {
     std::vector<std::meta::info> members;
     for (auto method : methods<Contract>()) {
-        if (std::meta::is_noexcept(method)) {
-            throw "lighter::mock::Mock does not support noexcept functions because mock failures throw";
-        }
         if (std::meta::is_volatile(method) || std::meta::is_lvalue_reference_qualified(method) ||
             std::meta::is_rvalue_reference_qualified(method)) {
             throw "lighter::mock::Mock supports only unqualified or const member functions";
@@ -147,6 +147,16 @@ struct MethodTraits<R(Args...) const> {
     using signature = R(Args...);
 };
 
+template <typename R, typename... Args>
+struct MethodTraits<R(Args...) noexcept> {
+    using signature = R(Args...) noexcept;
+};
+
+template <typename R, typename... Args>
+struct MethodTraits<R(Args...) const noexcept> {
+    using signature = R(Args...) noexcept;
+};
+
 inline std::string call_count_message(std::string_view member, usize expected, usize actual) {
     return std::string(member) + ": expected " + std::to_string(expected) + " call(s), observed " + std::to_string(actual);
 }
@@ -154,12 +164,33 @@ inline std::string call_count_message(std::string_view member, usize expected, u
 template <typename Signature>
 struct State;
 
+template <bool IsNoexcept, typename R, typename... Args>
+struct StateSignature;
+
 template <typename R, typename... Args>
-struct State<R(Args...)> {
-    R invoke(Args... args) {
+struct StateSignature<false, R, Args...> {
+    using type = R(Args...);
+};
+
+template <typename R, typename... Args>
+struct StateSignature<true, R, Args...> {
+    using type = R(Args...) noexcept;
+};
+
+template <bool IsNoexcept, typename R, typename... Args>
+struct StateBase {
+    using signature = typename StateSignature<IsNoexcept, R, Args...>::type;
+    using action_type = std::move_only_function<signature>;
+
+    static_assert(!IsNoexcept || std::is_void_v<R> || std::is_nothrow_default_constructible_v<R>,
+                  "noexcept mock operations must return void or a nothrow-default-constructible type");
+
+    R invoke(Args... args) noexcept(IsNoexcept) {
         ++call_count;
         if (expected_calls && call_count > *expected_calls) {
-            throw Error(call_count_message(member, *expected_calls, call_count));
+            if constexpr (!IsNoexcept) {
+                throw Error(call_count_message(member, *expected_calls, call_count));
+            }
         }
         if (!actions.empty()) {
             auto action = std::move(actions.front());
@@ -172,7 +203,16 @@ struct State<R(Args...)> {
             }
         }
         if (!behavior) {
-            throw Error(std::string(member) + ": unexpected call (no behavior configured)");
+            if constexpr (IsNoexcept) {
+                unexpected_call = true;
+                if constexpr (std::is_void_v<R>) {
+                    return;
+                } else {
+                    return R{};
+                }
+            } else {
+                throw Error(std::string(member) + ": unexpected call (no behavior configured)");
+            }
         }
 
         if constexpr (std::is_void_v<R>) {
@@ -183,6 +223,9 @@ struct State<R(Args...)> {
     }
 
     [[nodiscard]] std::optional<std::string> verification_error() const {
+        if (unexpected_call) {
+            return std::string(member) + ": unexpected call (no behavior configured)";
+        }
         if (expected_calls && call_count != *expected_calls) {
             return call_count_message(member, *expected_calls, call_count);
         }
@@ -201,7 +244,7 @@ struct State<R(Args...)> {
         inferred_count = false;
     }
 
-    void add_action(std::move_only_function<R(Args...)> action) {
+    void add_action(action_type action) {
         actions.push_back(std::move(action));
         if (inferred_count) {
             expected_calls = actions.size();
@@ -209,12 +252,19 @@ struct State<R(Args...)> {
     }
 
     std::string_view member;
-    std::move_only_function<R(Args...)> behavior;
-    std::deque<std::move_only_function<R(Args...)>> actions;
+    action_type behavior;
+    std::deque<action_type> actions;
     std::optional<usize> expected_calls;
     usize call_count = 0;
     bool inferred_count = false;
+    bool unexpected_call = false;
 };
+
+template <typename R, typename... Args>
+struct State<R(Args...)> : StateBase<false, R, Args...> {};
+
+template <typename R, typename... Args>
+struct State<R(Args...) noexcept> : StateBase<true, R, Args...> {};
 
 template <std::meta::info Method>
 consteval std::string_view method_name() {
@@ -299,6 +349,71 @@ private:
     detail::State<R(Args...)> &state;
 };
 
+template <typename R, typename... Args>
+struct Expectation<R(Args...) noexcept> {
+    template <typename F>
+        requires std::is_nothrow_invocable_r_v<R, F &, Args...>
+    Expectation &calls(F &&implementation) {
+        state.behavior = std::forward<F>(implementation);
+        return *this;
+    }
+
+    template <typename F>
+        requires std::is_nothrow_invocable_r_v<R, F &, Args...>
+    Expectation &then_calls(F &&implementation) {
+        state.add_action(std::move_only_function<R(Args...) noexcept>(std::forward<F>(implementation)));
+        return *this;
+    }
+
+    template <typename Value>
+        requires(!std::is_void_v<R> && !std::is_reference_v<R> && std::copy_constructible<R> && std::is_nothrow_copy_constructible_v<R> &&
+                 std::constructible_from<R, Value>)
+    Expectation &returns(Value &&value) {
+        R result(std::forward<Value>(value));
+        return calls([result = std::move(result)](Args...) noexcept -> R { return result; });
+    }
+
+    Expectation &returns()
+        requires std::is_void_v<R>
+    {
+        return calls([](Args...) noexcept {});
+    }
+
+    template <typename Value>
+        requires(!std::is_void_v<R> && !std::is_reference_v<R> && std::constructible_from<R, Value> &&
+                 std::is_nothrow_move_constructible_v<R>)
+    Expectation &then_returns(Value &&value) {
+        R result(std::forward<Value>(value));
+        return then_calls([result = std::move(result)](Args...) mutable noexcept -> R { return std::move(result); });
+    }
+
+    Expectation &then_returns()
+        requires std::is_void_v<R>
+    {
+        return then_calls([](Args...) noexcept {});
+    }
+
+    Expectation &times(usize count) {
+        state.expected_calls = count;
+        state.inferred_count = false;
+        return *this;
+    }
+
+    Expectation &once() { return times(1); }
+    Expectation &never() { return times(0); }
+
+    [[nodiscard]] usize call_count() const noexcept { return state.call_count; }
+
+private:
+    template <typename>
+    friend struct Mock;
+
+    explicit Expectation(std::shared_ptr<detail::State<R(Args...) noexcept>> state) : owner(std::move(state)), state(*owner) {}
+
+    std::shared_ptr<detail::State<R(Args...) noexcept>> owner;
+    detail::State<R(Args...) noexcept> &state;
+};
+
 /// Reflection-driven mock for a plain method contract or ngcpp-proxy facade.
 /// Operations become owning callable fields on Port. Every handle owns shared
 /// dispatcher state and may outlive the controller.
@@ -326,7 +441,9 @@ struct Mock {
         template for (constexpr auto method : methods()) {
             constexpr auto port_member = port_members()[index_of<method>()];
             auto state = state_for<method>();
-            result.[:port_member:] = [state](auto &&...args) -> decltype(auto) { return state->invoke(decltype(args)(args)...); };
+            result.[:port_member:] = [state](auto &&...args) noexcept(std::meta::is_noexcept(method)) -> decltype(auto) {
+                return state->invoke(decltype(args)(args)...);
+            };
         }
         return result;
     }
