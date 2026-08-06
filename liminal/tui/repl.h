@@ -2,8 +2,8 @@
 
 #include <lighter/async/async.h>
 
-#include "liminal/agent/agent.h"
-#include "liminal/model/catalog.h"
+#include <liminal/agent/agent.h>
+#include <liminal/model/catalog.h>
 
 namespace liminal::tui {
 

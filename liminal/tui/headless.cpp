@@ -4,8 +4,8 @@
 #include <string>
 #include <string_view>
 
-#include "liminal/event.h"
-#include "liminal/tui/surface.h"
+#include <liminal/event.h>
+#include <liminal/tui/surface.h>
 
 namespace liminal::tui {
 

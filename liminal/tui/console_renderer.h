@@ -8,8 +8,8 @@
 #include <lighter/async/io/terminal.h>
 #include <lighter/async/vocab/error.h>
 
-#include "liminal/event.h"
-#include "liminal/tui/session_screen.h"
+#include <liminal/event.h>
+#include <liminal/tui/session_screen.h>
 
 namespace liminal::tui {
 

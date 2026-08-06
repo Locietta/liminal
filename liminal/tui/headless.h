@@ -7,7 +7,7 @@
 
 #include <lighter/types.hpp>
 
-#include "liminal/tui/session_screen.h"
+#include <liminal/tui/session_screen.h>
 
 namespace liminal::tui {
 

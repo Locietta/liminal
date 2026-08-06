@@ -10,10 +10,10 @@
 #include <lighter/http/http.h>
 #include <lighter/types.hpp>
 
-#include "liminal/error.h"
-#include "liminal/provider/auth.h"
-#include "liminal/provider/common.h"
-#include "liminal/provider/history.h"
+#include <liminal/error.h>
+#include <liminal/provider/auth.h>
+#include <liminal/provider/common.h>
+#include <liminal/provider/history.h>
 
 namespace liminal::openai {
 

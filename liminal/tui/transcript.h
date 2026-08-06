@@ -5,7 +5,7 @@
 
 #include <lighter/types.hpp>
 
-#include "liminal/event.h"
+#include <liminal/event.h>
 
 namespace liminal::tui {
 

@@ -19,7 +19,7 @@
 #include <lighter/async/vocab/cancellation.h>
 #include <lighter/async/io/watcher.h>
 
-#include "liminal/tui/console_renderer.h"
+#include <liminal/tui/console_renderer.h>
 
 namespace liminal::tui {
 

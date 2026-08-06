@@ -5,7 +5,7 @@
 
 #include <lighter/types.hpp>
 
-#include "liminal/tui/surface.h"
+#include <liminal/tui/surface.h>
 
 namespace liminal::tui {
 

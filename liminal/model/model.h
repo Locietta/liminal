@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "liminal/provider/provider.h"
+#include <liminal/provider/provider.h>
 
 namespace liminal::model {
 

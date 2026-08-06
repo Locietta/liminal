@@ -14,8 +14,8 @@
 #include <lighter/codec/json/json.h>
 #include <lighter/types.hpp>
 
-#include "liminal/dev_mcp/live_session.h"
-#include "liminal/tui/headless.h"
+#include <liminal/dev_mcp/live_session.h>
+#include <liminal/tui/headless.h>
 
 namespace liminal::dev_mcp {
 

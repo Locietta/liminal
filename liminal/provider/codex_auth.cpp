@@ -20,7 +20,7 @@
 #include <lighter/codec/json/json.h>
 #include <lighter/http/http.h>
 
-#include "liminal/provider/detail/codex_auth_flow.h"
+#include <liminal/provider/detail/codex_auth_flow.h>
 
 namespace liminal::codex {
 

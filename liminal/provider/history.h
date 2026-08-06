@@ -11,7 +11,7 @@
 
 #include <lighter/types.hpp>
 
-#include "liminal/provider/common.h"
+#include <liminal/provider/common.h>
 
 namespace liminal::provider {
 

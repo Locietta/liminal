@@ -14,9 +14,9 @@
 #include <lighter/async/io/watcher.h>
 #include <lighter/codec/json/json.h>
 
-#include "liminal/provider/compact.h"
-#include "liminal/provider/detail/completion_retry.h"
-#include "liminal/provider/detail/anthropic_protocol.h"
+#include <liminal/provider/compact.h>
+#include <liminal/provider/detail/anthropic_protocol.h>
+#include <liminal/provider/detail/completion_retry.h>
 
 // Anthropic Messages API wire types. Internal: the public surface speaks the
 // neutral transcript (provider/history.h); everything here is serialization

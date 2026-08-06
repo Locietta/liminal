@@ -6,10 +6,10 @@
 
 #include <lighter/http/sse.h>
 
-#include "liminal/error.h"
-#include "liminal/provider/anthropic.h"
-#include "liminal/provider/common.h"
-#include "liminal/provider/history.h"
+#include <liminal/error.h>
+#include <liminal/provider/anthropic.h>
+#include <liminal/provider/common.h>
+#include <liminal/provider/history.h>
 
 namespace liminal::anthropic::protocol {
 

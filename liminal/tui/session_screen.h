@@ -9,9 +9,9 @@
 #include <lighter/async/io/terminal.h>
 #include <lighter/types.hpp>
 
-#include "liminal/event.h"
-#include "liminal/tui/surface.h"
-#include "liminal/tui/transcript.h"
+#include <liminal/event.h>
+#include <liminal/tui/surface.h>
+#include <liminal/tui/transcript.h>
 
 namespace liminal::tui {
 

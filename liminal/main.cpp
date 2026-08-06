@@ -8,13 +8,13 @@
 #include <lighter/async/io/loop.h>
 #include <lighter/async/runtime/interrupt.h>
 
-#include "liminal/agent/agent.h"
-#include "liminal/context/context.h"
-#include "liminal/model/catalog.h"
-#include "liminal/provider/codex_auth.h"
-#include "liminal/provider/registry.h"
-#include "liminal/tools/tools.h"
-#include "liminal/tui/repl.h"
+#include <liminal/agent/agent.h>
+#include <liminal/context/context.h>
+#include <liminal/model/catalog.h>
+#include <liminal/provider/codex_auth.h>
+#include <liminal/provider/registry.h>
+#include <liminal/tools/tools.h>
+#include <liminal/tui/repl.h>
 
 namespace {
 

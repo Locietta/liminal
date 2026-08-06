@@ -25,7 +25,7 @@
 
 #include <lighter/encoding/utf8.h>
 
-#include "liminal/tui/surface.h"
+#include <liminal/tui/surface.h>
 
 namespace liminal::dev_mcp {
 

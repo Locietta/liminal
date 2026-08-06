@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "liminal/tui/rich_text.h"
+#include <liminal/tui/rich_text.h>
 
 namespace liminal::tui {
 

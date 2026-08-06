@@ -17,10 +17,10 @@
 #include <lighter/async/async.h>
 #include <lighter/codec/json/json.h>
 
-#include "liminal/provider/anthropic.h"
-#include "liminal/provider/codex_auth.h"
-#include "liminal/provider/openai.h"
-#include "liminal/provider/provider.h"
+#include <liminal/provider/anthropic.h>
+#include <liminal/provider/codex_auth.h>
+#include <liminal/provider/openai.h>
+#include <liminal/provider/provider.h>
 
 namespace liminal::provider {
 
