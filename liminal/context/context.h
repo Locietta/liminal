@@ -67,6 +67,8 @@ struct ContextManifest {
     session::SessionId session_id;
     std::vector<session::EntryId> session_entries;
     usize omitted_session_entries = 0;
+    usize omitted_checkpoint_entries = 0;
+    usize omitted_budget_entries = 0;
     std::optional<session::EntryId> active_checkpoint;
     ContextBudget budget;
     ContextUsage usage;

@@ -149,7 +149,7 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
 }
 
 Task<void, Error> Agent::compact(std::string_view instructions) {
-    auto built = context_manifest();
+    auto built = context::ContextBuilder{}.build(this->instructions, session);
     if (!built) {
         co_await fail(std::move(built).error());
     }

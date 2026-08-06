@@ -180,12 +180,35 @@ void test_manifest_deduplication_and_redacted_description() {
             "context description exposed instruction or session contents");
 }
 
+void test_bounded_selection_keeps_complete_recent_turns() {
+    session::Session session_log({.value = 11});
+    session_log.append(session::UserMessage{.text = std::string(80, 'a')});
+    session_log.append(session::AgentOutput{.parts = {provider::TextPart{.text = std::string(80, 'b')}}});
+    session_log.append(session::UserMessage{.text = "use a tool"});
+    session_log.append(session::AgentOutput{.parts = {provider::ToolCall{.id = "call", .name = "read", .input = {}}}});
+    session_log.append(session::ToolResults{.results = {{.call_id = "call", .content = std::string(80, 'r')}}});
+    session_log.append(session::AgentOutput{.parts = {provider::TextPart{.text = "tool conclusion"}}});
+    session_log.append(session::UserMessage{.text = "latest"});
+    session_log.append(session::AgentOutput{.parts = {provider::TextPart{.text = "answer"}}});
+
+    auto manifest = context::ContextBuilder{}.build({}, session_log,
+                                                    {.context_window_tokens = 60, .reserved_output_tokens = 10, .safety_margin_tokens = 0});
+    require(manifest.has_value(), "bounded context rejected a valid recent turn");
+    require(manifest->session_entries.size() == 2 && manifest->session_entries[0].value == 7 && manifest->session_entries[1].value == 8,
+            "bounded context did not retain the newest complete turn");
+    require(manifest->omitted_budget_entries == 6 && manifest->omitted_checkpoint_entries == 0,
+            "bounded context did not report budget omissions separately");
+    require(manifest->provider_history.size() == 2 && manifest->usage.remaining_input_tokens >= 0,
+            "bounded context emitted an oversized or partial provider history");
+}
+
 i32 run_all() {
     test_resolution_order_scope_and_determinism();
     test_workspace_boundary();
     test_project_root_discovery();
     test_instruction_read_failure();
     test_manifest_deduplication_and_redacted_description();
+    test_bounded_selection_keeps_complete_recent_turns();
     return 0;
 }
 

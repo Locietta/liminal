@@ -63,6 +63,10 @@ void append_entry(provider::History &history, const session::SessionEntry &entry
         entry.payload);
 }
 
+bool starts_semantic_turn(const session::SessionEntry &entry) {
+    return std::holds_alternative<session::UserMessage>(entry.payload) || std::holds_alternative<session::ContextCheckpoint>(entry.payload);
+}
+
 bool matches_instruction(const provider::Item &item, const InstructionSource &source) {
     const auto expected_role = source.authority == InstructionAuthority::RUNTIME ? provider::Role::SYSTEM : provider::Role::DEVELOPER;
     if (item.role != expected_role || item.parts.size() != 1) {
@@ -181,14 +185,49 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
             manifest.active_checkpoint = branch[index]->id;
         }
     }
-    manifest.omitted_session_entries = start;
-    manifest.session_entries.reserve(branch.size() - start);
+    manifest.omitted_checkpoint_entries = start;
 
-    manifest.provider_history.reserve(manifest.instructions.size() + branch.size() - start);
+    provider::History instruction_history;
+    instruction_history.reserve(manifest.instructions.size());
     for (const auto &source : manifest.instructions) {
-        append_instruction(manifest.provider_history, source);
+        append_instruction(instruction_history, source);
     }
-    for (usize index = start; index < branch.size(); ++index) {
+
+    usize selected_start = start;
+    if (budget.context_window_tokens) {
+        const auto instruction_usage = estimate_usage(instruction_history, budget);
+        if (instruction_usage.remaining_input_tokens && *instruction_usage.remaining_input_tokens < 0) {
+            return lighter::outcome_error(Error::config("resolved instructions exceed the model input budget"));
+        }
+
+        std::vector<usize> unit_starts;
+        for (usize index = start; index < branch.size(); ++index) {
+            if (index == start || starts_semantic_turn(*branch[index])) {
+                unit_starts.push_back(index);
+            }
+        }
+        for (auto unit = unit_starts.rbegin(); unit != unit_starts.rend(); ++unit) {
+            auto candidate = instruction_history;
+            for (usize index = *unit; index < branch.size(); ++index) {
+                append_entry(candidate, *branch[index]);
+            }
+            const auto candidate_usage = estimate_usage(candidate, budget);
+            if (*candidate_usage.remaining_input_tokens < 0) {
+                if (unit == unit_starts.rbegin()) {
+                    return lighter::outcome_error(Error::protocol("the latest semantic turn exceeds the model input budget"));
+                }
+                break;
+            }
+            selected_start = *unit;
+        }
+    }
+
+    manifest.omitted_budget_entries = selected_start - start;
+    manifest.omitted_session_entries = manifest.omitted_checkpoint_entries + manifest.omitted_budget_entries;
+    manifest.session_entries.reserve(branch.size() - selected_start);
+    manifest.provider_history = std::move(instruction_history);
+    manifest.provider_history.reserve(manifest.provider_history.size() + branch.size() - selected_start);
+    for (usize index = selected_start; index < branch.size(); ++index) {
         manifest.session_entries.push_back(branch[index]->id);
         append_entry(manifest.provider_history, *branch[index]);
     }
@@ -218,7 +257,9 @@ std::string describe(const ContextManifest &manifest) {
     }
     description += "session entries selected: " + std::to_string(manifest.session_entries.size());
     append_entry_ids(description, manifest.session_entries);
-    description += "\nsession entries omitted: " + std::to_string(manifest.omitted_session_entries) + "\n";
+    description += "\nsession entries omitted: " + std::to_string(manifest.omitted_session_entries) + " (checkpoint " +
+                   std::to_string(manifest.omitted_checkpoint_entries) + ", budget " + std::to_string(manifest.omitted_budget_entries) +
+                   ")\n";
     description += manifest.active_checkpoint ? "active checkpoint: " + std::to_string(manifest.active_checkpoint->value) + "\n" :
                                                 "active checkpoint: none\n";
     description += "estimated input: " + std::to_string(manifest.usage.estimated_input_tokens) + " tokens\n";
