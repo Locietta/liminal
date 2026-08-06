@@ -1,5 +1,6 @@
 set_group("test")
 includes("test-agent/xmake.lua")
+includes("test-context/xmake.lua")
 includes("test-model/xmake.lua")
 includes("test-provider-anthropic/xmake.lua")
 includes("test-provider-openai/xmake.lua")
