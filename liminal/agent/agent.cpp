@@ -51,17 +51,28 @@ Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::Too
 
 } // namespace
 
-Agent::Agent(model::Choice model, ToolSet &tools) : model(std::move(model)), tools(&tools) {
-    provider::append_developer(history, "You are a helpful coding assistant.");
-}
+Agent::Agent(model::Choice model, ToolSet &tools)
+    : Agent(std::move(model), tools,
+            {{
+                .authority = context::InstructionAuthority::APPLICATION,
+                .origin = "builtin:default-agent",
+                .content = "You are a helpful coding assistant.",
+            }}) {}
 
-Agent::Agent(model::Choice model, ToolSet &tools, provider::History initial_history)
-    : model(std::move(model)), tools(&tools), history(std::move(initial_history)) {}
+Agent::Agent(model::Choice model, ToolSet &tools, std::vector<context::InstructionSource> instructions)
+    : model(std::move(model)), tools(&tools), instructions(std::move(instructions)) {}
+
+Result<context::ContextManifest> Agent::context_manifest() const { return context::ContextBuilder{}.build(instructions, conversation); }
 
 Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
     // Transactional: staged history only replaces committed history after a
     // complete terminal response. The UI transcript intentionally remains.
-    auto staged = history;
+    auto built = context_manifest();
+    if (!built) {
+        co_await fail(std::move(built).error());
+    }
+    auto manifest = *std::move(built);
+    auto staged = std::move(manifest.provider_history);
     provider::append_user(staged, std::move(prompt));
 
     provider::StreamCallbacks stream{
@@ -79,7 +90,13 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
         switch (response.stop) {
             case provider::StopKind::DONE:
                 provider::append_response(staged, std::move(response));
-                history = std::move(staged);
+                {
+                    auto extracted = context::ContextBuilder{}.take_conversation(std::move(staged), manifest);
+                    if (!extracted) {
+                        co_await fail(std::move(extracted).error());
+                    }
+                    conversation = *std::move(extracted);
+                }
                 emit(events, TurnCompleted{});
                 co_return;
             case provider::StopKind::NEEDS_TOOL_RESULTS: break;
@@ -118,7 +135,18 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
 }
 
 Task<void, Error> Agent::compact(std::string_view instructions) {
-    co_return co_await model.handle->compact(history, instructions).or_fail();
+    auto built = context_manifest();
+    if (!built) {
+        co_await fail(std::move(built).error());
+    }
+    auto manifest = *std::move(built);
+    auto compacted = std::move(manifest.provider_history);
+    co_await model.handle->compact(compacted, instructions).or_fail();
+    auto extracted = context::ContextBuilder{}.take_conversation(std::move(compacted), manifest);
+    if (!extracted) {
+        co_await fail(std::move(extracted).error());
+    }
+    conversation = *std::move(extracted);
 }
 
 } // namespace liminal

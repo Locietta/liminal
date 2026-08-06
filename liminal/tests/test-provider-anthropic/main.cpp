@@ -76,6 +76,7 @@ void test_request_encoding() {
             "instruction hierarchy preamble was not encoded");
     require(encoded->contains("[SYSTEM]\\nTest system policy."), "system instruction was not encoded");
     require(encoded->contains("[DEVELOPER]\\nTest developer policy."), "developer instruction was not encoded");
+    require(encoded->contains(R"("role":"assistant")"), "generated output was not encoded as an assistant message");
     require(encoded->contains(R"("thinking":"I should inspect.","signature":"sig-abc123")"), "thinking block was not replayed bit-exact");
     require(encoded->contains(R"("type":"tool_result","tool_use_id":"toolu_1","content":"Liminal","is_error":false)"),
             "tool result was not encoded");

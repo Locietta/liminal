@@ -9,6 +9,7 @@
 #include <lighter/async/runtime/interrupt.h>
 
 #include "liminal/agent/agent.h"
+#include "liminal/context/context.h"
 #include "liminal/model/catalog.h"
 #include "liminal/provider/codex_auth.h"
 #include "liminal/provider/registry.h"
@@ -50,12 +51,21 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
         co_return 1;
     }
 
-    provider::History initial_history;
+    std::vector<context::InstructionSource> instructions;
     if (const char *system = std::getenv("LIMINAL_SYSTEM_PROMPT"); system && *system) {
-        provider::append_system(initial_history, system);
+        instructions.push_back({
+            .authority = context::InstructionAuthority::RUNTIME,
+            .origin = "environment:LIMINAL_SYSTEM_PROMPT",
+            .content = system,
+        });
     }
-    provider::append_developer(initial_history, env_or("LIMINAL_DEVELOPER_PROMPT", "You are a helpful coding assistant."));
-    Agent agent(*std::move(initial), tools, std::move(initial_history));
+    const char *developer = std::getenv("LIMINAL_DEVELOPER_PROMPT");
+    instructions.push_back({
+        .authority = context::InstructionAuthority::APPLICATION,
+        .origin = developer && *developer ? "environment:LIMINAL_DEVELOPER_PROMPT" : "builtin:default-agent",
+        .content = developer && *developer ? developer : "You are a helpful coding assistant.",
+    });
+    Agent agent(*std::move(initial), tools, std::move(instructions));
     co_return co_await tui::run_repl(agent, interrupts, models);
 }
 

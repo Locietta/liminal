@@ -57,6 +57,7 @@ void test_request_encoding() {
         .role = provider::Role::ASSISTANT,
         .parts =
             {
+                provider::TextPart{.text = "I will inspect."},
                 provider::OpaquePart{
                     .provider_tag = "openai",
                     .payload =
@@ -88,6 +89,8 @@ void test_request_encoding() {
             "system instruction was not encoded explicitly");
     require(encoded->contains(R"("role":"developer")") && encoded->contains("Test developer policy."),
             "developer instruction was not encoded explicitly");
+    require(encoded->contains(R"("role":"assistant","content":[{"type":"output_text","text":"I will inspect."}])"),
+            "generated text was not encoded as assistant output");
     require(encoded->contains(R"("encrypted_content":"encrypted-reasoning")"), "encrypted reasoning was not replayed");
     require(encoded->contains(R"("type":"function_call_output","call_id":"call_1","output":"Liminal")"), "tool result was not replayed");
     require(encoded->contains(R"("strict":true)"), "tool schema must be strict");
