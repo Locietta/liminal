@@ -64,6 +64,7 @@ Agent::Agent(model::Choice model, ToolSet &tools)
     : Agent(std::move(model), tools,
             {{
                 .authority = context::InstructionAuthority::APPLICATION,
+                .trust = context::InstructionTrust::PLATFORM,
                 .origin = "builtin:default-agent",
                 .content = "You are a helpful coding assistant.",
             }}) {}

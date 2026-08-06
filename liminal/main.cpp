@@ -56,6 +56,7 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
     if (const char *system = std::getenv("LIMINAL_SYSTEM_PROMPT"); system && *system) {
         instructions.push_back({
             .authority = context::InstructionAuthority::RUNTIME,
+            .trust = context::InstructionTrust::OPERATOR,
             .origin = "environment:LIMINAL_SYSTEM_PROMPT",
             .content = system,
         });
@@ -63,6 +64,7 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
     const char *developer = std::getenv("LIMINAL_DEVELOPER_PROMPT");
     instructions.push_back({
         .authority = context::InstructionAuthority::APPLICATION,
+        .trust = developer && *developer ? context::InstructionTrust::OPERATOR : context::InstructionTrust::PLATFORM,
         .origin = developer && *developer ? "environment:LIMINAL_DEVELOPER_PROMPT" : "builtin:default-agent",
         .content = developer && *developer ? developer : "You are a helpful coding assistant.",
     });

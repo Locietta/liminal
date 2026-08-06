@@ -1,5 +1,7 @@
 #pragma once
 
+#include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -22,9 +24,21 @@ enum struct InstructionAuthority {
     PROJECT,
 };
 
+/// The principal that made an instruction authoritative. Trust describes why
+/// a source may govern the agent; authority describes its precedence.
+enum struct InstructionTrust {
+    PLATFORM,
+    OPERATOR,
+    WORKSPACE,
+};
+
 struct InstructionSource {
     InstructionAuthority authority = InstructionAuthority::APPLICATION;
+    InstructionTrust trust = InstructionTrust::PLATFORM;
     std::string origin;
+    /// Directory subtree where this instruction applies. An absent scope is
+    /// global to the agent instance.
+    std::optional<std::filesystem::path> scope;
     std::string content;
 };
 

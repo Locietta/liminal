@@ -143,7 +143,9 @@ Result<std::vector<InstructionSource>> ProjectInstructionResolver::resolve(const
         }
         instructions.push_back({
             .authority = InstructionAuthority::PROJECT,
+            .trust = InstructionTrust::WORKSPACE,
             .origin = "project:" + display_path(path),
+            .scope = directory,
             .content = *std::move(*content),
         });
     }
