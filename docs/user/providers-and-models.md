@@ -30,6 +30,9 @@ The following example defines two independent custom providers:
         {
           "id": "agent-model",
           "name": "Agent Model",
+          "context_window": 128000,
+          "max_output_tokens": 8192,
+          "context_safety_margin_tokens": 4096,
           "reasoning_efforts": ["low", "medium", "high"],
           "default_reasoning_effort": "medium"
         }
@@ -72,6 +75,12 @@ removing explicit models or models discovered from other providers.
 Reasoning metadata must be configured explicitly because standard Models APIs do not report the
 supported effort values. OpenAI Responses providers receive `reasoning.effort`; Anthropic Messages
 providers receive adaptive thinking plus `output_config.effort`.
+
+Context capabilities are likewise explicit because standard model discovery does not reliably
+report them. `context_window` is the total token window, `max_output_tokens` is both the request
+limit and reserved output budget, and `context_safety_margin_tokens` leaves extra headroom for
+token estimation and provider-owned request material. Discovered models without an explicit
+`context_window` remain selectable, but automatic context budgeting is disabled for them.
 
 ## Codex subscription
 

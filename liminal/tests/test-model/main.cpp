@@ -232,6 +232,9 @@ i32 run_all() {
                     {
                         "id": "shared",
                         "name": "Configured Shared",
+                        "context_window": 128000,
+                        "max_output_tokens": 4096,
+                        "context_safety_margin_tokens": 2000,
                         "reasoning_efforts": ["low", "high"],
                         "default_reasoning_effort": "low"
                     },
@@ -255,12 +258,23 @@ i32 run_all() {
     auto selected = catalog.select("openai-local/shared@high");
     require(selected.has_value(), "qualified configured model did not resolve");
     require(selected->entry.name == "Configured Shared", "configured model metadata was not preserved");
+    require(selected->entry.context_window == 128'000 && selected->entry.max_output_tokens == 4096 &&
+                selected->entry.context_safety_margin_tokens == 2000,
+            "configured context capabilities were not preserved");
     require(selected->reasoning_effort == "high", "explicit effort was not selected");
 
     selected = catalog.select("manual");
     require(selected.has_value(), "manual model did not resolve");
     require(selected->reasoning_effort == "medium", "default effort was not selected");
     require(!catalog.select("manual@high"), "unsupported effort must fail");
+
+    write(
+        providers,
+        R"({"providers":{"broken":{"api":"openai-responses","base_url":"x","api_key":"x","models":[{"id":"bad","context_window":4096,"max_output_tokens":4096}]}}})");
+    auto invalid_limits = refresh(catalog);
+    require(invalid_limits.has_error() && invalid_limits.error().detail.contains("context_window"),
+            "invalid context capabilities must fail refresh");
+    require(catalog.entries().size() == 3, "failed capability refresh must preserve the previous catalog");
 
     write(providers, R"({"providers":{"broken":{"api":"wrong","base_url":"x","api_key":"x"}}})");
     auto invalid = refresh(catalog);

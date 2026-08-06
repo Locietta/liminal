@@ -26,11 +26,12 @@ namespace liminal::provider {
 
 namespace {
 
-constexpr u32 k_max_tokens = 8192;
-
 struct ConfigModel {
     std::string id;
     std::optional<std::string> name;
+    std::optional<u32> context_window;
+    std::optional<u32> max_output_tokens;
+    std::optional<u32> context_safety_margin_tokens;
     std::optional<std::vector<std::string>> reasoning_efforts;
     std::optional<std::string> default_reasoning_effort;
 };
@@ -93,6 +94,17 @@ Result<void> validate_model(const ConfigModel &model, std::string_view provider_
         return lighter::outcome_error(Error::config("model '" + std::string(provider_id) + "/" + model.id +
                                                     "' default_reasoning_effort is not in reasoning_efforts"));
     }
+    const auto max_output_tokens = model.max_output_tokens.value_or(model::k_default_max_output_tokens);
+    const auto safety_margin = model.context_safety_margin_tokens.value_or(0);
+    if (max_output_tokens == 0) {
+        return lighter::outcome_error(
+            Error::config("model '" + std::string(provider_id) + "/" + model.id + "' max_output_tokens must be positive"));
+    }
+    if (model.context_window &&
+        (*model.context_window == 0 || static_cast<u64>(max_output_tokens) + safety_margin >= *model.context_window)) {
+        return lighter::outcome_error(Error::config("model '" + std::string(provider_id) + "/" + model.id +
+                                                    "' context_window must exceed max_output_tokens plus its safety margin"));
+    }
     return {};
 }
 
@@ -113,11 +125,19 @@ Result<void> apply_models(Instance &instance, const std::vector<ConfigModel> &co
             found = std::prev(instance.models.end());
         }
         if (model.name) found->name = *model.name;
+        if (model.context_window) found->context_window = model.context_window;
+        if (model.max_output_tokens) found->max_output_tokens = *model.max_output_tokens;
+        if (model.context_safety_margin_tokens) found->context_safety_margin_tokens = *model.context_safety_margin_tokens;
         if (model.reasoning_efforts) found->reasoning_efforts = *model.reasoning_efforts;
         if (model.default_reasoning_effort) found->default_reasoning_effort = model.default_reasoning_effort;
         if (found->default_reasoning_effort && !contains(found->reasoning_efforts, *found->default_reasoning_effort)) {
             return lighter::outcome_error(Error::config("model '" + instance.id + "/" + model.id +
                                                         "' default_reasoning_effort is not in reasoning_efforts after merging"));
+        }
+        if (found->context_window &&
+            static_cast<u64>(found->max_output_tokens) + found->context_safety_margin_tokens >= *found->context_window) {
+            return lighter::outcome_error(Error::config("model '" + instance.id + "/" + model.id +
+                                                        "' merged context_window must exceed max_output_tokens plus its safety margin"));
         }
     }
     return {};
@@ -145,19 +165,36 @@ std::string codex_api_base_url() {
 
 std::vector<model::Entry> bundled_codex_models() {
     const std::vector<std::string> efforts = {"low", "medium", "high", "xhigh", "max", "ultra"};
+    constexpr u32 k_context_window = 272'000;
+    constexpr u32 k_context_safety_margin = 13'600;
     return {
-        {.provider = "codex", .id = "gpt-5.6-sol", .name = "GPT-5.6-Sol", .reasoning_efforts = efforts, .default_reasoning_effort = "low"},
+        {.provider = "codex",
+         .id = "gpt-5.6-sol",
+         .name = "GPT-5.6-Sol",
+         .context_window = k_context_window,
+         .context_safety_margin_tokens = k_context_safety_margin,
+         .reasoning_efforts = efforts,
+         .default_reasoning_effort = "low"},
         {.provider = "codex",
          .id = "gpt-5.6-terra",
          .name = "GPT-5.6-Terra",
+         .context_window = k_context_window,
+         .context_safety_margin_tokens = k_context_safety_margin,
          .reasoning_efforts = efforts,
          .default_reasoning_effort = "medium"},
         {.provider = "codex",
          .id = "gpt-5.6-luna",
          .name = "GPT-5.6-Luna",
+         .context_window = k_context_window,
+         .context_safety_margin_tokens = k_context_safety_margin,
          .reasoning_efforts = efforts,
          .default_reasoning_effort = "high"},
-        {.provider = "codex", .id = "gpt-5.5", .name = "GPT-5.5", .reasoning_efforts = efforts},
+        {.provider = "codex",
+         .id = "gpt-5.5",
+         .name = "GPT-5.5",
+         .context_window = k_context_window,
+         .context_safety_margin_tokens = k_context_safety_margin,
+         .reasoning_efforts = efforts},
     };
 }
 
@@ -192,7 +229,7 @@ Result<model::Choice> Registry::make_choice(const model::Entry &entry, std::opti
             .base_url = provider->base_url,
             .model = entry.id,
             .reasoning_effort = choice.reasoning_effort,
-            .max_output_tokens = provider->codex_subscription ? std::nullopt : std::optional<u32>(k_max_tokens),
+            .max_output_tokens = provider->codex_subscription ? std::nullopt : std::optional<u32>(entry.max_output_tokens),
             .allow_missing_event_stream_content_type = provider->codex_subscription,
         });
     } else {
@@ -201,7 +238,7 @@ Result<model::Choice> Registry::make_choice(const model::Entry &entry, std::opti
             .base_url = provider->base_url,
             .model = entry.id,
             .reasoning_effort = choice.reasoning_effort,
-            .max_tokens = k_max_tokens,
+            .max_tokens = entry.max_output_tokens,
         });
     }
     return choice;
