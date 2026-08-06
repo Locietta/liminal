@@ -1,5 +1,7 @@
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -86,9 +88,35 @@ void test_workspace_boundary() {
 
     auto handle = files.handle();
     auto resolved = context::ProjectInstructionResolver{}.resolve("workspace", "elsewhere/task", handle);
-    require(!resolved && resolved.error().kind == ErrorKind::CONFIG && resolved.error().detail.contains("outside workspace"),
-            "resolver accepted an active directory outside its workspace");
+    require(!resolved && resolved.error().kind == ErrorKind::CONFIG && resolved.error().detail.contains("outside project"),
+            "resolver accepted an active directory outside its project");
     files.verify();
+}
+
+void test_project_root_discovery() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto base = std::filesystem::temp_directory_path() / ("liminal-context-" + std::to_string(nonce));
+    const auto repository = base / "repository";
+    const auto nested = repository / "src" / "module";
+    const auto standalone = base / "standalone";
+    std::filesystem::create_directories(nested);
+    std::filesystem::create_directories(standalone);
+    {
+        std::ofstream marker(repository / ".git", std::ios::binary);
+        marker << "gitdir: elsewhere";
+        require(static_cast<bool>(marker), "failed to create Git marker");
+    }
+
+    auto discovered = context::discover_project_root(nested);
+    require(discovered && std::filesystem::equivalent(*discovered, repository),
+            "project discovery did not find the nearest enclosing Git root: " +
+                (discovered ? discovered->string() : discovered.error().message()));
+    auto fallback = context::discover_project_root(standalone);
+    require(fallback && *fallback == std::filesystem::weakly_canonical(standalone),
+            "project discovery did not fall back to the invocation directory");
+
+    std::error_code remove_error;
+    std::filesystem::remove_all(base, remove_error);
 }
 
 void test_instruction_read_failure() {
@@ -150,6 +178,7 @@ void test_manifest_deduplication_and_redacted_description() {
 i32 run_all() {
     test_resolution_order_scope_and_determinism();
     test_workspace_boundary();
+    test_project_root_discovery();
     test_instruction_read_failure();
     test_manifest_deduplication_and_redacted_description();
     return 0;

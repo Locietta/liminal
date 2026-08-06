@@ -60,8 +60,11 @@ Result<std::filesystem::path> LocalInstructionFiles::canonicalize_instruction_pa
 
 Result<std::optional<std::string>> LocalInstructionFiles::read_instruction_file(const std::filesystem::path &path) const {
     std::error_code error;
-    const auto status = std::filesystem::status(path, error);
-    if (error) {
+    auto status = std::filesystem::status(path, error);
+    if (error == std::errc::no_such_file_or_directory) {
+        error.clear();
+        status = std::filesystem::file_status(std::filesystem::file_type::not_found);
+    } else if (error) {
         return lighter::outcome_error(
             Error::config("cannot inspect project instruction file '" + display_path(path) + "': " + error.message()));
     }
@@ -103,10 +106,36 @@ Result<std::optional<std::string>> LocalInstructionFiles::read_instruction_file(
     return std::optional<std::string>{*std::move(content)};
 }
 
-Result<std::vector<InstructionSource>> ProjectInstructionResolver::resolve(const std::filesystem::path &workspace_root,
+Result<std::filesystem::path> discover_project_root(const std::filesystem::path &working_directory) {
+    std::error_code error;
+    auto active = std::filesystem::weakly_canonical(working_directory, error);
+    if (error) {
+        return lighter::outcome_error(
+            Error::config("cannot resolve working directory '" + display_path(working_directory) + "': " + error.message()));
+    }
+
+    for (auto current = active;; current = current.parent_path()) {
+        auto status = std::filesystem::status(current / ".git", error);
+        if (error == std::errc::no_such_file_or_directory) {
+            error.clear();
+            status = std::filesystem::file_status(std::filesystem::file_type::not_found);
+        } else if (error) {
+            return lighter::outcome_error(
+                Error::config("cannot inspect Git metadata at '" + display_path(current / ".git") + "': " + error.message()));
+        }
+        if (std::filesystem::exists(status)) {
+            return current;
+        }
+        if (current == current.parent_path()) {
+            return active;
+        }
+    }
+}
+
+Result<std::vector<InstructionSource>> ProjectInstructionResolver::resolve(const std::filesystem::path &project_root,
                                                                            const std::filesystem::path &active_directory,
                                                                            const InstructionFiles &files) const {
-    auto canonical_root = files->canonicalize_instruction_path(workspace_root);
+    auto canonical_root = files->canonicalize_instruction_path(project_root);
     if (!canonical_root) {
         return lighter::outcome_error(std::move(canonical_root).error());
     }
@@ -115,8 +144,8 @@ Result<std::vector<InstructionSource>> ProjectInstructionResolver::resolve(const
         return lighter::outcome_error(std::move(canonical_active).error());
     }
     if (!path_within(*canonical_root, *canonical_active)) {
-        return lighter::outcome_error(Error::config("active directory '" + display_path(*canonical_active) +
-                                                    "' is outside workspace root '" + display_path(*canonical_root) + "'"));
+        return lighter::outcome_error(Error::config("active directory '" + display_path(*canonical_active) + "' is outside project root '" +
+                                                    display_path(*canonical_root) + "'"));
     }
 
     std::vector<std::filesystem::path> directories;

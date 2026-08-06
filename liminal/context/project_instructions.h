@@ -28,12 +28,16 @@ struct LocalInstructionFiles {
     Result<std::optional<std::string>> read_instruction_file(const std::filesystem::path &path) const;
 };
 
-/// Resolves trusted project instructions from the workspace root to the
+/// Finds the nearest enclosing Git repository root. Outside a repository,
+/// returns the canonical invocation directory unchanged.
+Result<std::filesystem::path> discover_project_root(const std::filesystem::path &working_directory);
+
+/// Resolves trusted project instructions from the project root to the
 /// active directory. Both paths are canonicalized through `files`, and the
-/// active directory must remain inside the workspace boundary.
+/// active directory must remain inside the project boundary.
 struct ProjectInstructionResolver {
-    Result<std::vector<InstructionSource>> resolve(const std::filesystem::path &workspace_root,
-                                                   const std::filesystem::path &active_directory, const InstructionFiles &files) const;
+    Result<std::vector<InstructionSource>> resolve(const std::filesystem::path &project_root, const std::filesystem::path &active_directory,
+                                                   const InstructionFiles &files) const;
 };
 
 } // namespace liminal::context

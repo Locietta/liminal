@@ -69,8 +69,12 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
         .content = developer && *developer ? developer : "You are a helpful coding assistant.",
     });
     auto instruction_files = pro::make_proxy<context::InstructionFilesFacade, context::LocalInstructionFiles>();
-    auto project_instructions =
-        context::ProjectInstructionResolver{}.resolve(tools.working_directory, tools.working_directory, instruction_files);
+    auto project_root = context::discover_project_root(tools.working_directory);
+    if (!project_root) {
+        std::fprintf(stderr, "error: %s\n", project_root.error().message().c_str());
+        co_return 1;
+    }
+    auto project_instructions = context::ProjectInstructionResolver{}.resolve(*project_root, tools.working_directory, instruction_files);
     if (!project_instructions) {
         std::fprintf(stderr, "error: %s\n", project_instructions.error().message().c_str());
         co_return 1;
