@@ -79,29 +79,6 @@ Result<T> parse_bounded_environment(std::string_view name, T fallback, T minimum
     return value;
 }
 
-bool component_equal(const std::filesystem::path &lhs, const std::filesystem::path &rhs) {
-#ifdef _WIN32
-    auto left = lhs.native();
-    auto right = rhs.native();
-    return _wcsicmp(left.c_str(), right.c_str()) == 0;
-#else
-    return lhs == rhs;
-#endif
-}
-
-bool path_within(const std::filesystem::path &root, const std::filesystem::path &candidate) {
-    auto root_part = root.begin();
-    auto candidate_part = candidate.begin();
-    while (root_part != root.end()) {
-        if (candidate_part == candidate.end() || !component_equal(*root_part, *candidate_part)) {
-            return false;
-        }
-        ++root_part;
-        ++candidate_part;
-    }
-    return true;
-}
-
 Result<std::filesystem::path> resolve_read_path(const ToolSet &tools, const ReadFileInput &input) {
     std::error_code error;
     const auto root = std::filesystem::weakly_canonical(tools.working_directory, error);
@@ -114,9 +91,6 @@ Result<std::filesystem::path> resolve_read_path(const ToolSet &tools, const Read
     auto resolved = std::filesystem::weakly_canonical(requested, error);
     if (error) {
         return outcome_error(Error::tool("cannot resolve '" + requested.string() + "': " + error.message()));
-    }
-    if (tools.policy.mode == ToolMode::WORKSPACE && !path_within(root, resolved)) {
-        return outcome_error(Error::tool("workspace policy rejects path outside '" + root.string() + "': " + resolved.string()));
     }
     return resolved;
 }
@@ -293,16 +267,6 @@ Task<std::string, Error> tool_run_command(const ToolSet &tools, RunCommandInput 
 
 Result<ToolPolicy> load_tool_policy() {
     ToolPolicy policy;
-    const char *raw_mode = std::getenv("LIMINAL_TOOL_MODE");
-    const std::string_view mode = raw_mode && *raw_mode ? std::string_view(raw_mode) : std::string_view("workspace");
-    if (mode == "workspace") {
-        policy.mode = ToolMode::WORKSPACE;
-    } else if (mode == "unrestricted") {
-        policy.mode = ToolMode::UNRESTRICTED;
-    } else {
-        return outcome_error(Error::config("LIMINAL_TOOL_MODE must be 'workspace' or 'unrestricted'"));
-    }
-
     auto timeout = parse_bounded_environment<i64>("LIMINAL_COMMAND_TIMEOUT_MS", policy.command_timeout.count(), k_min_command_timeout_ms,
                                                   k_max_command_timeout_ms);
     if (!timeout) return outcome_error(std::move(timeout).error());
@@ -322,7 +286,7 @@ ToolSet::ToolSet(std::filesystem::path working_directory, ToolPolicy policy)
     : working_directory(std::move(working_directory)), policy(policy) {}
 
 std::vector<provider::ToolDefinition> ToolSet::definitions() const {
-    std::vector<provider::ToolDefinition> definitions{
+    return {
         {
             .name = "read_file",
             .description = "Read a local text file. Use this when you need the exact contents of a "
@@ -333,9 +297,7 @@ std::vector<provider::ToolDefinition> ToolSet::definitions() const {
                                                              "working directory."}}},
                              .required = {"path"}},
         },
-    };
-    if (policy.mode == ToolMode::UNRESTRICTED) {
-        definitions.push_back({
+        {
             .name = "run_command",
 #ifdef _WIN32
             .description = "Run a PowerShell (pwsh) command in the working directory. Use this to "
@@ -354,9 +316,8 @@ std::vector<provider::ToolDefinition> ToolSet::definitions() const {
                                                              "single argument to /bin/sh -lc."}}},
                              .required = {"command"}},
 #endif
-        });
-    }
-    return definitions;
+        },
+    };
 }
 
 Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &call) const {
@@ -369,12 +330,6 @@ Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &cal
         co_return result;
     }
     if (call.name == "run_command") {
-        if (policy.mode != ToolMode::UNRESTRICTED) {
-            result.content = "Error: run_command is disabled by workspace tool policy; restart with "
-                             "LIMINAL_TOOL_MODE=unrestricted to authorize an open-world shell";
-            result.is_error = true;
-            co_return result;
-        }
         auto input = co_await or_fail(parse_input<RunCommandInput>(call.input));
         result.content = co_await tool_run_command(*this, std::move(input)).or_fail();
         co_return result;

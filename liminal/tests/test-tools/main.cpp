@@ -45,35 +45,20 @@ Result<provider::ToolResult> execute(ToolSet &tools, provider::ToolCall call) {
     return task.result();
 }
 
-void test_workspace_policy() {
-    ToolSet tools(std::filesystem::current_path());
+void test_tools_are_available_by_default() {
+    ToolSet tools(std::filesystem::current_path() / "liminal");
     auto definitions = tools.definitions();
-    require(definitions.size() == 1 && definitions[0].name == "read_file", "workspace mode must not advertise a shell");
+    require(definitions.size() == 2 && definitions[0].name == "read_file" && definitions[1].name == "run_command",
+            "default tools must include file reading and shell execution");
 
-    auto readme = execute(tools, make_call("read", "read_file", R"({"path":"README.md"})"));
+    auto readme = execute(tools, make_call("read", "read_file", R"({"path":"../README.md"})"));
     require(readme.has_value() && !readme->is_error && readme->content.contains("Liminal"),
-            "workspace mode must read files inside its root");
-
-    auto escaped = execute(tools, make_call("escape", "read_file", R"({"path":"../../outside-liminal-workspace"})"));
-    require(escaped.has_value() && escaped->is_error && escaped->content.contains("workspace policy rejects path"),
-            "workspace mode must reject traversal outside its canonical root");
+            "read_file must allow paths outside the working directory");
 
     auto command = execute(tools, make_call("command", "run_command", R"({"command":"pwd"})"));
-    require(command.has_value() && command->is_error && command->content.contains("LIMINAL_TOOL_MODE=unrestricted"),
-            "workspace mode must reject unadvertised command execution");
-}
-
-void test_unrestricted_command() {
-    ToolPolicy policy{.mode = ToolMode::UNRESTRICTED};
-    ToolSet tools(std::filesystem::current_path(), policy);
-    auto definitions = tools.definitions();
-    require(definitions.size() == 2 && definitions[1].name == "run_command", "unrestricted mode must advertise the shell");
-
-    auto outcome = execute(tools, make_call("test-call", "run_command", R"({"command":"pwd"})"));
-    require(outcome.has_value(), "run_command failed to execute");
-    require(outcome->call_id == "test-call" && !outcome->is_error, "run_command returned an error result");
-    require(outcome->content.contains("exit_code: 0"), "native command shell did not report success");
-    require(outcome->content.contains("stdout:\n"), "native command shell did not capture stdout");
+    require(command.has_value() && command->call_id == "command" && !command->is_error && command->content.contains("exit_code: 0") &&
+                command->content.contains("stdout:\n"),
+            "run_command must execute without an opt-in mode");
 }
 
 void test_read_file_is_bounded_and_regular() {
@@ -103,7 +88,6 @@ void test_read_file_is_bounded_and_regular() {
 
 void test_command_timeout() {
     ToolPolicy policy{
-        .mode = ToolMode::UNRESTRICTED,
         .command_timeout = 25ms,
     };
     ToolSet tools(std::filesystem::current_path(), policy);
@@ -122,9 +106,8 @@ void test_command_timeout() {
 }
 
 i32 run_all() {
-    test_workspace_policy();
+    test_tools_are_available_by_default();
     test_read_file_is_bounded_and_regular();
-    test_unrestricted_command();
     test_command_timeout();
     return 0;
 }

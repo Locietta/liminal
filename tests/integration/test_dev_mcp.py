@@ -176,7 +176,6 @@ def live_environment(tmp_path, base_url):
     environment["LIMINAL_PROVIDERS_FILE"] = str(providers)
     environment["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
     environment["LIMINAL_MODEL"] = "test-model"
-    environment["LIMINAL_TOOL_MODE"] = "unrestricted"
     environment["LIMINAL_SYSTEM_PROMPT"] = "Test system policy."
     environment["LIMINAL_DEVELOPER_PROMPT"] = "Test developer policy."
     return environment
