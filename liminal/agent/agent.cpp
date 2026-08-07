@@ -18,6 +18,8 @@ namespace {
 constexpr std::string_view k_automatic_compact_instructions =
     "Preserve the user's goals, constraints, decisions, important tool results, modified files, unresolved issues, and the context needed "
     "to continue the active task.";
+constexpr u64 k_automatic_compact_numerator = 9;
+constexpr u64 k_automatic_compact_denominator = 10;
 
 void emit(const EventSink &events, Event event) {
     if (events) {
@@ -40,6 +42,18 @@ context::ContextBudget context_budget(const model::Entry &model) {
         .reserved_output_tokens = model.max_output_tokens,
         .safety_margin_tokens = model.context_safety_margin_tokens,
     };
+}
+
+bool needs_automatic_compaction(const context::ContextManifest &manifest) {
+    if (manifest.omitted_budget_entries != 0) {
+        return true;
+    }
+    if (!manifest.budget.context_window_tokens || !manifest.usage.reported_context_tokens) {
+        return false;
+    }
+    const auto threshold =
+        static_cast<u64>(*manifest.budget.context_window_tokens) * k_automatic_compact_numerator / k_automatic_compact_denominator;
+    return manifest.usage.estimated_input_tokens >= threshold;
 }
 
 /// Runs one tool call, converting infrastructure failures into is_error
@@ -109,9 +123,9 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
         if (!built) {
             co_await fail(std::move(built).error());
         }
-        if (built->omitted_budget_entries != 0) {
+        if (needs_automatic_compaction(*built)) {
             if (automatically_compacted) {
-                co_await fail(Error::protocol("context exceeded the model input budget again after automatic compaction"));
+                co_await fail(Error::protocol("context reached the automatic compaction threshold again after automatic compaction"));
             }
             auto full = builder.build(instructions, staged);
             if (!full) {

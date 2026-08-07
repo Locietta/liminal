@@ -218,6 +218,47 @@ void test_automatic_compaction() {
     provider_mock.verify();
 }
 
+void test_proactive_compaction_uses_reported_context() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompactDispatch>().calls([](provider::History &history, std::string_view) -> lighter::Task<void, Error> {
+        require(history.size() == 4 && history.back().role == provider::Role::USER,
+                "proactive compaction did not receive the full current context");
+        auto latest = std::move(history.back());
+        history.resize(provider::instruction_prefix_size(history));
+        provider::append_user(history, "SUMMARY");
+        history.push_back(std::move(latest));
+        co_return;
+    });
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+           const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+            require(history.size() == 3 && std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY",
+                    "proactive compaction was not used for completion");
+            co_return provider::TurnResponse{.parts = {provider::TextPart{.text = "done"}}, .stop = provider::StopKind::DONE};
+        });
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 100, .max_output_tokens = 1},
+    };
+    Agent agent(std::move(choice), tools);
+    agent.session.append(session::UserMessage{.text = "old"});
+    agent.session.append(session::AgentOutput{
+        .parts = {provider::TextPart{.text = "answer"}},
+        .usage = {.input_tokens = 70, .output_tokens = 18, .context_tokens = 88},
+    });
+
+    lighter::EventLoop loop;
+    auto task = agent.run_turn("latest", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "proactive automatic compaction turn failed");
+    require(agent.session.entries.size() == 5 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload),
+            "90 percent context usage did not create an automatic checkpoint");
+    provider_mock.verify();
+}
+
 void test_failed_turn_does_not_report_staged_compaction() {
     ToolSet tools(std::filesystem::current_path());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
@@ -291,6 +332,7 @@ i32 run_all() {
     test_successful_turn();
     test_tool_call_budget();
     test_automatic_compaction();
+    test_proactive_compaction_uses_reported_context();
     test_failed_turn_does_not_report_staged_compaction();
     test_context_manifest();
     return 0;
