@@ -7,6 +7,7 @@
 #include <lighter/async/io/fs.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/runtime/task.h>
+#include <lighter/utils/fs.h>
 
 namespace {
 
@@ -34,6 +35,10 @@ Task<void, Error> exercise_directory_handle(bool &moved_from_empty, bool &assign
 }
 
 int run_all() {
+    const auto executable = executable_path();
+    require(!executable.empty() && std::filesystem::is_regular_file(executable), "executable_path must resolve the running test binary");
+    require(executable_directory() == executable.parent_path(), "executable_directory must contain the running test binary");
+
     EventLoop loop;
     bool moved_from_empty = false;
     bool assigned_from_empty = false;

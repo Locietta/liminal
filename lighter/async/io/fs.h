@@ -275,6 +275,9 @@ Error close(i32 fd);
 /// Convenience: read entire file into a string.
 Result<std::string> read_to_string(std::string_view path);
 
+/// Read at most max_bytes from a file into a string.
+Result<std::string> read_to_string(std::string_view path, usize max_bytes);
+
 } // namespace sync
 
 } // namespace fs

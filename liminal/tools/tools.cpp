@@ -126,7 +126,16 @@ std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input) {
     if (!resolved) return "Error: " + resolved.error().message();
     const auto path = resolved->string();
 
-    auto content = lighter::fs::sync::read_to_string(path);
+    std::error_code status_error;
+    const auto status = std::filesystem::status(*resolved, status_error);
+    if (status_error) {
+        return "Error: cannot inspect '" + path + "': " + status_error.message();
+    }
+    if (!std::filesystem::is_regular_file(status)) {
+        return "Error: '" + path + "' is not a regular file";
+    }
+
+    auto content = lighter::fs::sync::read_to_string(path, k_file_limit + 1);
     if (!content) {
         return "Error: cannot read '" + path + "': " + std::string(content.error().message());
     }
@@ -134,9 +143,8 @@ std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input) {
         return "Error: '" + path + "' looks like a binary file";
     }
     if (content->size() > k_file_limit) {
-        auto truncated = content->substr(0, k_file_limit);
-        truncated += "\n... [truncated: " + std::to_string(content->size() - k_file_limit) + " more bytes]";
-        return truncated;
+        content->resize(k_file_limit);
+        *content += "\n... [truncated after " + std::to_string(k_file_limit) + " bytes]";
     }
     return *std::move(content);
 }

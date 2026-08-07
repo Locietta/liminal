@@ -1,6 +1,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -75,6 +76,31 @@ void test_unrestricted_command() {
     require(outcome->content.contains("stdout:\n"), "native command shell did not capture stdout");
 }
 
+void test_read_file_is_bounded_and_regular() {
+    constexpr usize k_file_limit = 128 * 1024;
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto directory = std::filesystem::temp_directory_path() / ("liminal-tools-" + std::to_string(nonce));
+    std::filesystem::create_directories(directory / "folder");
+    {
+        std::ofstream output(directory / "large.txt", std::ios::binary);
+        output << std::string(k_file_limit + 4096, 'x');
+        require(static_cast<bool>(output), "failed to create the large read_file fixture");
+    }
+
+    ToolSet tools(directory);
+    auto large = execute(tools, make_call("large", "read_file", R"({"path":"large.txt"})"));
+    require(large.has_value() && !large->is_error && large->content.starts_with(std::string(k_file_limit, 'x')) &&
+                large->content.ends_with("[truncated after 131072 bytes]"),
+            "read_file did not return a bounded prefix for a large file");
+
+    auto folder = execute(tools, make_call("folder", "read_file", R"({"path":"folder"})"));
+    require(folder.has_value() && folder->is_error && folder->content.contains("is not a regular file"),
+            "read_file did not reject a directory");
+
+    std::error_code remove_error;
+    std::filesystem::remove_all(directory, remove_error);
+}
+
 void test_command_timeout() {
     ToolPolicy policy{
         .mode = ToolMode::UNRESTRICTED,
@@ -97,6 +123,7 @@ void test_command_timeout() {
 
 i32 run_all() {
     test_workspace_policy();
+    test_read_file_is_bounded_and_regular();
     test_unrestricted_command();
     test_command_timeout();
     return 0;

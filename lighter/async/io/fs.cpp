@@ -580,4 +580,32 @@ Result<std::string> fs::sync::read_to_string(std::string_view path) {
     return content;
 }
 
+Result<std::string> fs::sync::read_to_string(std::string_view path, usize max_bytes) {
+    auto fd = open(path, UV_FS_O_RDONLY);
+    if (!fd) {
+        return outcome_error(fd.error());
+    }
+
+    std::string content;
+    content.reserve(std::min<usize>(max_bytes, 4096));
+    char buf[4096];
+    while (content.size() < max_bytes) {
+        const auto remaining = max_bytes - content.size();
+        auto n = read(*fd, std::span<char>(buf, std::min<usize>(sizeof(buf), remaining)));
+        if (!n) {
+            close(*fd);
+            return outcome_error(n.error());
+        }
+        if (*n == 0) {
+            break;
+        }
+        content.append(buf, *n);
+    }
+
+    if (auto error = close(*fd)) {
+        return outcome_error(error);
+    }
+    return content;
+}
+
 } // namespace lighter
