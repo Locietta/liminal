@@ -550,6 +550,10 @@ Paragraph with **strong**, *emphasis*, `inline code`, and [docs](https://example
 ```cpp
 if (ready) {
     run();
+    ++count;
+    const auto message = "ready"; // note
+    Widget result = build_widget(config.value, MAX_RETRIES + 1);
+    return 42;
 }
 ```
 ```diff
@@ -634,13 +638,27 @@ def test_rich_output_is_readable_at_narrow_and_wide_sizes():
         assert "# Rich output" not in visible
         assert "docs" in visible and "<https://example.com/docs>" in visible
         assert "• list item" in visible
-        assert "[code: cpp]" in visible and "    run();" in visible
+        assert (
+            "┌ cpp" in visible
+            and "│     run();" in visible
+            and "│     ++count;" in visible
+        )
+        assert visible.count("└") == 2
         assert "@@ -1 +1 @@" in visible and "-old value" in visible
         assert "+new value" in visible
         assert {
             "emphasis",
             "italic",
             "code",
+            "code_keyword",
+            "code_type",
+            "code_function",
+            "code_string",
+            "code_comment",
+            "code_number",
+            "code_constant",
+            "code_property",
+            "code_operator",
             "link",
             "diff_addition",
             "diff_deletion",

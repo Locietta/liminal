@@ -26,6 +26,15 @@ std::string_view style_sequence(Style style) {
         case Style::MUTED: return "\x1b[2m";
         case Style::ACCENT: return "\x1b[36m";
         case Style::CODE: return "\x1b[33m";
+        case Style::CODE_KEYWORD: return "\x1b[95m";
+        case Style::CODE_TYPE: return "\x1b[36m";
+        case Style::CODE_FUNCTION: return "\x1b[94m";
+        case Style::CODE_STRING: return "\x1b[92m";
+        case Style::CODE_COMMENT: return "\x1b[90m";
+        case Style::CODE_NUMBER: return "\x1b[93m";
+        case Style::CODE_CONSTANT: return "\x1b[96m";
+        case Style::CODE_PROPERTY: return "\x1b[34m";
+        case Style::CODE_OPERATOR: return "\x1b[93m";
         case Style::LINK: return "\x1b[4;36m";
         case Style::DIFF_ADDITION: return "\x1b[32m";
         case Style::DIFF_DELETION: return "\x1b[31m";

@@ -8,6 +8,8 @@
 #include <string_view>
 #include <utility>
 
+#include <liminal/tui/syntax_highlight.h>
+
 namespace liminal::tui {
 
 namespace {
@@ -108,14 +110,14 @@ std::vector<StyledSpan> parse_inline(std::string_view text, Style base) {
     return spans;
 }
 
-Style diff_style(std::string_view line, bool fenced_diff) {
+std::optional<Style> diff_style(std::string_view line) {
     if (line.starts_with("@@")) return Style::DIFF_HUNK;
     if (line.starts_with("diff --git ") || line.starts_with("index ") || line.starts_with("--- ") || line.starts_with("+++ ")) {
         return Style::DIFF_HUNK;
     }
     if (line.starts_with('+')) return Style::DIFF_ADDITION;
     if (line.starts_with('-')) return Style::DIFF_DELETION;
-    return fenced_diff ? Style::CODE : Style::NORMAL;
+    return std::nullopt;
 }
 
 bool looks_like_diff(std::string_view line) {
@@ -156,7 +158,7 @@ LogicalLine prose_line(std::string_view line, usize source_offset) {
         return result;
     }
     if (looks_like_diff(content)) {
-        append_span(result.spans, content, diff_style(content, false));
+        append_span(result.spans, content, diff_style(content).value_or(Style::NORMAL));
         result.continuation.push_back({.text = "  ", .style = Style::MUTED});
         result.preserve_whitespace = true;
         return result;
@@ -294,36 +296,83 @@ std::vector<StyledRow> wrap_prose(const LogicalLine &line, i32 columns) {
     return rows;
 }
 
+struct FenceOpening {
+    char marker = 0;
+    usize length = 0;
+    std::string_view info;
+};
+
+std::optional<FenceOpening> fence_opening(std::string_view content) {
+    if (content.empty() || (content.front() != '`' && content.front() != '~')) return std::nullopt;
+    usize length = 0;
+    while (length < content.size() && content[length] == content.front()) ++length;
+    if (length < 3) return std::nullopt;
+    auto info = trim(content.substr(length));
+    if (content.front() == '`' && info.contains('`')) return std::nullopt;
+    return FenceOpening{.marker = content.front(), .length = length, .info = info};
+}
+
+bool closes_fence(std::string_view content, const FenceOpening &opening) {
+    usize length = 0;
+    while (length < content.size() && content[length] == opening.marker) ++length;
+    return length >= opening.length && trim(content.substr(length)).empty();
+}
+
+std::string_view language_label(std::string_view info) {
+    const auto end = info.find_first_of(" \t");
+    return info.substr(0, end);
+}
+
 } // namespace
 
 std::vector<StyledRow> layout_rich_text(std::string_view source, i32 columns) {
     std::vector<LogicalLine> lines;
     bool fenced = false;
     bool fenced_diff = false;
-    std::string fence;
+    FenceOpening fence;
+    CodeHighlighter code_highlighter;
+    const bool frame_code = columns >= 3;
     usize offset = 0;
     while (true) {
         const auto end = source.find('\n', offset);
         auto line = source.substr(offset, end == std::string_view::npos ? source.size() - offset : end - offset);
         if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
         const auto content = trim_left(line);
+        const auto opening = fence_opening(content);
 
-        if (!fenced && (content.starts_with("```") || content.starts_with("~~~"))) {
-            fence = std::string(content.substr(0, 3));
-            const auto language = trim(content.substr(3));
+        if (!fenced && opening) {
+            fence = *opening;
+            const auto language = language_label(fence.info);
             fenced = true;
             fenced_diff = language == "diff" || language == "patch";
-            LogicalLine label{.source_offset = offset, .source_size = line.size()};
-            append_span(label.spans, language.empty() ? "[code]" : "[code: " + std::string(language) + "]", Style::MUTED);
-            lines.push_back(std::move(label));
-        } else if (fenced && content.starts_with(fence)) {
+            code_highlighter = CodeHighlighter(language);
+            if (frame_code) {
+                LogicalLine label{.source_offset = offset, .source_size = line.size(), .preserve_whitespace = true};
+                append_span(label.spans, "┌ ", Style::MUTED);
+                append_span(label.spans, language.empty() ? "code" : language, Style::MUTED);
+                lines.push_back(std::move(label));
+            }
+        } else if (fenced && closes_fence(content, fence)) {
+            if (frame_code) {
+                LogicalLine footer{.source_offset = offset, .source_size = line.size(), .preserve_whitespace = true};
+                append_span(footer.spans, "└", Style::MUTED);
+                lines.push_back(std::move(footer));
+            }
             fenced = false;
             fenced_diff = false;
-            fence.clear();
+            fence = {};
+            code_highlighter = CodeHighlighter();
         } else if (fenced) {
             LogicalLine code{.source_offset = offset, .source_size = line.size(), .preserve_whitespace = true};
-            append_span(code.spans, line, diff_style(line, fenced_diff));
-            code.continuation.push_back({.text = "  ", .style = Style::MUTED});
+            if (frame_code) append_span(code.spans, "│ ", Style::MUTED);
+            if (fenced_diff) {
+                append_span(code.spans, line, diff_style(line).value_or(Style::CODE));
+            } else {
+                auto highlighted = code_highlighter.highlight_line(line);
+                code.spans.insert(code.spans.end(), std::make_move_iterator(highlighted.begin()),
+                                  std::make_move_iterator(highlighted.end()));
+            }
+            if (frame_code) code.continuation.push_back({.text = "│ ", .style = Style::MUTED});
             lines.push_back(std::move(code));
         } else {
             lines.push_back(prose_line(line, offset));

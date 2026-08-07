@@ -11,6 +11,7 @@
 #include <liminal/tui/rich_text.h>
 #include <liminal/tui/session_screen.h>
 #include <liminal/tui/surface.h>
+#include <liminal/tui/syntax_highlight.h>
 
 namespace {
 
@@ -48,6 +49,15 @@ bool has_style(const std::vector<tui::StyledRow> &rows, tui::Style style) {
     return false;
 }
 
+bool text_has_style(const std::vector<tui::StyledRow> &rows, std::string_view text, tui::Style style) {
+    for (const auto &row : rows) {
+        for (const auto &span : row.spans) {
+            if (span.style == style && span.text.contains(text)) return true;
+        }
+    }
+    return false;
+}
+
 void check_surface_cells_and_encoding() {
     tui::Surface surface(4, 1);
     require(surface.write(0, 0, "A中B") == 4, "surface must account for wide terminal cells");
@@ -72,6 +82,10 @@ void check_surface_cells_and_encoding() {
     require(encoded.contains("\x1b[2K"), "frame must clear every owned row");
     require(encoded.ends_with("\x1b[1;4H\x1b[?25h"), "frame must restore the requested visible cursor");
     require(tui::encode_frame_diff(&frame, frame).empty(), "an unchanged frame must not emit terminal operations");
+
+    tui::Frame palette{.surface = tui::Surface(1, 1)};
+    palette.surface.write(0, 0, "K", tui::Style::CODE_KEYWORD);
+    require(tui::encode_frame(palette).contains("\x1b[95mK"), "code keywords must use bright ANSI magenta");
 
     auto changed = frame;
     changed.surface.write(0, 3, "C");
@@ -180,6 +194,10 @@ The foo_bar_baz identifier stays literal.
 ```cpp
 if (ready) {
     run();
+    ++count;
+    const auto message = "ready"; // note
+    Widget result = build_widget(config.value, MAX_RETRIES + 1);
+    return 42;
 }
 ```
 ```diff
@@ -210,11 +228,44 @@ diff --git a/file.cpp b/file.cpp
             "links must retain a visible, styled target");
     require(wide_text.contains("• first list item") && narrow_text.contains("  enough words"),
             "lists must retain a bullet and continuation indentation when wrapped");
-    require(wide_text.contains("[code: cpp]") && wide_text.contains("    run();") && has_style(wide, tui::Style::CODE),
-            "fenced code must retain its language and source whitespace");
+    require(wide_text.contains("┌ cpp") && wide_text.contains("│     run();") && wide_text.contains("└") &&
+                text_has_style(wide, "count", tui::Style::NORMAL) && !text_has_style(wide, "++", tui::Style::DIFF_ADDITION),
+            "fenced code must use a quiet gutter, retain whitespace, and keep ordinary code out of diff styling");
+    require(text_has_style(wide, "const", tui::Style::CODE_KEYWORD) && text_has_style(wide, "\"ready\"", tui::Style::CODE_STRING) &&
+                text_has_style(wide, "// note", tui::Style::CODE_COMMENT) && text_has_style(wide, "42", tui::Style::CODE_NUMBER),
+            "recognized fenced languages must style keywords, strings, comments, and numbers semantically");
+    require(text_has_style(wide, "Widget", tui::Style::CODE_TYPE) && text_has_style(wide, "build_widget", tui::Style::CODE_FUNCTION) &&
+                text_has_style(wide, "MAX_RETRIES", tui::Style::CODE_CONSTANT) &&
+                text_has_style(wide, "value", tui::Style::CODE_PROPERTY) && text_has_style(wide, "+", tui::Style::CODE_OPERATOR),
+            "recognized fenced languages must distinguish richer semantic token roles");
     require(has_style(wide, tui::Style::DIFF_ADDITION) && has_style(wide, tui::Style::DIFF_DELETION) &&
                 has_style(wide, tui::Style::DIFF_HUNK),
             "unified diff markers must receive distinct semantic styles");
+
+    const auto nested_fence = tui::layout_rich_text("````markdown\n```nested```\n````", 40);
+    const auto nested_text = styled_rows_text(nested_fence);
+    require(nested_text.contains("assistant: ┌ markdown") && nested_text.contains("│ ```nested```") && nested_text.ends_with("└"),
+            "a longer Markdown fence must retain shorter fence sequences as code");
+
+    const auto multiline_comment = tui::layout_rich_text("```cpp\n/* first\nstill */ return 7;\n```", 40);
+    require(text_has_style(multiline_comment, "still */", tui::Style::CODE_COMMENT) &&
+                text_has_style(multiline_comment, "return", tui::Style::CODE_KEYWORD),
+            "syntax state must carry across code lines and resume highlighting after a block comment");
+    const auto unknown_language = tui::layout_rich_text("```unknown\nif value == 7\n```", 40);
+    require(text_has_style(unknown_language, "if value == 7", tui::Style::CODE),
+            "unknown fenced languages must fall back to the generic code style");
+    const auto python = tui::layout_rich_text("```Python3\ndef greet(name=\"Ada\"): # welcome\n    return 1\n```", 50);
+    require(text_has_style(python, "def", tui::Style::CODE_KEYWORD) && text_has_style(python, "\"Ada\"", tui::Style::CODE_STRING) &&
+                text_has_style(python, "# welcome", tui::Style::CODE_COMMENT) && text_has_style(python, "1", tui::Style::CODE_NUMBER),
+            "language aliases must select the matching lightweight lexer family");
+    const auto json = tui::layout_rich_text("```json\n{\"name\": \"liminal\", \"ready\": true}\n```", 50);
+    require(text_has_style(json, "\"name\"", tui::Style::CODE_PROPERTY) && text_has_style(json, "true", tui::Style::CODE_CONSTANT),
+            "structured data must distinguish keys from strings and constants");
+
+    tui::CodeHighlighter guarded("cpp");
+    const auto oversized = guarded.highlight_line(std::string(4097, 'x'));
+    require(!guarded.supported() && oversized.size() == 1 && oversized.front().style == tui::Style::CODE,
+            "oversized source lines must disable highlighting and retain generic code output");
 
     tui::SessionScreen streaming;
     streaming.resize({40, 16});
