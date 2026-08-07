@@ -116,6 +116,8 @@ struct SessionScreen {
     void move_word_right();
     void move_up();
     void move_down();
+    void previous_prompt();
+    void next_prompt();
     void move_home();
     void move_end();
     void move_document_home();

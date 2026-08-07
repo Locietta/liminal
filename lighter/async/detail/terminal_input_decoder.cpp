@@ -20,9 +20,18 @@ struct DecodedEscape {
     usize size = 0;
 };
 
+struct DecodedMouse {
+    TerminalEvent event{.kind = TerminalEventKind::KEY, .key = TerminalKey::UNKNOWN};
+    usize size = 0;
+};
+
 struct CsiParameters {
     std::array<i32, 2> values{};
     usize size = 0;
+};
+
+struct MouseParameters {
+    std::array<i32, 3> values{};
 };
 
 TerminalEvent key_event(TerminalKey key, TerminalModifiers modifiers = TerminalModifiers::NONE, std::string text = {}) {
@@ -53,6 +62,28 @@ std::optional<CsiParameters> parse_csi_parameters(std::string_view encoded) {
     }
     if (result.size == result.values.size()) return std::nullopt;
     result.values[result.size++] = has_digit ? value : 0;
+    return result;
+}
+
+std::optional<MouseParameters> parse_mouse_parameters(std::string_view encoded) {
+    MouseParameters result;
+    usize index = 0;
+    i32 value = 0;
+    bool has_digit = false;
+    for (const auto character : encoded) {
+        if (character >= '0' && character <= '9') {
+            if (value > 9999) return std::nullopt;
+            value = value * 10 + (character - '0');
+            has_digit = true;
+            continue;
+        }
+        if (character != ';' || !has_digit || index >= result.values.size() - 1) return std::nullopt;
+        result.values[index++] = value;
+        value = 0;
+        has_digit = false;
+    }
+    if (!has_digit || index != result.values.size() - 1) return std::nullopt;
+    result.values[index] = value;
     return result;
 }
 
@@ -114,6 +145,53 @@ TerminalKey final_key(char final) noexcept {
 TerminalKey linux_console_function_key(char final) noexcept {
     if (final < 'A' || final > 'E') return TerminalKey::UNKNOWN;
     return static_cast<TerminalKey>(static_cast<u8>(TerminalKey::F1) + static_cast<u8>(final - 'A'));
+}
+
+TerminalModifiers decode_mouse_modifiers(i32 button) noexcept {
+    auto modifiers = TerminalModifiers::NONE;
+    if ((button & 4) != 0) modifiers = modifiers | TerminalModifiers::SHIFT;
+    if ((button & 8) != 0) modifiers = modifiers | TerminalModifiers::ALT;
+    if ((button & 16) != 0) modifiers = modifiers | TerminalModifiers::CONTROL;
+    return modifiers;
+}
+
+std::optional<DecodedMouse> decode_sgr_mouse(std::string_view sequence) {
+    if (!sequence.starts_with("\x1b[<")) return std::nullopt;
+    usize final_offset = 3;
+    while (final_offset < sequence.size() && !csi_final(static_cast<u8>(sequence[final_offset]))) ++final_offset;
+    if (final_offset == sequence.size()) return std::nullopt;
+
+    DecodedMouse result{.size = final_offset + 1};
+    const auto final = sequence[final_offset];
+    if (final != 'M' && final != 'm') return result;
+    const auto parameters = parse_mouse_parameters(sequence.substr(3, final_offset - 3));
+    if (!parameters) return result;
+
+    const auto button = parameters->values[0];
+    const auto column = parameters->values[1];
+    const auto row = parameters->values[2];
+    if (column <= 0 || row <= 0) return result;
+
+    const auto button_index = button & 3;
+    const bool wheel = (button & 64) != 0;
+    i32 buttons = 0;
+    if (!wheel && final == 'M') {
+        if (button_index == 0) buttons = 1;
+        if (button_index == 1) buttons = 4;
+        if (button_index == 2) buttons = 2;
+    }
+    i32 wheel_delta = 0;
+    if (wheel && button_index < 2) wheel_delta = button_index == 0 ? 120 : -120;
+    result.event = TerminalEvent{
+        .kind = TerminalEventKind::MOUSE,
+        .modifiers = decode_mouse_modifiers(button),
+        .x = column - 1,
+        .y = row - 1,
+        .mouse_buttons = buttons,
+        .wheel_delta = wheel_delta,
+        .pressed = final == 'M' && (wheel || button_index != 3),
+    };
+    return result;
 }
 
 std::optional<DecodedEscape> decode_escape(std::string_view sequence) {
@@ -214,6 +292,14 @@ void TerminalInputDecoder::parse(bool flush_escape, std::function_ref<void(Termi
             input.erase(0, 3);
             emit(TerminalEvent{.kind = TerminalEventKind::FOCUS, .focused = false});
             continue;
+        }
+        if (input.starts_with("\x1b[<")) {
+            if (auto decoded = decode_sgr_mouse(input)) {
+                input.erase(0, decoded->size);
+                emit(std::move(decoded->event));
+                continue;
+            }
+            if (!flush_escape) return;
         }
         if (input.front() == '\x1b') {
             if (auto decoded = decode_escape(input)) {

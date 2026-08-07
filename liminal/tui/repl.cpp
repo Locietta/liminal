@@ -1,7 +1,9 @@
 #include "repl.h"
 
-#include <deque>
+#include <algorithm>
+#include <cstdlib>
 #include <cstdio>
+#include <deque>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -133,8 +135,8 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             if (event.key == TerminalKey::DELETE_KEY) return control ? renderer.erase_word() : renderer.erase();
             if (event.key == TerminalKey::ARROW_LEFT) return control ? renderer.move_word_left() : renderer.move_left();
             if (event.key == TerminalKey::ARROW_RIGHT) return control ? renderer.move_word_right() : renderer.move_right();
-            if (event.key == TerminalKey::ARROW_UP) return renderer.move_up();
-            if (event.key == TerminalKey::ARROW_DOWN) return renderer.move_down();
+            if (event.key == TerminalKey::ARROW_UP) return control ? renderer.previous_prompt() : renderer.move_up();
+            if (event.key == TerminalKey::ARROW_DOWN) return control ? renderer.next_prompt() : renderer.move_down();
             if (event.key == TerminalKey::HOME) return control ? renderer.move_document_home() : renderer.move_home();
             if (event.key == TerminalKey::END) return control ? renderer.move_document_end() : renderer.move_end();
             if (event.key == TerminalKey::PAGE_UP || event.key == TerminalKey::PAGE_DOWN) {
@@ -147,9 +149,15 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             return {};
         }
         case TerminalEventKind::RESIZE: return renderer.resize(event.size);
+        case TerminalEventKind::MOUSE: {
+            if (event.wheel_delta == 0) return {};
+            constexpr i32 rows_per_notch = 3;
+            constexpr i32 wheel_delta_per_notch = 120;
+            const auto notches = std::max(std::abs(event.wheel_delta) / wheel_delta_per_notch, 1);
+            return renderer.scroll((event.wheel_delta > 0 ? -1 : 1) * rows_per_notch * notches);
+        }
         case TerminalEventKind::CLOSED:
-        case TerminalEventKind::FOCUS:
-        case TerminalEventKind::MOUSE: return {};
+        case TerminalEventKind::FOCUS: return {};
     }
     return {};
 }
@@ -410,7 +418,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
     try_terminal = input_attached;
 #endif
     if (try_terminal) {
-        auto opened = TerminalSession::open(0, terminal_output);
+        auto opened = TerminalSession::open(0, terminal_output, TerminalSession::Options(false, true));
         if (opened) {
             terminal = *std::move(opened);
             interactive = true;

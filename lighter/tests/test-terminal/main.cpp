@@ -192,6 +192,24 @@ void check_focus_sequences() {
             "focus sequences must retain their state");
 }
 
+void check_mouse_sequences() {
+    detail::TerminalInputDecoder decoder;
+    std::vector<TerminalEvent> events;
+
+    constexpr std::string_view wheel_up = "\x1b[<92;12;7M";
+    for (const char byte : wheel_up) feed(decoder, std::string_view(&byte, 1), events);
+    require(events.size() == 1 && events[0].kind == TerminalEventKind::MOUSE && events[0].x == 11 && events[0].y == 6 &&
+                events[0].wheel_delta == 120 &&
+                events[0].modifiers == (TerminalModifiers::SHIFT | TerminalModifiers::ALT | TerminalModifiers::CONTROL),
+            "an SGR wheel event split at every byte must normalize coordinates, direction, and modifiers");
+
+    feed(decoder, "\x1b[<65;4;3M\x1b[<0;2;5M\x1b[<0;2;5m", events);
+    require(events.size() == 4 && events[1].kind == TerminalEventKind::MOUSE && events[1].wheel_delta == -120,
+            "an SGR wheel-down event must use the native Windows wheel direction convention");
+    require(events[2].mouse_buttons == 1 && events[2].pressed && events[3].mouse_buttons == 0 && !events[3].pressed,
+            "SGR button press and release events must retain normalized button state");
+}
+
 bool same_event(const TerminalEvent &lhs, const TerminalEvent &rhs) {
     return lhs.kind == rhs.kind && lhs.key == rhs.key && lhs.modifiers == rhs.modifiers && lhs.text == rhs.text && lhs.size == rhs.size &&
            lhs.repeat == rhs.repeat && lhs.x == rhs.x && lhs.y == rhs.y && lhs.mouse_buttons == rhs.mouse_buttons &&
@@ -306,6 +324,7 @@ i32 run_all() {
     check_control_bytes();
     check_paste_chunking();
     check_focus_sequences();
+    check_mouse_sequences();
     check_decoder_chunk_fuzz();
 #ifdef _WIN32
     check_windows_console_restoration();

@@ -36,10 +36,13 @@ struct ConsoleRenderer {
     lighter::Error move_word_right();
     lighter::Error move_up();
     lighter::Error move_down();
+    lighter::Error previous_prompt();
+    lighter::Error next_prompt();
     lighter::Error move_home();
     lighter::Error move_end();
     lighter::Error move_document_home();
     lighter::Error move_document_end();
+    lighter::Error scroll(i32 rows);
     lighter::Error page(i32 direction);
     lighter::Error resize(lighter::TerminalSize size);
     lighter::Error redraw();

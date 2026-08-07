@@ -151,6 +151,16 @@ lighter::Error ConsoleRenderer::move_down() {
     return redraw();
 }
 
+lighter::Error ConsoleRenderer::previous_prompt() {
+    screen.previous_prompt();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::next_prompt() {
+    screen.next_prompt();
+    return redraw();
+}
+
 lighter::Error ConsoleRenderer::move_home() {
     screen.move_home();
     return redraw();
@@ -168,6 +178,11 @@ lighter::Error ConsoleRenderer::move_document_home() {
 
 lighter::Error ConsoleRenderer::move_document_end() {
     screen.move_document_end();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::scroll(i32 rows) {
+    screen.scroll(rows);
     return redraw();
 }
 

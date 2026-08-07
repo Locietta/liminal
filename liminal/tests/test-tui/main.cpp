@@ -149,13 +149,13 @@ void check_multiline_navigation_history_and_projection() {
     screen.insert("second");
     require(screen.take_prompt() == "second", "later submissions must remain independent");
     screen.insert("scratch");
-    screen.move_up();
-    require(screen.composer.text == "second", "up on the first line must recall the newest prompt");
-    screen.move_up();
-    require(screen.composer.text == "first", "repeated up must walk older prompt history");
-    screen.move_down();
-    screen.move_down();
-    require(screen.composer.text == "scratch", "down past the newest prompt must restore the original draft");
+    screen.previous_prompt();
+    require(screen.composer.text == "second", "explicit previous-prompt navigation must recall the newest prompt");
+    screen.previous_prompt();
+    require(screen.composer.text == "first", "repeated previous-prompt navigation must walk older history");
+    screen.next_prompt();
+    screen.next_prompt();
+    require(screen.composer.text == "scratch", "next-prompt navigation past the newest entry must restore the original draft");
 
     screen.clear_prompt();
     screen.insert("one\ntwo\nthree\nfour");
@@ -253,6 +253,11 @@ void check_scroll_resize_and_unread_state() {
     const auto tail = screen.frame();
     require(frame_text(tail).contains("line-8"), "following viewport must show transcript tail");
     require(tail.surface.row_text(0).starts_with("liminal  test"), "header must retain model identity when clipped");
+
+    screen.move_up();
+    require(screen.anchor.has_value(), "Up at a composer boundary must scroll the transcript by one row");
+    screen.move_down();
+    require(!screen.anchor.has_value(), "Down at a composer boundary must return a one-row scroll to the transcript tail");
 
     screen.page(-1);
     require(screen.anchor.has_value(), "PageUp must establish a semantic viewport anchor");

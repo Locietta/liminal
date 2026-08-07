@@ -162,6 +162,17 @@ def read_pty_until(master, output, marker, timeout):
         output.extend(os.read(master, 4096))
 
 
+def read_pty_until_fresh(master, output, marker, timeout):
+    deadline = time.monotonic() + timeout
+    start = len(output)
+    while marker not in output[start:]:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"fresh {marker!r} did not appear: {output!r}"
+        readable, _, _ = select.select([master], [], [], remaining)
+        assert readable, f"PTY produced no fresh output before {marker!r}: {output!r}"
+        output.extend(os.read(master, 4096))
+
+
 def read_pty_frame_without(master, output, marker, timeout):
     deadline = time.monotonic() + timeout
     start = len(output)
@@ -193,18 +204,24 @@ def check_conpty_terminal_session(tmp_path, base_url):
         read_conpty_until(process, output, b" > ", 10)
         assert output.count(b"\x1b[?1049h") == 1
         assert output.index(b"\x1b[?2004h") < output.index(b"\x1b[?1049h")
+        assert b"\x1b[?1000h\x1b[?1006h" in output
 
         process.write(b"/model\r")
         read_conpty_until(process, output, b"select with /model", 5)
 
-        process.write(b"\x1b[A")
+        process.write(b"\x1b[1;5A")
         read_conpty_until(process, output, b"test-model > /model", 5)
-        process.write(b"\x1b[B")
+        process.write(b"\x1b[1;5B")
         read_conpty_until_fresh(process, output, b"\rtest-model > ", 5)
 
-        process.write(b"\x1b[5~")
+        process.write(b"\x1b[A")
         read_conpty_until(process, output, b"history", 5)
-        process.write(b"\x1b[6~")
+        process.write(b"\x1b[B")
+        read_conpty_until_fresh(process, output, b"Up/Down/wheel", 5)
+        process.write(b"\x1b[<64;1;1M")
+        read_conpty_until_fresh(process, output, b"history", 5)
+        process.write(b"\x1b[<65;1;1M")
+        read_conpty_until_fresh(process, output, b"Up/Down/wheel", 5)
 
         process.write(b"\x1b[200~a\nb\x1b[201~")
         read_conpty_until(process, output, b"\x1b[8;2H", 5)
@@ -569,6 +586,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
 
         assert output.count(b"\x1b[?1049h") == 1
         assert output.index(b"\x1b[?2004h") < output.index(b"\x1b[?1049h")
+        assert b"\x1b[?1000h\x1b[?1006h" in output
 
         os.kill(process.pid, signal.SIGTSTP)
         deadline = time.monotonic() + 5
@@ -610,20 +628,19 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             assert readable, f"model catalog did not enter the viewport: {output!r}"
             output.extend(os.read(master, 4096))
 
-        os.write(master, b"\x1b[A")
+        os.write(master, b"\x1b[1;5A")
         read_pty_until(master, output, b"test-model > /model", 5)
-        os.write(master, b"\x1b[B")
+        os.write(master, b"\x1b[1;5B")
         read_pty_frame_without(master, output, b"test-model > /model", 5)
 
-        os.write(master, b"\x1b[5~")
-        deadline = time.monotonic() + 5
-        while b"history" not in output:
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, f"PageUp did not enter transcript history: {output!r}"
-            readable, _, _ = select.select([master], [], [], remaining)
-            assert readable, f"PageUp did not enter transcript history: {output!r}"
-            output.extend(os.read(master, 4096))
-        os.write(master, b"\x1b[6~")
+        os.write(master, b"\x1b[A")
+        read_pty_until_fresh(master, output, b"history", 5)
+        os.write(master, b"\x1b[B")
+        read_pty_until_fresh(master, output, b"Up/Down/wheel", 5)
+        os.write(master, b"\x1b[<64;1;1M")
+        read_pty_until_fresh(master, output, b"history", 5)
+        os.write(master, b"\x1b[<65;1;1M")
+        read_pty_until_fresh(master, output, b"Up/Down/wheel", 5)
 
         os.write(master, b"\x1b[200~a\nb\x1b[201~")
         deadline = time.monotonic() + 5

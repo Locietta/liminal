@@ -570,12 +570,28 @@ void SessionScreen::move_word_right() {
 }
 
 void SessionScreen::move_up() {
-    if (!composer.move_up()) prompt_history.previous(composer);
-    mark_editing();
+    if (composer.move_up()) {
+        mark_editing();
+        return;
+    }
+    scroll(-1);
 }
 
 void SessionScreen::move_down() {
-    if (!composer.move_down()) prompt_history.next(composer);
+    if (composer.move_down()) {
+        mark_editing();
+        return;
+    }
+    scroll(1);
+}
+
+void SessionScreen::previous_prompt() {
+    prompt_history.previous(composer);
+    mark_editing();
+}
+
+void SessionScreen::next_prompt() {
+    prompt_history.next(composer);
     mark_editing();
 }
 
@@ -665,6 +681,11 @@ void SessionScreen::scroll(i32 row_delta) {
         return;
     }
     const auto target = row_anchor(following[distance]);
+    const auto tail = tail_rows(*this, static_cast<usize>(viewport_rows()));
+    if (!tail.empty() && target == row_anchor(tail.front())) {
+        follow_tail();
+        return;
+    }
     const auto remaining = rows_from(*this, target, static_cast<usize>(viewport_rows()) + 1);
     if (remaining.size() <= static_cast<usize>(viewport_rows())) {
         follow_tail();
@@ -720,7 +741,7 @@ Frame SessionScreen::frame() const {
             status_text = "history";
             if (unread) status_text += " | new output";
         } else {
-            status_text = "PageUp/PageDown scroll | Enter send | Ctrl+J newline";
+            status_text = "Up/Down/wheel scroll | Ctrl+Up/Down prompts | Ctrl+J newline | Enter send";
         }
         result.surface.write(prompt_row - 1, 0, status_text, Style::MUTED);
     }
