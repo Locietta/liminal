@@ -112,7 +112,7 @@ void test_stream_decoding_and_replay() {
              R"({"output_index":2,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"README.md\"}","status":"completed"}})"},
         {.event = "response.completed",
          .data =
-             R"({"response":{"id":"resp_1","model":"manual-model","status":"completed","usage":{"input_tokens":20,"output_tokens":15,"input_tokens_details":{"cached_tokens":4},"output_tokens_details":{"reasoning_tokens":5}}}})"},
+             R"({"response":{"id":"resp_1","model":"manual-model","status":"completed","usage":{"input_tokens":20,"output_tokens":15,"total_tokens":36,"input_tokens_details":{"cached_tokens":4},"output_tokens_details":{"reasoning_tokens":5}}}})"},
     };
     std::string streamed;
     provider::StreamCallbacks callbacks{.on_text_delta = [&streamed](std::string_view text) { streamed += text; }};
@@ -124,6 +124,7 @@ void test_stream_decoding_and_replay() {
     require(decoded->stop == provider::StopKind::NEEDS_TOOL_RESULTS, "tool call did not select continuation stop kind");
     require(decoded->usage.input_tokens == 20 && decoded->usage.output_tokens == 15, "usage totals were not decoded");
     require(decoded->usage.cache_read_tokens == 4 && decoded->usage.reasoning_tokens == 5, "usage details were not decoded");
+    require(decoded->usage.context_tokens == 36, "provider-reported context usage was not normalized");
     require(decoded->parts.size() == 3, "decoded response has the wrong part count");
 
     const auto *opaque = std::get_if<provider::OpaquePart>(&decoded->parts[0]);

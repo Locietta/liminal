@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -342,6 +343,7 @@ struct WireOutputTokenDetails {
 struct WireUsage {
     std::optional<u64> input_tokens;
     std::optional<u64> output_tokens;
+    std::optional<u64> total_tokens;
     std::optional<WireInputTokenDetails> input_tokens_details;
     std::optional<WireOutputTokenDetails> output_tokens_details;
 };
@@ -406,6 +408,10 @@ struct StreamAccumulator {
     void apply_usage(const WireUsage &usage) {
         if (usage.input_tokens) response.usage.input_tokens = *usage.input_tokens;
         if (usage.output_tokens) response.usage.output_tokens = *usage.output_tokens;
+        response.usage.context_tokens =
+            usage.total_tokens.value_or(response.usage.input_tokens > std::numeric_limits<u64>::max() - response.usage.output_tokens ?
+                                            std::numeric_limits<u64>::max() :
+                                            response.usage.input_tokens + response.usage.output_tokens);
         if (usage.input_tokens_details && usage.input_tokens_details->cached_tokens) {
             response.usage.cache_read_tokens = *usage.input_tokens_details->cached_tokens;
         }

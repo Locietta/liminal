@@ -202,6 +202,25 @@ void test_bounded_selection_keeps_complete_recent_turns() {
             "bounded context emitted an oversized or partial provider history");
 }
 
+void test_reported_usage_accounts_for_trailing_context() {
+    session::Session session_log({.value = 12});
+    session_log.append(session::UserMessage{.text = std::string(200, 'u')});
+    session_log.append(session::AgentOutput{
+        .parts = {provider::TextPart{.text = std::string(200, 'a')}},
+        .usage = {.input_tokens = 50, .output_tokens = 20, .context_tokens = 70},
+    });
+    session_log.append(session::ToolResults{.results = {{.call_id = "c", .content = std::string(15, 'r')}}});
+    session_log.append(session::UserMessage{.text = "tail"});
+
+    auto manifest = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 100});
+    require(manifest.has_value(), "reported usage rejected a valid context");
+    require(manifest->usage.reported_context_tokens == 70 && manifest->usage.estimated_trailing_tokens == 17 &&
+                manifest->usage.estimated_input_tokens == 87 && manifest->usage.remaining_input_tokens == 13,
+            "context accounting did not combine reported usage with its estimated tail");
+    require(context::describe(*manifest).contains("reported context baseline: 70 tokens"),
+            "context inspection omitted its reported usage baseline");
+}
+
 i32 run_all() {
     test_resolution_order_scope_and_determinism();
     test_workspace_boundary();
@@ -209,6 +228,7 @@ i32 run_all() {
     test_instruction_read_failure();
     test_manifest_deduplication_and_redacted_description();
     test_bounded_selection_keeps_complete_recent_turns();
+    test_reported_usage_accounts_for_trailing_context();
     return 0;
 }
 

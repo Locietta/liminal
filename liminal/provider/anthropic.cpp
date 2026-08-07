@@ -246,13 +246,16 @@ provider::StopKind to_stop_kind(std::string_view stop_reason) {
 /// Wire response -> neutral TurnResponse. Thinking blocks become opaque
 /// parts so they replay bit-exact (signatures must not be re-encoded).
 Result<provider::TurnResponse> to_turn_response(wire::AssistantMessage message) {
+    const auto context_tokens = message.usage.input_tokens + message.usage.output_tokens + message.usage.cache_read_input_tokens +
+                                message.usage.cache_creation_input_tokens;
     provider::TurnResponse response{
         .stop = to_stop_kind(message.stop_reason),
         .stop_detail = std::move(message.stop_reason),
         .usage = {.input_tokens = message.usage.input_tokens,
                   .output_tokens = message.usage.output_tokens,
                   .cache_read_tokens = message.usage.cache_read_input_tokens,
-                  .cache_write_tokens = message.usage.cache_creation_input_tokens},
+                  .cache_write_tokens = message.usage.cache_creation_input_tokens,
+                  .context_tokens = context_tokens},
         .model = std::move(message.model),
         .request_id = std::move(message.request_id),
     };

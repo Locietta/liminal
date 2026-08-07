@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <concepts>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -44,14 +45,24 @@ void append_checkpoint_item(provider::History &history, const session::Checkpoin
         item);
 }
 
-void append_entry(provider::History &history, const session::SessionEntry &entry) {
+struct UsageBaseline {
+    usize history_size;
+    usize context_tokens;
+};
+
+usize to_usize(u64 value) { return static_cast<usize>(std::min<u64>(value, std::numeric_limits<usize>::max())); }
+
+void append_entry(provider::History &history, const session::SessionEntry &entry, std::optional<UsageBaseline> *baseline = nullptr) {
     std::visit(
-        [&history](const auto &payload) {
+        [&history, baseline](const auto &payload) {
             using T = std::remove_cvref_t<decltype(payload)>;
             if constexpr (std::same_as<T, session::UserMessage>) {
                 provider::append_user(history, payload.text);
             } else if constexpr (std::same_as<T, session::AgentOutput>) {
                 history.push_back({.role = provider::Role::ASSISTANT, .parts = payload.parts});
+                if (baseline && payload.usage.context_tokens != 0) {
+                    *baseline = UsageBaseline{.history_size = history.size(), .context_tokens = to_usize(payload.usage.context_tokens)};
+                }
             } else if constexpr (std::same_as<T, session::ToolResults>) {
                 provider::append_tool_results(history, payload.results);
             } else if constexpr (std::same_as<T, session::ContextCheckpoint>) {
@@ -94,13 +105,24 @@ usize part_bytes(const provider::Part &part) {
         part);
 }
 
-ContextUsage estimate_usage(const provider::History &history, const ContextBudget &budget) {
-    ContextUsage usage;
+usize estimate_tokens(std::span<const provider::Item> history) {
+    usize bytes = 0;
     usize part_count = 0;
+    for (const auto &item : history) {
+        for (const auto &part : item.parts) {
+            bytes += part_bytes(part);
+            ++part_count;
+        }
+    }
+    return (bytes + 3) / 4 + history.size() * 4 + part_count * 2;
+}
+
+ContextUsage estimate_usage(const provider::History &history, const ContextBudget &budget,
+                            std::optional<UsageBaseline> baseline = std::nullopt) {
+    ContextUsage usage;
     const auto instruction_count = provider::instruction_prefix_size(history);
     for (usize item_index = 0; item_index < history.size(); ++item_index) {
         for (const auto &part : history[item_index].parts) {
-            ++part_count;
             const auto bytes = part_bytes(part);
             if (item_index < instruction_count) {
                 usage.instruction_bytes += bytes;
@@ -113,8 +135,13 @@ ContextUsage estimate_usage(const provider::History &history, const ContextBudge
             }
         }
     }
-    const auto total_bytes = usage.instruction_bytes + usage.conversation_bytes + usage.tool_bytes + usage.opaque_bytes;
-    usage.estimated_input_tokens = (total_bytes + 3) / 4 + history.size() * 4 + part_count * 2;
+    if (baseline && baseline->history_size <= history.size()) {
+        usage.reported_context_tokens = baseline->context_tokens;
+        usage.estimated_trailing_tokens = estimate_tokens(std::span(history).subspan(baseline->history_size));
+        usage.estimated_input_tokens = baseline->context_tokens + usage.estimated_trailing_tokens;
+    } else {
+        usage.estimated_input_tokens = estimate_tokens(history);
+    }
     if (budget.context_window_tokens) {
         const auto unavailable = static_cast<u64>(budget.reserved_output_tokens) + budget.safety_margin_tokens;
         usage.input_budget_tokens = unavailable < *budget.context_window_tokens ? *budget.context_window_tokens - unavailable : 0;
@@ -208,10 +235,11 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
         }
         for (auto unit = unit_starts.rbegin(); unit != unit_starts.rend(); ++unit) {
             auto candidate = instruction_history;
+            std::optional<UsageBaseline> baseline;
             for (usize index = *unit; index < branch.size(); ++index) {
-                append_entry(candidate, *branch[index]);
+                append_entry(candidate, *branch[index], *unit == start ? &baseline : nullptr);
             }
-            const auto candidate_usage = estimate_usage(candidate, budget);
+            const auto candidate_usage = estimate_usage(candidate, budget, baseline);
             if (*candidate_usage.remaining_input_tokens < 0) {
                 if (unit == unit_starts.rbegin()) {
                     return lighter::outcome_error(Error::protocol("the latest semantic turn exceeds the model input budget"));
@@ -227,11 +255,12 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
     manifest.session_entries.reserve(branch.size() - selected_start);
     manifest.provider_history = std::move(instruction_history);
     manifest.provider_history.reserve(manifest.provider_history.size() + branch.size() - selected_start);
+    std::optional<UsageBaseline> baseline;
     for (usize index = selected_start; index < branch.size(); ++index) {
         manifest.session_entries.push_back(branch[index]->id);
-        append_entry(manifest.provider_history, *branch[index]);
+        append_entry(manifest.provider_history, *branch[index], selected_start == start ? &baseline : nullptr);
     }
-    manifest.usage = estimate_usage(manifest.provider_history, manifest.budget);
+    manifest.usage = estimate_usage(manifest.provider_history, manifest.budget, baseline);
     return manifest;
 }
 
@@ -263,6 +292,10 @@ std::string describe(const ContextManifest &manifest) {
     description += manifest.active_checkpoint ? "active checkpoint: " + std::to_string(manifest.active_checkpoint->value) + "\n" :
                                                 "active checkpoint: none\n";
     description += "estimated input: " + std::to_string(manifest.usage.estimated_input_tokens) + " tokens\n";
+    if (manifest.usage.reported_context_tokens) {
+        description += "reported context baseline: " + std::to_string(*manifest.usage.reported_context_tokens) + " tokens\n";
+        description += "estimated trailing context: " + std::to_string(manifest.usage.estimated_trailing_tokens) + " tokens\n";
+    }
     if (manifest.budget.context_window_tokens) {
         description += "context window: " + std::to_string(*manifest.budget.context_window_tokens) + " tokens\n";
         description += "reserved output: " + std::to_string(manifest.budget.reserved_output_tokens) + " tokens\n";

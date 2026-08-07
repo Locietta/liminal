@@ -71,6 +71,10 @@ struct Usage {
     u64 cache_read_tokens = 0;
     u64 cache_write_tokens = 0;
     u64 reasoning_tokens = 0;
+    /// Provider-normalized model context immediately after this response.
+    /// This includes the request input and generated output without double
+    /// counting provider-specific cache accounting fields.
+    u64 context_tokens = 0;
 };
 
 /// One assistant response, already translated to neutral parts.

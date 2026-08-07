@@ -126,6 +126,7 @@ void test_stream_decoding_and_replay() {
     require(decoded->stop == provider::StopKind::NEEDS_TOOL_RESULTS, "tool use did not select continuation stop kind");
     require(decoded->usage.input_tokens == 10 && decoded->usage.output_tokens == 15, "usage totals were not decoded");
     require(decoded->usage.cache_read_tokens == 3 && decoded->usage.cache_write_tokens == 2, "cache usage was not decoded");
+    require(decoded->usage.context_tokens == 30, "provider-reported context usage was not normalized");
     require(decoded->parts.size() == 3, "decoded response has the wrong part count");
 
     const auto *opaque = std::get_if<provider::OpaquePart>(&decoded->parts[0]);

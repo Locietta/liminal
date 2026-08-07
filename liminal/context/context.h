@@ -54,6 +54,8 @@ struct ContextUsage {
     usize tool_bytes = 0;
     usize opaque_bytes = 0;
     usize estimated_input_tokens = 0;
+    std::optional<usize> reported_context_tokens;
+    usize estimated_trailing_tokens = 0;
     std::optional<usize> input_budget_tokens;
     std::optional<i64> remaining_input_tokens;
 };
