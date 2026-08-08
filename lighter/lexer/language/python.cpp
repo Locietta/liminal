@@ -11,7 +11,7 @@
 // eee400c824b30e0aa41ef06a18ce22cf69b5cbb0. This port keeps the language
 // classification and multiline-state ideas while replacing the Scintilla
 // document, generated keyword metadata, folding, and numeric style API. See
-// THIRD_PARTY_NOTICES.md.
+// lighter/lexer/THIRD_PARTY_NOTICES.md.
 namespace lighter::lexer {
 
 namespace {

@@ -11,7 +11,7 @@
 // eee400c824b30e0aa41ef06a18ce22cf69b5cbb0. The native port retains nested
 // comment and raw-string behavior while removing Scintilla infrastructure,
 // generated keyword indices, folding, and macro style IDs. See
-// THIRD_PARTY_NOTICES.md.
+// lighter/lexer/THIRD_PARTY_NOTICES.md.
 namespace lighter::lexer {
 
 namespace {

@@ -10,7 +10,7 @@
 // The classification strategy and language tables are derived from Notepad4's
 // LexCPP.cxx and stlCPP.cpp at revision eee400c824b30e0aa41ef06a18ce22cf69b5cbb0.
 // This is a structural C++26 port, not a Scintilla compatibility layer. See
-// THIRD_PARTY_NOTICES.md for the upstream BSD-3-Clause and HPND notices.
+// lighter/lexer/THIRD_PARTY_NOTICES.md for the upstream BSD-3-Clause and HPND notices.
 namespace lighter::lexer {
 
 namespace {
