@@ -10,7 +10,7 @@
 // Derived from Notepad4's LexAutoHotkey.cxx, LexAutoIt3.cxx,
 // LexAviSynth.cxx, LexAwk.cxx, LexCoffeeScript.cxx, LexJulia.cxx, LexLua.cxx,
 // LexMathematica.cxx, LexMatlab.cxx, LexNim.cxx, LexPerl.cxx, LexPHP.cxx,
-// LexPowerShell.cxx, LexR.cxx, LexRebol.cxx, LexRuby.cxx, LexTcl.cxx,
+// LexPowerShell.cxx, LexR.cxx, LexRebol.cxx, LexRuby.cxx, LexTCL.cxx,
 // LexVim.cxx, and matching stl*.cpp data at revision
 // eee400c824b30e0aa41ef06a18ce22cf69b5cbb0. The port retains distinct
 // language identities, declarations, sigils, interpolation, nested comments,

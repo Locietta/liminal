@@ -8,7 +8,7 @@
 #include <lighter/lexer/word_set.h>
 
 // Derived from Notepad4's LexBatch.cxx, LexCMake.cxx, LexGN.cxx,
-// LexMake.cxx, LexJam.cxx, LexInno.cxx, LexNsis.cxx, and matching stl*.cpp
+// LexMakefile.cxx, LexJam.cxx, LexInno.cxx, LexNSIS.cxx, and matching stl*.cpp
 // data at revision eee400c824b30e0aa41ef06a18ce22cf69b5cbb0.
 // This native family retains each language identity, command and variable
 // roles, labels/sections, CMake bracket constructs, and multiline comments.

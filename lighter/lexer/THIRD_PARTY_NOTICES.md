@@ -25,8 +25,8 @@ revision `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`:
   `src/EditLexers/stl*.cpp` language data, including `stlGradle.cpp`.
 - CSS: `scintilla/lexers/LexCSS.cxx` and `src/EditLexers/stlCSS.cpp`.
 - SQL: `scintilla/lexers/LexSQL.cxx` and `src/EditLexers/stlSQL.cpp`.
-- Build and installer scripts: `scintilla/lexers/LexBatch.cxx`, `LexCMake.cxx`, `LexGN.cxx`, `LexMake.cxx`, `LexJam.cxx`,
-  `LexInno.cxx`, and `LexNsis.cxx`; the matching `src/EditLexers/stl*.cpp` language data.
+- Build and installer scripts: `scintilla/lexers/LexBatch.cxx`, `LexCMake.cxx`, `LexGN.cxx`, `LexMakefile.cxx`, `LexJam.cxx`,
+  `LexInno.cxx`, and `LexNSIS.cxx`; the matching `src/EditLexers/stl*.cpp` language data.
 - Assembly, intermediate representations, and hardware descriptions: `scintilla/lexers/LexAsm.cxx`, `LexCIL.cxx`, `LexLLVM.cxx`,
   `LexSmali.cxx`, `LexWASM.cxx`, `LexVerilog.cxx`, `LexVHDL.cxx`, and `LexWinHex.cxx`; the matching `src/EditLexers/stl*.cpp`
   language data.
@@ -34,7 +34,7 @@ revision `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`:
   `LexElixir.cxx`; the matching `src/EditLexers/stl*.cpp` language data.
 - Dynamic scripting languages: `scintilla/lexers/LexAutoHotkey.cxx`, `LexAutoIt3.cxx`, `LexAviSynth.cxx`, `LexAwk.cxx`,
   `LexCoffeeScript.cxx`, `LexJulia.cxx`, `LexLua.cxx`, `LexMathematica.cxx`, `LexMatlab.cxx`, `LexNim.cxx`, `LexPerl.cxx`, `LexPHP.cxx`,
-  `LexPowerShell.cxx`, `LexR.cxx`, `LexRebol.cxx`, `LexRuby.cxx`, `LexTcl.cxx`, and `LexVim.cxx`; the matching
+  `LexPowerShell.cxx`, `LexR.cxx`, `LexRebol.cxx`, `LexRuby.cxx`, `LexTCL.cxx`, and `LexVim.cxx`; the matching
   `src/EditLexers/stl*.cpp` language data.
 - Scientific and legacy languages: `scintilla/lexers/LexAPDL.cxx`, `LexFortran.cxx`, `LexPascal.cxx`, `LexPowerBuilder.cxx`,
   `LexSAS.cxx`, and `LexVB.cxx`; the matching `src/EditLexers/stl*.cpp` language data, including the ABAQUS and VBScript identities.
