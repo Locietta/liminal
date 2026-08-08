@@ -24,6 +24,7 @@ revision `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`:
   `LexGroovy.cxx`, `LexHaxe.cxx`, `LexKotlin.cxx`, `LexScala.cxx`, `LexSwift.cxx`, `LexZig.cxx`, and `LexAsymptote.cxx`; the matching
   `src/EditLexers/stl*.cpp` language data, including `stlGradle.cpp`.
 - CSS: `scintilla/lexers/LexCSS.cxx` and `src/EditLexers/stlCSS.cpp`.
+- SQL: `scintilla/lexers/LexSQL.cxx` and `src/EditLexers/stlSQL.cpp`.
 
 Notepad4 Copyright © 2011-2026 Zufu Liu and All contributors.
 matepath Copyright © 2011-2026 Zufu Liu and All contributors.
