@@ -30,7 +30,7 @@ enum struct TokenRole : u8 {
     ATTRIBUTE,
     LABEL,
     MODULE,
-    ERROR,
+    UNRECOGNIZED,
 };
 
 /// Explicit semantic role attached to a lexer-local style enumerator.
@@ -56,7 +56,7 @@ consteval std::array<TokenRole, 256> make_style_role_table() {
 
     std::array<TokenRole, 256> result{};
     std::array<bool, 256> occupied{};
-    result.fill(TokenRole::ERROR);
+    result.fill(TokenRole::UNRECOGNIZED);
 
     for (auto enumerator : std::meta::enumerators_of(^^Style)) {
         const auto index = static_cast<usize>(std::to_underlying(std::meta::extract<Style>(enumerator)));

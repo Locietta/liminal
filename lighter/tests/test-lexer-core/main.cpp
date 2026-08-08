@@ -29,7 +29,7 @@ struct TestLexer {
 
 static_assert(role_for_style(TestLexer::Style::DEFAULT) == TokenRole::DEFAULT);
 static_assert(role_for_style(TestLexer::Style::WORD) == TokenRole::IDENTIFIER);
-static_assert(role_for_style<TestLexer::Style>(3) == TokenRole::ERROR);
+static_assert(role_for_style<TestLexer::Style>(3) == TokenRole::UNRECOGNIZED);
 
 constexpr auto k_words = make_word_set("alignas", "class", "while");
 static_assert(k_words.contains("class"));
