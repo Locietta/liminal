@@ -1,0 +1,6 @@
+target("test-lexer-css")
+    set_kind("binary")
+    set_group("test")
+    add_files("main.cpp")
+    add_deps("lighter")
+    add_tests("default")
