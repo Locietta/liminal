@@ -15,10 +15,16 @@ bool resolves_aliases() {
     auto idl = lexer_for_language("odl");
     auto rust = lexer_for_language("rs");
     auto python = lexer_for_language("Python3");
+    auto javascript = lexer_for_language("mjs");
+    auto jsx = lexer_for_language("JSX");
+    auto typescript = lexer_for_language("TypeScript");
+    auto tsx = lexer_for_language("tsx");
     return c && (*c)->language_info().id == "cpp" && cpp && (*cpp)->language_info().id == "cpp" && objective_c &&
            (*objective_c)->language_info().id == "objc" && objective_cpp && (*objective_cpp)->language_info().id == "objc" && resource &&
            (*resource)->language_info().id == "resource-script" && idl && (*idl)->language_info().id == "cpp" && rust &&
-           (*rust)->language_info().id == "rust" && python && (*python)->language_info().id == "python";
+           (*rust)->language_info().id == "rust" && python && (*python)->language_info().id == "python" && javascript &&
+           (*javascript)->language_info().id == "javascript" && jsx && (*jsx)->language_info().id == "jsx" && typescript &&
+           (*typescript)->language_info().id == "typescript" && tsx && (*tsx)->language_info().id == "tsx";
 }
 
 bool dispatches_selected_lexer() {

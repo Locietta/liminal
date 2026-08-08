@@ -258,6 +258,12 @@ diff --git a/file.cpp b/file.cpp
     require(text_has_style(python, "def", tui::Style::CODE_KEYWORD) && text_has_style(python, "\"Ada\"", tui::Style::CODE_STRING) &&
                 text_has_style(python, "# welcome", tui::Style::CODE_COMMENT) && text_has_style(python, "1", tui::Style::CODE_NUMBER),
             "language aliases must select the matching lightweight lexer family");
+    const auto typescript =
+        tui::layout_rich_text("```typescript\nconst render = (value: number) => service.format(`value=${value}`);\n```", 70);
+    require(text_has_style(typescript, "const", tui::Style::CODE_KEYWORD) && text_has_style(typescript, "number", tui::Style::CODE_TYPE) &&
+                text_has_style(typescript, "format", tui::Style::CODE_FUNCTION) &&
+                text_has_style(typescript, "value=", tui::Style::CODE_STRING),
+            "new registry-backed lexer families must render without TUI-specific language routing");
     const auto json = tui::layout_rich_text("```json\n{\"name\": \"liminal\", \"ready\": true}\n```", 50);
     require(text_has_style(json, "{\"name\": \"liminal\", \"ready\": true}", tui::Style::CODE),
             "unsupported fenced languages must remain plain code");

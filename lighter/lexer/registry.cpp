@@ -5,6 +5,7 @@
 
 #include <lighter/lexer/ascii.h>
 #include <lighter/lexer/language/cpp.h>
+#include <lighter/lexer/language/javascript.h>
 #include <lighter/lexer/language/python.h>
 #include <lighter/lexer/language/rust.h>
 
@@ -30,6 +31,10 @@ constexpr std::array k_objective_names = {
 constexpr std::array k_resource_names = {"dlg"sv, "rc"sv, "rc2"sv, "rct"sv, "resource"sv, "resource-script"sv, "rh"sv};
 constexpr std::array k_rust_names = {"rs"sv, "rust"sv};
 constexpr std::array k_python_names = {"py"sv, "python"sv, "python3"sv};
+constexpr std::array k_javascript_names = {"cjs"sv, "javascript"sv, "js"sv, "jse"sv, "jsm"sv, "mjs"sv, "qs"sv};
+constexpr std::array k_jsx_names = {"jsx"sv};
+constexpr std::array k_typescript_names = {"cts"sv, "ets"sv, "mts"sv, "osts"sv, "ts"sv, "typescript"sv};
+constexpr std::array k_tsx_names = {"tsx"sv};
 
 template <auto ConfiguredLexer>
 [[nodiscard]] Lexer create_configured_lexer() {
@@ -42,6 +47,16 @@ constexpr std::array k_registry = {
     LanguageBinding{.names = k_resource_names, .create = create_configured_lexer<CppLexer{.dialect = CppDialect::RESOURCE_SCRIPT}>},
     LanguageBinding{.names = k_rust_names, .create = create_configured_lexer<RustLexer{}>},
     LanguageBinding{.names = k_python_names, .create = create_configured_lexer<PythonLexer{}>},
+    LanguageBinding{
+        .names = k_javascript_names,
+        .create = create_configured_lexer<JavaScriptLexer{.dialect = JavaScriptDialect::JAVASCRIPT}>,
+    },
+    LanguageBinding{.names = k_jsx_names, .create = create_configured_lexer<JavaScriptLexer{.dialect = JavaScriptDialect::JSX}>},
+    LanguageBinding{
+        .names = k_typescript_names,
+        .create = create_configured_lexer<JavaScriptLexer{.dialect = JavaScriptDialect::TYPESCRIPT}>,
+    },
+    LanguageBinding{.names = k_tsx_names, .create = create_configured_lexer<JavaScriptLexer{.dialect = JavaScriptDialect::TSX}>},
 };
 
 [[nodiscard]] bool equal_ignoring_ascii_case(std::string_view left, std::string_view right) noexcept {
