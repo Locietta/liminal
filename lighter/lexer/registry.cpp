@@ -12,6 +12,8 @@ namespace lighter::lexer {
 
 namespace {
 
+using namespace std::literals::string_view_literals;
+
 using Factory = Lexer (*)();
 
 struct LanguageBinding {
@@ -20,27 +22,14 @@ struct LanguageBinding {
 };
 
 constexpr std::array k_cpp_names = {
-    std::string_view{"c"},   std::string_view{"c++"}, std::string_view{"cc"},   std::string_view{"cpp"},
-    std::string_view{"cxx"}, std::string_view{"h"},   std::string_view{"hh"},   std::string_view{"hpp"},
-    std::string_view{"hxx"}, std::string_view{"idl"}, std::string_view{"midl"}, std::string_view{"odl"},
+    "c"sv, "c++"sv, "cc"sv, "cpp"sv, "cxx"sv, "h"sv, "hh"sv, "hpp"sv, "hxx"sv, "idl"sv, "midl"sv, "odl"sv,
 };
 constexpr std::array k_objective_names = {
-    std::string_view{"m"},
-    std::string_view{"mm"},
-    std::string_view{"obj-c"},
-    std::string_view{"obj-c++"},
-    std::string_view{"objc"},
-    std::string_view{"objc++"},
-    std::string_view{"objcpp"},
-    std::string_view{"objective-c"},
-    std::string_view{"objective-c++"},
-    std::string_view{"objective-cpp"},
+    "m"sv, "mm"sv, "obj-c"sv, "obj-c++"sv, "objc"sv, "objc++"sv, "objcpp"sv, "objective-c"sv, "objective-c++"sv, "objective-cpp"sv,
 };
-constexpr std::array k_resource_names = {std::string_view{"dlg"}, std::string_view{"rc"},       std::string_view{"rc2"},
-                                         std::string_view{"rct"}, std::string_view{"resource"}, std::string_view{"resource-script"},
-                                         std::string_view{"rh"}};
-constexpr std::array k_rust_names = {std::string_view{"rs"}, std::string_view{"rust"}};
-constexpr std::array k_python_names = {std::string_view{"py"}, std::string_view{"python"}, std::string_view{"python3"}};
+constexpr std::array k_resource_names = {"dlg"sv, "rc"sv, "rc2"sv, "rct"sv, "resource"sv, "resource-script"sv, "rh"sv};
+constexpr std::array k_rust_names = {"rs"sv, "rust"sv};
+constexpr std::array k_python_names = {"py"sv, "python"sv, "python3"sv};
 
 template <auto ConfiguredLexer>
 [[nodiscard]] Lexer create_configured_lexer() {
