@@ -32,6 +32,10 @@ revision `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`:
   language data.
 - Functional languages: `scintilla/lexers/LexLisp.cxx`, `LexHaskell.cxx`, `LexOCaml.cxx`, `LexFSharp.cxx`, `LexErlang.cxx`, and
   `LexElixir.cxx`; the matching `src/EditLexers/stl*.cpp` language data.
+- Dynamic scripting languages: `scintilla/lexers/LexAutoHotkey.cxx`, `LexAutoIt3.cxx`, `LexAviSynth.cxx`, `LexAwk.cxx`,
+  `LexCoffeeScript.cxx`, `LexJulia.cxx`, `LexLua.cxx`, `LexMathematica.cxx`, `LexMatlab.cxx`, `LexNim.cxx`, `LexPerl.cxx`, `LexPHP.cxx`,
+  `LexPowerShell.cxx`, `LexR.cxx`, `LexRebol.cxx`, `LexRuby.cxx`, `LexTcl.cxx`, and `LexVim.cxx`; the matching
+  `src/EditLexers/stl*.cpp` language data.
 
 Notepad4 Copyright © 2011-2026 Zufu Liu and All contributors.
 matepath Copyright © 2011-2026 Zufu Liu and All contributors.
