@@ -25,8 +25,7 @@ struct PythonLexer {
         DECORATOR[[= token_role(TokenRole::ATTRIBUTE)]],
     };
 
-    static constexpr LanguageInfo language{.id = "python", .name = "Python"};
-
+    [[nodiscard]] constexpr LanguageInfo language_info() const noexcept { return {.id = "python", .name = "Python"}; }
     void lex(LexContext &context) const;
 };
 

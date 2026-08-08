@@ -4,6 +4,15 @@
 
 namespace lighter::lexer {
 
+enum struct CppDialect : u8 {
+    C,
+    CPP,
+    OBJECTIVE_C,
+    OBJECTIVE_CPP,
+    RESOURCE_SCRIPT,
+    IDL,
+};
+
 struct CppLexer {
     enum struct Style : u8 {
         DEFAULT[[= token_role(TokenRole::DEFAULT)]] = 0,
@@ -32,8 +41,9 @@ struct CppLexer {
         MODULE[[= token_role(TokenRole::MODULE)]],
     };
 
-    static constexpr LanguageInfo language{.id = "cpp", .name = "C/C++"};
+    CppDialect dialect = CppDialect::CPP;
 
+    [[nodiscard]] LanguageInfo language_info() const noexcept;
     void lex(LexContext &context) const;
 };
 

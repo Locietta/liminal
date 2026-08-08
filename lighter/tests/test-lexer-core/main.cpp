@@ -19,7 +19,7 @@ struct TestLexer {
         WORD[[= token_role(TokenRole::IDENTIFIER)]] = 4,
     };
 
-    static constexpr LanguageInfo language{.id = "test", .name = "Test"};
+    [[nodiscard]] constexpr LanguageInfo language_info() const noexcept { return {.id = "test", .name = "Test"}; }
 
     void lex(LexContext &lex_context) const {
         std::ranges::fill(lex_context.styles.begin() + static_cast<isize>(lex_context.range.begin),

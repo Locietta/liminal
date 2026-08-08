@@ -455,6 +455,18 @@ void paint_quoted(LexContext &context, usize begin, usize end, usize escape_begi
 
 } // namespace
 
+LanguageInfo CppLexer::language_info() const noexcept {
+    switch (dialect) {
+        case CppDialect::C: return {.id = "c", .name = "C"};
+        case CppDialect::CPP: return {.id = "cpp", .name = "C++"};
+        case CppDialect::OBJECTIVE_C: return {.id = "objective-c", .name = "Objective-C"};
+        case CppDialect::OBJECTIVE_CPP: return {.id = "objective-cpp", .name = "Objective-C++"};
+        case CppDialect::RESOURCE_SCRIPT: return {.id = "resource-script", .name = "Windows Resource Script"};
+        case CppDialect::IDL: return {.id = "idl", .name = "IDL/ODL"};
+    }
+    return {.id = "cpp", .name = "C++"};
+}
+
 void CppLexer::lex(LexContext &context) const {
     const auto first_next = std::ranges::upper_bound(context.line_starts, context.range.begin);
     usize line = static_cast<usize>(first_next - context.line_starts.begin() - 1);

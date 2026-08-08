@@ -20,7 +20,7 @@ template <typename T>
 concept LexerImplementation = requires(const T &implementation, LexContext &lex_context) {
     typename T::Style;
     requires std::same_as<std::underlying_type_t<typename T::Style>, u8>;
-    { T::language } -> std::convertible_to<LanguageInfo>;
+    { implementation.language_info() } -> std::convertible_to<LanguageInfo>;
     { implementation.lex(lex_context) } -> std::same_as<void>;
 };
 
@@ -32,7 +32,7 @@ struct ReflectedLexer {
 
     void lex(LexContext &lex_context) const { implementation.lex(lex_context); }
 
-    [[nodiscard]] LanguageInfo language_info() const noexcept { return Implementation::language; }
+    [[nodiscard]] LanguageInfo language_info() const noexcept { return implementation.language_info(); }
 
     [[nodiscard]] TokenRole role_for_style(u8 style) const noexcept { return lexer::role_for_style<typename Implementation::Style>(style); }
 };

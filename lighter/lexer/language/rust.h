@@ -30,8 +30,7 @@ struct RustLexer {
         MODULE[[= token_role(TokenRole::MODULE)]],
     };
 
-    static constexpr LanguageInfo language{.id = "rust", .name = "Rust"};
-
+    [[nodiscard]] constexpr LanguageInfo language_info() const noexcept { return {.id = "rust", .name = "Rust"}; }
     void lex(LexContext &context) const;
 };
 
