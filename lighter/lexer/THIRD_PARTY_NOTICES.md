@@ -19,6 +19,7 @@ revision `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`:
 - Structured data and configuration: `scintilla/lexers/LexJSON.cxx`, `LexTOML.cxx`, `LexYAML.cxx`, `LexConfig.cxx`, `LexProps.cxx`,
   `LexCSV.cxx`, and `LexDiff.cxx`; `src/EditLexers/stlJSON.cpp`, `stlTOML.cpp`, `stlYAML.cpp`, and the corresponding entries in
   `stlDefault.cpp`.
+- Markup: `scintilla/lexers/LexHTML.cxx` and `LexMarkdown.cxx`; `src/EditLexers/stlHTML.cpp`, `stlXML.cpp`, and `stlMarkdown.cpp`.
 
 Notepad4 Copyright © 2011-2026 Zufu Liu and All contributors.
 matepath Copyright © 2011-2026 Zufu Liu and All contributors.
