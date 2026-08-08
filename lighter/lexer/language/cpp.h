@@ -5,12 +5,9 @@
 namespace lighter::lexer {
 
 enum struct CppDialect : u8 {
-    C,
     CPP,
     OBJECTIVE_C,
-    OBJECTIVE_CPP,
     RESOURCE_SCRIPT,
-    IDL,
 };
 
 struct CppLexer {

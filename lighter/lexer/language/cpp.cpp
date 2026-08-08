@@ -457,14 +457,11 @@ void paint_quoted(LexContext &context, usize begin, usize end, usize escape_begi
 
 LanguageInfo CppLexer::language_info() const noexcept {
     switch (dialect) {
-        case CppDialect::C: return {.id = "c", .name = "C"};
-        case CppDialect::CPP: return {.id = "cpp", .name = "C++"};
-        case CppDialect::OBJECTIVE_C: return {.id = "objective-c", .name = "Objective-C"};
-        case CppDialect::OBJECTIVE_CPP: return {.id = "objective-cpp", .name = "Objective-C++"};
+        case CppDialect::CPP: return {.id = "cpp", .name = "C/C++"};
+        case CppDialect::OBJECTIVE_C: return {.id = "objc", .name = "Objective-C/C++"};
         case CppDialect::RESOURCE_SCRIPT: return {.id = "resource-script", .name = "Windows Resource Script"};
-        case CppDialect::IDL: return {.id = "idl", .name = "IDL/ODL"};
     }
-    return {.id = "cpp", .name = "C++"};
+    return {.id = "cpp", .name = "C/C++"};
 }
 
 void CppLexer::lex(LexContext &context) const {
