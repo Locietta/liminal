@@ -62,7 +62,7 @@ end
 
 if is_os("windows") then
     add_defines("_CRT_SECURE_NO_WARNINGS")
-    add_defines("WIN32_LEAN_AND_MEAN", "UNICODE", "_UNICODE", "NOMINMAX", "_WINDOWS")
+    add_defines("WIN32_LEAN_AND_MEAN", "NOGDI", "UNICODE", "_UNICODE", "NOMINMAX", "_WINDOWS")
     -- set_policy("build.optimization.lto", true)
 else
     -- The shared libraries resolved out of the Pixi environment are not on the
