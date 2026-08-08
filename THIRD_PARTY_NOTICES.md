@@ -6,10 +6,11 @@ GNU AGPL v3 license. The upstream portions remain subject to the notices below.
 
 ## Notepad4
 
-The C/C++ and Rust lexers under `lighter/lexer/language/` derive classification
+The C/C++, Rust, and Python lexers under `lighter/lexer/language/` derive classification
 behavior and language data from `scintilla/lexers/LexCPP.cxx`,
-`scintilla/lexers/LexRust.cxx`, `src/EditLexers/stlCPP.cpp`, and
-`src/EditLexers/stlRust.cpp` in Notepad4 revision
+`scintilla/lexers/LexRust.cxx`, `scintilla/lexers/LexPython.cxx`,
+`src/EditLexers/stlCPP.cpp`, `src/EditLexers/stlRust.cpp`, and
+`src/EditLexers/stlPython.cpp` in Notepad4 revision
 `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`.
 
 Notepad4 Copyright © 2011-2026 Zufu Liu and All contributors.
