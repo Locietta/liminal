@@ -20,6 +20,9 @@ revision `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`:
   `LexCSV.cxx`, and `LexDiff.cxx`; `src/EditLexers/stlJSON.cpp`, `stlTOML.cpp`, `stlYAML.cpp`, and the corresponding entries in
   `stlDefault.cpp`.
 - Markup: `scintilla/lexers/LexHTML.cxx` and `LexMarkdown.cxx`; `src/EditLexers/stlHTML.cpp`, `stlXML.cpp`, and `stlMarkdown.cpp`.
+- Brace-oriented languages: `scintilla/lexers/LexJava.cxx`, `LexCSharp.cxx`, `LexD.cxx`, `LexDart.cxx`, `LexCangjie.cxx`,
+  `LexGroovy.cxx`, `LexHaxe.cxx`, `LexKotlin.cxx`, `LexScala.cxx`, `LexSwift.cxx`, `LexZig.cxx`, and `LexAsymptote.cxx`; the matching
+  `src/EditLexers/stl*.cpp` language data, including `stlGradle.cpp`.
 
 Notepad4 Copyright © 2011-2026 Zufu Liu and All contributors.
 matepath Copyright © 2011-2026 Zufu Liu and All contributors.
