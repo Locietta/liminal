@@ -38,7 +38,7 @@ bool test_json() {
     lex(document, StructuredDataDialect::JSON, {.begin = 0, .end = document.source.size()});
     return has_role(document, "// JSON5", TokenRole::COMMENT) && has_role(document, "\"name\"", TokenRole::PROPERTY) &&
            has_role(document, "\\n", TokenRole::ESCAPE) && has_role(document, "enabled", TokenRole::PROPERTY) &&
-           has_role(document, "true", TokenRole::KEYWORD) && has_role(document, "42", TokenRole::NUMBER);
+           has_role(document, "true", TokenRole::CONSTANT) && has_role(document, "42", TokenRole::NUMBER);
 }
 
 bool test_toml_streaming() {
@@ -49,7 +49,7 @@ bool test_toml_streaming() {
     lex(document, StructuredDataDialect::TOML, dirty);
     return has_role(document, "[package]", TokenRole::MODULE) && has_role(document, "name", TokenRole::PROPERTY) &&
            has_role(document, "first", TokenRole::STRING) && has_role(document, "second", TokenRole::STRING) &&
-           has_role(document, "true", TokenRole::KEYWORD);
+           has_role(document, "true", TokenRole::CONSTANT);
 }
 
 bool test_yaml_block() {
@@ -59,7 +59,7 @@ bool test_yaml_block() {
     const LexRange dirty = append(document, "  second line\nnext: 7\n");
     lex(document, StructuredDataDialect::YAML, dirty);
     return has_role(document, "---", TokenRole::MODULE) && has_role(document, "service", TokenRole::PROPERTY) &&
-           has_role(document, "&main", TokenRole::LABEL) && has_role(document, "true", TokenRole::KEYWORD) &&
+           has_role(document, "&main", TokenRole::LABEL) && has_role(document, "true", TokenRole::CONSTANT) &&
            has_role(document, "second line", TokenRole::STRING) && has_role(document, "next", TokenRole::PROPERTY) &&
            has_role(document, "7", TokenRole::NUMBER);
 }
@@ -77,7 +77,7 @@ bool test_properties_csv_and_diff() {
     assign(diff, "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+new\n");
     lex(diff, StructuredDataDialect::DIFF, {.begin = 0, .end = diff.source.size()});
     return has_role(ini, "[agent]", TokenRole::MODULE) && has_role(ini, "name", TokenRole::PROPERTY) &&
-           has_role(ini, "true", TokenRole::KEYWORD) && has_role(csv, "multi", TokenRole::STRING) &&
+           has_role(ini, "true", TokenRole::CONSTANT) && has_role(csv, "multi", TokenRole::STRING) &&
            has_role(csv, "42", TokenRole::NUMBER) && has_role(diff, "diff --git", TokenRole::MODULE) &&
            has_role(diff, "@@ -1 +1 @@", TokenRole::LABEL) && has_role(diff, "-old", TokenRole::COMMENT) &&
            has_role(diff, "+new", TokenRole::STRING);

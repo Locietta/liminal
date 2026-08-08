@@ -265,8 +265,9 @@ diff --git a/file.cpp b/file.cpp
                 text_has_style(typescript, "value=", tui::Style::CODE_STRING),
             "new registry-backed lexer families must render without TUI-specific language routing");
     const auto json = tui::layout_rich_text("```json\n{\"name\": \"liminal\", \"ready\": true}\n```", 50);
-    require(text_has_style(json, "{\"name\": \"liminal\", \"ready\": true}", tui::Style::CODE),
-            "unsupported fenced languages must remain plain code");
+    require(text_has_style(json, "\"name\"", tui::Style::CODE_PROPERTY) && text_has_style(json, "\"liminal\"", tui::Style::CODE_STRING) &&
+                text_has_style(json, "true", tui::Style::CODE_CONSTANT),
+            "newly registered data languages must render semantic token roles");
 
     tui::CodeHighlighter guarded("cpp");
     const auto oversized = guarded.highlight_line(std::string(4097, 'x'));

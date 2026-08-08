@@ -19,7 +19,7 @@ struct StructuredDataLexer {
     enum struct Style : u8 {
         DEFAULT[[= token_role(TokenRole::DEFAULT)]] = 0,
         COMMENT[[= token_role(TokenRole::COMMENT)]],
-        KEYWORD[[= token_role(TokenRole::KEYWORD)]],
+        CONSTANT[[= token_role(TokenRole::CONSTANT)]],
         KEY[[= token_role(TokenRole::PROPERTY)]],
         SECTION[[= token_role(TokenRole::MODULE)]],
         DIRECTIVE[[= token_role(TokenRole::PREPROCESSOR)]],

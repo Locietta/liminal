@@ -156,7 +156,7 @@ struct QuotedToken {
             const std::string_view word = context.source.substr(token_begin, position - token_begin);
             const usize next = skip_space(context.source, position, line_end);
             paint(context, {.begin = token_begin, .end = position},
-                  k_json_constants.contains(word)                ? Style::KEYWORD :
+                  k_json_constants.contains(word)                ? Style::CONSTANT :
                   next < line_end && context.source[next] == ':' ? Style::KEY :
                                                                    Style::ERROR);
         } else if (std::string_view("{}[],:.").contains(current)) {
@@ -233,7 +233,7 @@ struct QuotedToken {
             const std::string_view word = context.source.substr(token_begin, position - token_begin);
             paint(context, {.begin = token_begin, .end = position},
                   before_assignment               ? Style::KEY :
-                  k_toml_constants.contains(word) ? Style::KEYWORD :
+                  k_toml_constants.contains(word) ? Style::CONSTANT :
                                                     Style::DEFAULT);
         } else if (std::string_view("[]{},.").contains(current)) {
             paint(context, {.begin = position, .end = position + 1}, Style::OPERATOR);
@@ -328,7 +328,7 @@ struct QuotedToken {
             const usize next = skip_space(context.source, position, line_end);
             paint(context, {.begin = token_begin, .end = position},
                   next < line_end && context.source[next] == ':' ? Style::KEY :
-                  k_yaml_constants.contains(word)                ? Style::KEYWORD :
+                  k_yaml_constants.contains(word)                ? Style::CONSTANT :
                                                                    Style::DEFAULT);
         } else {
             paint(context, {.begin = position, .end = position + 1}, Style::OPERATOR);
@@ -370,7 +370,7 @@ void lex_property_value(LexContext &context, usize position, usize end) {
             while (position < end && (ascii_identifier_continue(context.source[position]) || context.source[position] == '-')) ++position;
             const std::string_view word = context.source.substr(token_begin, position - token_begin);
             paint(context, {.begin = token_begin, .end = position},
-                  k_yaml_constants.contains(word) || k_toml_constants.contains(word) ? Style::KEYWORD : Style::DEFAULT);
+                  k_yaml_constants.contains(word) || k_toml_constants.contains(word) ? Style::CONSTANT : Style::DEFAULT);
         } else if (std::string_view("{}[](),.;").contains(current)) {
             paint(context, {.begin = position, .end = position + 1}, Style::OPERATOR);
             ++position;
