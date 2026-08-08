@@ -7,8 +7,9 @@
 #include <lighter/lexer/scanner.h>
 #include <lighter/lexer/word_set.h>
 
-// Derived from Notepad4's LexJavaScript.cxx, stlJavaScript.cpp, and
-// stlTypeScript.cpp at revision eee400c824b30e0aa41ef06a18ce22cf69b5cbb0.
+// Derived from Notepad4's LexJavaScript.cxx, stlActionScript.cpp,
+// stlJavaScript.cpp, and stlTypeScript.cpp at revision
+// eee400c824b30e0aa41ef06a18ce22cf69b5cbb0.
 // This native port retains dialect configuration, template interpolation,
 // regular expressions, documentation comments, and semantic identifiers while
 // removing Scintilla accessors, folding, and generated keyword indices. See
@@ -29,6 +30,9 @@ constexpr auto k_typescript_keywords =
     make_word_set("abstract", "accessor", "assert", "asserts", "constructor", "declare", "defer", "enum", "global", "immediate",
                   "implements", "infer", "interface", "intrinsic", "is", "keyof", "namespace", "out", "override", "package", "private",
                   "protected", "public", "readonly", "require", "satisfies", "type", "unique", "using");
+
+constexpr auto k_actionscript_keywords = make_word_set("each", "final", "implements", "include", "interface", "internal", "is", "namespace",
+                                                       "native", "override", "package", "private", "protected", "public", "use");
 
 constexpr auto k_typescript_types =
     make_word_set("any", "bigint", "boolean", "never", "number", "object", "string", "symbol", "unknown", "void");
@@ -72,6 +76,8 @@ struct TokenEnd {
 [[nodiscard]] bool typescript(JavaScriptDialect dialect) noexcept {
     return dialect == JavaScriptDialect::TYPESCRIPT || dialect == JavaScriptDialect::TSX;
 }
+
+[[nodiscard]] bool actionscript(JavaScriptDialect dialect) noexcept { return dialect == JavaScriptDialect::ACTIONSCRIPT; }
 
 [[nodiscard]] bool jsx(JavaScriptDialect dialect) noexcept {
     return dialect == JavaScriptDialect::JSX || dialect == JavaScriptDialect::TSX;
@@ -190,7 +196,7 @@ void paint_doc_tags(LexContext &context, usize begin, usize end) {
 [[nodiscard]] PendingDeclaration declaration_after(std::string_view word, bool is_typescript) noexcept {
     if (word == "class") return PendingDeclaration::CLASS;
     if (word == "function") return PendingDeclaration::FUNCTION;
-    if (word == "import" || word == "namespace") return PendingDeclaration::MODULE;
+    if (word == "import" || word == "namespace" || word == "package") return PendingDeclaration::MODULE;
     if (!is_typescript) return PendingDeclaration::NONE;
     if (word == "interface") return PendingDeclaration::INTERFACE;
     if (word == "enum") return PendingDeclaration::ENUMERATION;
@@ -212,7 +218,8 @@ void paint_doc_tags(LexContext &context, usize begin, usize end) {
 }
 
 [[nodiscard]] Style identifier_style(std::string_view source, std::string_view word, usize begin, usize end, usize line_begin,
-                                     usize line_end, bool is_typescript, PendingDeclaration &pending, bool decorator) {
+                                     usize line_end, bool is_typescript, bool is_actionscript, PendingDeclaration &pending,
+                                     bool decorator) {
     if (pending != PendingDeclaration::NONE) {
         const Style result = declaration_style(pending);
         pending = PendingDeclaration::NONE;
@@ -221,8 +228,9 @@ void paint_doc_tags(LexContext &context, usize begin, usize end) {
     if (decorator) return Style::DECORATOR;
     if (k_constants.contains(word) || all_upper_identifier(word)) return Style::CONSTANT;
     if (k_builtin_types.contains(word) || (is_typescript && k_typescript_types.contains(word))) return Style::TYPE;
-    if (k_keywords.contains(word) || (is_typescript && k_typescript_keywords.contains(word))) {
-        pending = declaration_after(word, is_typescript);
+    if (k_keywords.contains(word) || (is_typescript && k_typescript_keywords.contains(word)) ||
+        (is_actionscript && k_actionscript_keywords.contains(word))) {
+        pending = declaration_after(word, is_typescript || is_actionscript);
         return Style::KEYWORD;
     }
 
@@ -349,6 +357,7 @@ void paint_doc_tags(LexContext &context, usize begin, usize end) {
     if (content_end > begin && context.source[content_end - 1] == '\r') --content_end;
 
     const bool is_typescript = typescript(dialect);
+    const bool is_actionscript = actionscript(dialect);
     usize position = begin;
     u32 state = line_state;
     PendingDeclaration pending = PendingDeclaration::NONE;
@@ -459,8 +468,8 @@ void paint_doc_tags(LexContext &context, usize begin, usize end) {
             const usize token_begin = position++;
             while (position < content_end && identifier_continue(context.source[position])) ++position;
             const std::string_view word = context.source.substr(token_begin, position - token_begin);
-            const Style style =
-                identifier_style(context.source, word, token_begin, position, begin, content_end, is_typescript, pending, decorator);
+            const Style style = identifier_style(context.source, word, token_begin, position, begin, content_end, is_typescript,
+                                                 is_actionscript, pending, decorator);
             paint(context, {.begin = token_begin, .end = position}, style);
             can_start_regex = style == Style::KEYWORD && keyword_allows_regex(word);
             decorator = false;
@@ -508,6 +517,7 @@ void paint_doc_tags(LexContext &context, usize begin, usize end) {
 LanguageInfo JavaScriptLexer::language_info() const noexcept {
     switch (dialect) {
         case JavaScriptDialect::JAVASCRIPT: return {.id = "javascript", .name = "JavaScript"};
+        case JavaScriptDialect::ACTIONSCRIPT: return {.id = "actionscript", .name = "ActionScript"};
         case JavaScriptDialect::JSX: return {.id = "jsx", .name = "JavaScript JSX"};
         case JavaScriptDialect::TYPESCRIPT: return {.id = "typescript", .name = "TypeScript"};
         case JavaScriptDialect::TSX: return {.id = "tsx", .name = "TypeScript TSX"};

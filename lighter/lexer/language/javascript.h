@@ -6,6 +6,7 @@ namespace lighter::lexer {
 
 enum struct JavaScriptDialect : u8 {
     JAVASCRIPT,
+    ACTIONSCRIPT,
     JSX,
     TYPESCRIPT,
     TSX,

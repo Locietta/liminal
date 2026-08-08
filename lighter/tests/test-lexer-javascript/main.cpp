@@ -86,8 +86,20 @@ bool test_tsx_tags() {
            has_role(document, "status", TokenRole::STRING) && has_role(document, "data-id", TokenRole::PROPERTY);
 }
 
+bool test_actionscript() {
+    Document document;
+    assign(document, "package demo { public class Widget implements Display { override function draw():void {} } }\n");
+    lex(JavaScriptLexer{.dialect = JavaScriptDialect::ACTIONSCRIPT}, document, {.begin = 0, .end = document.source.size()});
+    return has_role(document, "package", TokenRole::KEYWORD) && has_role(document, "demo", TokenRole::MODULE) &&
+           has_role(document, "Widget", TokenRole::TYPE) && has_role(document, "implements", TokenRole::KEYWORD) &&
+           has_role(document, "draw", TokenRole::FUNCTION);
+}
+
 } // namespace
 
 int main() {
-    return test_typescript_semantics() && test_streamed_template_expression() && test_documentation_comment() && test_tsx_tags() ? 0 : 1;
+    return test_typescript_semantics() && test_streamed_template_expression() && test_documentation_comment() && test_tsx_tags() &&
+                   test_actionscript() ?
+               0 :
+               1;
 }

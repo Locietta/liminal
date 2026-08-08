@@ -12,8 +12,8 @@ revision `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`:
 - C/C++: `scintilla/lexers/LexCPP.cxx`, `src/EditLexers/stlCPP.cpp`, and `src/EditLexers/stlResource.cpp`.
 - Rust: `scintilla/lexers/LexRust.cxx` and `src/EditLexers/stlRust.cpp`.
 - Python: `scintilla/lexers/LexPython.cxx` and `src/EditLexers/stlPython.cpp`.
-- JavaScript/TypeScript: `scintilla/lexers/LexJavaScript.cxx`, `src/EditLexers/stlJavaScript.cpp`, and
-  `src/EditLexers/stlTypeScript.cpp`.
+- JavaScript/TypeScript: `scintilla/lexers/LexJavaScript.cxx`, `src/EditLexers/stlActionScript.cpp`, `stlJavaScript.cpp`, and
+  `stlTypeScript.cpp`.
 - Go: `scintilla/lexers/LexGo.cxx` and `src/EditLexers/stlGo.cpp`.
 - Shell: `scintilla/lexers/LexBash.cxx` and `src/EditLexers/stlBash.cpp`.
 - Structured data and configuration: `scintilla/lexers/LexJSON.cxx`, `LexTOML.cxx`, `LexYAML.cxx`, `LexConfig.cxx`, `LexProps.cxx`,
