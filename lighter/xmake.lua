@@ -6,7 +6,7 @@ add_requires("ngcpp-proxy")
 
 target("lighter")
     set_kind("static")
-    add_files("async/**/*.cpp", "encoding/*.cpp", "http/*.cpp", "utils/*.cpp")
+    add_files("async/**/*.cpp", "encoding/*.cpp", "http/*.cpp", "lexer/*.cpp", "utils/*.cpp")
     add_packages("libuv")
     add_packages("libiconv")
     add_syslinks("stdc++exp", {public = true})
