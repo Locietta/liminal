@@ -27,14 +27,17 @@ bool test_semantic_styles() {
     Document document;
     assign(
         document,
-        "#include <vector>\nclass Widget {\npublic:\n  constexpr int value = 42;\n  std::string name() const { return \"x\\n\"; }\n};\n");
+        "#include <vector>\n[[deprecated(\"old\")]] struct Marked {};\nclass Widget {\npublic:\n  constexpr int value = 42;\n  std::string "
+        "name() const { return \"x\\n\"; }\n};\n");
     lex(CppLexer{}, document, {.begin = 0, .end = document.source.size()});
 
     return has_role(document, "#include", TokenRole::PREPROCESSOR) && has_role(document, "<vector>", TokenRole::MODULE) &&
-           has_role(document, "class", TokenRole::KEYWORD) && has_role(document, "Widget", TokenRole::TYPE) &&
-           has_role(document, "constexpr", TokenRole::KEYWORD) && has_role(document, "int", TokenRole::TYPE) &&
-           has_role(document, "42", TokenRole::NUMBER) && has_role(document, "name", TokenRole::FUNCTION) &&
-           has_role(document, "\\n", TokenRole::ESCAPE) && has_role(document, "return", TokenRole::KEYWORD);
+           has_role(document, "deprecated", TokenRole::ATTRIBUTE) && has_role(document, "struct", TokenRole::KEYWORD) &&
+           has_role(document, "Marked", TokenRole::TYPE) && has_role(document, "class", TokenRole::KEYWORD) &&
+           has_role(document, "Widget", TokenRole::TYPE) && has_role(document, "constexpr", TokenRole::KEYWORD) &&
+           has_role(document, "int", TokenRole::TYPE) && has_role(document, "42", TokenRole::NUMBER) &&
+           has_role(document, "name", TokenRole::FUNCTION) && has_role(document, "\\n", TokenRole::ESCAPE) &&
+           has_role(document, "return", TokenRole::KEYWORD);
 }
 
 bool test_streamed_multiline_state() {

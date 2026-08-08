@@ -423,6 +423,7 @@ void paint_quoted(LexContext &context, usize begin, usize end, usize escape_begi
             } else {
                 while (position < content_end && operator_character(context.source[position]) &&
                        !context.source.substr(position).starts_with("//") && !context.source.substr(position).starts_with("/*")) {
+                    if (attribute_depth != 0 && (context.source[position] == '[' || context.source[position] == ']')) break;
                     ++position;
                 }
             }
