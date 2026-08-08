@@ -30,6 +30,8 @@ revision `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`:
 - Assembly, intermediate representations, and hardware descriptions: `scintilla/lexers/LexAsm.cxx`, `LexCIL.cxx`, `LexLLVM.cxx`,
   `LexSmali.cxx`, `LexWASM.cxx`, `LexVerilog.cxx`, `LexVHDL.cxx`, and `LexWinHex.cxx`; the matching `src/EditLexers/stl*.cpp`
   language data.
+- Functional languages: `scintilla/lexers/LexLisp.cxx`, `LexHaskell.cxx`, `LexOCaml.cxx`, `LexFSharp.cxx`, `LexErlang.cxx`, and
+  `LexElixir.cxx`; the matching `src/EditLexers/stl*.cpp` language data.
 
 Notepad4 Copyright © 2011-2026 Zufu Liu and All contributors.
 matepath Copyright © 2011-2026 Zufu Liu and All contributors.
