@@ -8,10 +8,11 @@
 #include <type_traits>
 #include <utility>
 
-#include <uv.h>
-
 #include <lighter/types.hpp>
 #include <lighter/async/runtime/node.h>
+
+struct uv_loop_s;
+using uv_loop_t = uv_loop_s;
 
 namespace lighter {
 
