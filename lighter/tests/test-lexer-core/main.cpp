@@ -2,8 +2,11 @@
 #include <array>
 #include <ranges>
 
+#include <lighter/lexer/ascii.h>
 #include <lighter/lexer/document.h>
 #include <lighter/lexer/lexer.h>
+#include <lighter/lexer/scanner.h>
+#include <lighter/lexer/word_set.h>
 
 namespace {
 
@@ -27,6 +30,10 @@ struct TestLexer {
 static_assert(role_for_style(TestLexer::Style::DEFAULT) == TokenRole::DEFAULT);
 static_assert(role_for_style(TestLexer::Style::WORD) == TokenRole::IDENTIFIER);
 static_assert(role_for_style<TestLexer::Style>(3) == TokenRole::ERROR);
+
+constexpr auto k_words = make_word_set("alignas", "class", "while");
+static_assert(k_words.contains("class"));
+static_assert(!k_words.contains("struct"));
 
 bool test_document() {
     Document document;
@@ -60,6 +67,18 @@ bool test_facade() {
            std::ranges::all_of(document.styles, [](u8 style) { return style == 4; });
 }
 
+bool test_scanner() {
+    Document document;
+    assign(document, "alpha 42");
+    auto lex_context = context(document, {.begin = 0, .end = document.source.size()});
+    auto byte_scanner = scanner(lex_context);
+    const auto identifier = byte_scanner.take_while([](char value) { return ascii_identifier_continue(value); });
+    if (identifier.begin != 0 || identifier.end != 5 || byte_scanner.peek() != ' ') return false;
+    if (byte_scanner.peek(-5) != 'a' || byte_scanner.peek(-6) != '\0') return false;
+    paint(lex_context, identifier, TestLexer::Style::WORD);
+    return std::ranges::all_of(document.styles | std::views::take(5), [](u8 style) { return style == 4; }) && document.styles[5] == 0;
+}
+
 } // namespace
 
-int main() { return test_document() && test_facade() ? 0 : 1; }
+int main() { return test_document() && test_facade() && test_scanner() ? 0 : 1; }
