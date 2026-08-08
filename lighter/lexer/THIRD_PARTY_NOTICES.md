@@ -36,6 +36,8 @@ revision `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`:
   `LexCoffeeScript.cxx`, `LexJulia.cxx`, `LexLua.cxx`, `LexMathematica.cxx`, `LexMatlab.cxx`, `LexNim.cxx`, `LexPerl.cxx`, `LexPHP.cxx`,
   `LexPowerShell.cxx`, `LexR.cxx`, `LexRebol.cxx`, `LexRuby.cxx`, `LexTcl.cxx`, and `LexVim.cxx`; the matching
   `src/EditLexers/stl*.cpp` language data.
+- Scientific and legacy languages: `scintilla/lexers/LexAPDL.cxx`, `LexFortran.cxx`, `LexPascal.cxx`, `LexPowerBuilder.cxx`,
+  `LexSAS.cxx`, and `LexVB.cxx`; the matching `src/EditLexers/stl*.cpp` language data, including the ABAQUS and VBScript identities.
 
 Notepad4 Copyright © 2011-2026 Zufu Liu and All contributors.
 matepath Copyright © 2011-2026 Zufu Liu and All contributors.
