@@ -5,6 +5,7 @@
 
 #include <lighter/lexer/ascii.h>
 #include <lighter/lexer/language/cpp.h>
+#include <lighter/lexer/language/go.h>
 #include <lighter/lexer/language/javascript.h>
 #include <lighter/lexer/language/python.h>
 #include <lighter/lexer/language/rust.h>
@@ -35,6 +36,7 @@ constexpr std::array k_javascript_names = {"cjs"sv, "javascript"sv, "js"sv, "jse
 constexpr std::array k_jsx_names = {"jsx"sv};
 constexpr std::array k_typescript_names = {"cts"sv, "ets"sv, "mts"sv, "osts"sv, "ts"sv, "typescript"sv};
 constexpr std::array k_tsx_names = {"tsx"sv};
+constexpr std::array k_go_names = {"go"sv, "golang"sv, "gop"sv, "ql"sv};
 
 template <auto ConfiguredLexer>
 [[nodiscard]] Lexer create_configured_lexer() {
@@ -57,6 +59,7 @@ constexpr std::array k_registry = {
         .create = create_configured_lexer<JavaScriptLexer{.dialect = JavaScriptDialect::TYPESCRIPT}>,
     },
     LanguageBinding{.names = k_tsx_names, .create = create_configured_lexer<JavaScriptLexer{.dialect = JavaScriptDialect::TSX}>},
+    LanguageBinding{.names = k_go_names, .create = create_configured_lexer<GoLexer{}>},
 };
 
 [[nodiscard]] bool equal_ignoring_ascii_case(std::string_view left, std::string_view right) noexcept {
