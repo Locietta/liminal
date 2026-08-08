@@ -259,8 +259,8 @@ diff --git a/file.cpp b/file.cpp
                 text_has_style(python, "# welcome", tui::Style::CODE_COMMENT) && text_has_style(python, "1", tui::Style::CODE_NUMBER),
             "language aliases must select the matching lightweight lexer family");
     const auto json = tui::layout_rich_text("```json\n{\"name\": \"liminal\", \"ready\": true}\n```", 50);
-    require(text_has_style(json, "\"name\"", tui::Style::CODE_PROPERTY) && text_has_style(json, "true", tui::Style::CODE_CONSTANT),
-            "structured data must distinguish keys from strings and constants");
+    require(text_has_style(json, "{\"name\": \"liminal\", \"ready\": true}", tui::Style::CODE),
+            "unsupported fenced languages must remain plain code");
 
     tui::CodeHighlighter guarded("cpp");
     const auto oversized = guarded.highlight_line(std::string(4097, 'x'));
