@@ -6,14 +6,19 @@ GNU AGPL v3 license. The upstream portions remain subject to the notices below.
 
 ## Notepad4
 
-The C/C++, Rust, Python, JavaScript/TypeScript, Go, and shell lexers under `lighter/lexer/language/` derive classification
-behavior and language data from `scintilla/lexers/LexCPP.cxx`,
-`scintilla/lexers/LexRust.cxx`, `scintilla/lexers/LexPython.cxx`, `scintilla/lexers/LexJavaScript.cxx`, `scintilla/lexers/LexGo.cxx`,
-`scintilla/lexers/LexBash.cxx`,
-`src/EditLexers/stlCPP.cpp`, `src/EditLexers/stlRust.cpp`,
-`src/EditLexers/stlPython.cpp`, `src/EditLexers/stlJavaScript.cpp`, `src/EditLexers/stlTypeScript.cpp`, `src/EditLexers/stlGo.cpp`, and
-`src/EditLexers/stlBash.cpp` in Notepad4 revision
-`eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`.
+The lexers under `lighter/lexer/language/` derive classification behavior and language data from the following files in Notepad4
+revision `eee400c824b30e0aa41ef06a18ce22cf69b5cbb0`:
+
+- C/C++: `scintilla/lexers/LexCPP.cxx`, `src/EditLexers/stlCPP.cpp`, and `src/EditLexers/stlResource.cpp`.
+- Rust: `scintilla/lexers/LexRust.cxx` and `src/EditLexers/stlRust.cpp`.
+- Python: `scintilla/lexers/LexPython.cxx` and `src/EditLexers/stlPython.cpp`.
+- JavaScript/TypeScript: `scintilla/lexers/LexJavaScript.cxx`, `src/EditLexers/stlJavaScript.cpp`, and
+  `src/EditLexers/stlTypeScript.cpp`.
+- Go: `scintilla/lexers/LexGo.cxx` and `src/EditLexers/stlGo.cpp`.
+- Shell: `scintilla/lexers/LexBash.cxx` and `src/EditLexers/stlBash.cpp`.
+- Structured data and configuration: `scintilla/lexers/LexJSON.cxx`, `LexTOML.cxx`, `LexYAML.cxx`, `LexConfig.cxx`, `LexProps.cxx`,
+  `LexCSV.cxx`, and `LexDiff.cxx`; `src/EditLexers/stlJSON.cpp`, `stlTOML.cpp`, `stlYAML.cpp`, and the corresponding entries in
+  `stlDefault.cpp`.
 
 Notepad4 Copyright © 2011-2026 Zufu Liu and All contributors.
 matepath Copyright © 2011-2026 Zufu Liu and All contributors.
