@@ -24,6 +24,7 @@ struct CppLexer {
         ENUMERATION[[= token_role(TokenRole::TYPE)]],
         FUNCTION[[= token_role(TokenRole::FUNCTION)]],
         IDENTIFIER[[= token_role(TokenRole::IDENTIFIER)]],
+        PROPERTY[[= token_role(TokenRole::PROPERTY)]],
         CONSTANT[[= token_role(TokenRole::CONSTANT)]],
         STRING[[= token_role(TokenRole::STRING)]],
         RAW_STRING[[= token_role(TokenRole::STRING)]],

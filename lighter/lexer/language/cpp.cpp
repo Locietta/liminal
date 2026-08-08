@@ -261,6 +261,8 @@ void paint_quoted(LexContext &context, usize begin, usize end, usize escape_begi
     if (looks_like_type(source, word, end, line_end)) return Style::TYPE;
 
     const usize previous = previous_non_space(source, begin, line_begin);
+    if (previous > line_begin && source[previous - 1] == '.') return Style::PROPERTY;
+    if (previous >= line_begin + 2 && source.substr(previous - 2, 2) == "->") return Style::PROPERTY;
     if (previous >= 2 && source.substr(previous - 2, 2) == "::") return Style::IDENTIFIER;
     return Style::IDENTIFIER;
 }
