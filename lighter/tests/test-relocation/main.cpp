@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <lighter/types.hpp>
+#include <lighter/utils/memory.h>
 #include <lighter/utils/relocation.h>
 #include <lighter/utils/small_vector.h>
 
@@ -54,6 +55,22 @@ struct Polymorphic {
     virtual ~Polymorphic() = default;
     int x = 0;
 };
+
+struct PointerBase {
+    int value;
+};
+
+struct PointerDerived : PointerBase {};
+
+struct PointerLeftBase {
+    int left;
+};
+
+struct PointerRightBase {
+    int right;
+};
+
+struct PointerMultipleDerived : PointerLeftBase, PointerRightBase {};
 
 struct[[= trivially_relocatable]] ForcedOn {
     ForcedOn() = default;
@@ -107,6 +124,14 @@ static_assert(!is_trivially_relocatable_v<SelfReferential>);
 static_assert(!is_trivially_relocatable_v<Polymorphic>);
 static_assert(!is_trivially_relocatable_v<std::string>); // SSO interior pointer (libstdc++)
 
+// A pointer conversion is memcpy-compatible only when it preserves the address.
+static_assert(mem::is_uninitialized_memcpyable_v<const int *, int *&>);
+static_assert(mem::is_uninitialized_memcpyable_v<void *, int *&>);
+static_assert(mem::is_uninitialized_memcpyable_v<PointerBase *, PointerDerived *&>);
+static_assert(!mem::is_uninitialized_memcpyable_v<PointerRightBase *, PointerMultipleDerived *&>);
+static_assert(mem::is_memcpyable_v<PointerDerived *&, PointerBase *>);
+static_assert(!mem::is_memcpyable_v<PointerMultipleDerived *&, PointerRightBase *>);
+
 // annotations override in both directions, and propagate through membership
 static_assert(is_trivially_relocatable_v<ForcedOn>);
 static_assert(!is_trivially_relocatable_v<ForcedOff>);
@@ -143,6 +168,18 @@ void operator delete(void *p) noexcept {
 void operator delete(void *p, std::size_t) noexcept { ::operator delete(p); }
 
 namespace {
+
+void test_pointer_conversion_construct() {
+    PointerMultipleDerived object;
+    PointerMultipleDerived *source = &object;
+    mem::Uninitialized<PointerRightBase *> destination;
+
+    require(static_cast<void *>(source) != static_cast<void *>(static_cast<PointerRightBase *>(source)),
+            "pointer conversion test does not require an offset");
+    mem::construct(std::addressof(destination.value), source);
+    require(destination.value == static_cast<PointerRightBase *>(source), "pointer construction skipped a required base offset");
+    mem::destroy(std::addressof(destination.value));
+}
 
 // --- runtime: SmallVector relocates ownership correctly ---------------------
 
@@ -196,6 +233,7 @@ void test_leak_free() {
 } // namespace
 
 int main() {
+    test_pointer_conversion_construct();
     test_small_vector_unique_ptr_growth();
     test_small_vector_shrink_to_fit_inline();
     test_leak_free();

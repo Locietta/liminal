@@ -66,7 +66,22 @@ constexpr inline bool is_memcpyable_integral_v = [] {
 }();
 
 template <typename From, typename To>
-constexpr inline bool is_convertible_pointer_v = std::is_pointer_v<From> && std::is_pointer_v<To> && std::is_convertible_v<From, To>;
+constexpr inline bool is_memcpyable_pointer_v = [] {
+    if constexpr (!std::is_pointer_v<From> || !std::is_pointer_v<To> || !std::is_convertible_v<From, To>) {
+        return false;
+    } else {
+        using from = std::remove_cv_t<std::remove_pointer_t<From>>;
+        using to = std::remove_cv_t<std::remove_pointer_t<To>>;
+
+        if constexpr (std::is_void_v<from> || std::is_void_v<to> || std::is_same_v<from, to>) {
+            return true;
+        } else if constexpr (is_complete_type_v<from> && is_complete_type_v<to>) {
+            return std::is_pointer_interconvertible_base_of_v<to, from>;
+        } else {
+            return false;
+        }
+    }
+}();
 
 template <typename QualifiedFrom, typename QualifiedTo = QualifiedFrom>
 constexpr inline bool is_memcpyable_v = [] {
@@ -79,7 +94,7 @@ constexpr inline bool is_memcpyable_v = [] {
         using to = std::remove_cv_t<QualifiedTo>;
 
         return std::is_trivially_assignable_v<QualifiedTo &, QualifiedFrom> && std::is_trivially_copyable_v<to> &&
-               (std::is_same_v<from, to> || is_memcpyable_integral_v<from, to> || is_convertible_pointer_v<from, to>);
+               (std::is_same_v<from, to> || is_memcpyable_integral_v<from, to> || is_memcpyable_pointer_v<from, to>);
     }
 }();
 
@@ -96,7 +111,7 @@ constexpr inline bool is_uninitialized_memcpyable_v = [] {
 
             if constexpr (is_complete_type_v<from>) {
                 return std::is_trivially_constructible_v<To, From> && std::is_trivially_copyable_v<to> &&
-                       (std::is_same_v<from, to> || is_memcpyable_integral_v<from, to> || is_convertible_pointer_v<from, to>);
+                       (std::is_same_v<from, to> || is_memcpyable_integral_v<from, to> || is_memcpyable_pointer_v<from, to>);
             } else {
                 return false;
             }
