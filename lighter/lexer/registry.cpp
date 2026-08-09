@@ -1,7 +1,7 @@
 #include "registry.h"
 
+#include <algorithm>
 #include <array>
-#include <limits>
 
 #include <lighter/lexer/ascii.h>
 #include <lighter/lexer/language/assembly.h>
@@ -21,6 +21,7 @@
 #include <lighter/lexer/language/scripting.h>
 #include <lighter/lexer/language/sql.h>
 #include <lighter/lexer/language/structured_data.h>
+#include <lighter/utils/flat_map.h>
 
 namespace lighter::lexer {
 
@@ -162,25 +163,17 @@ constexpr std::array k_registry = {
     LanguageBinding{"typ|typst"sv, create_configured_lexer<DocumentMarkupLexer{.dialect = DocumentMarkupDialect::TYPST}>},
 };
 
-[[nodiscard]] constexpr bool equal_ignoring_ascii_case(std::string_view left, std::string_view right) noexcept {
-    if (left.size() != right.size()) return false;
-    for (usize index = 0; index < left.size(); ++index) {
-        if (ascii_to_lower(left[index]) != ascii_to_lower(right[index])) return false;
+struct AsciiCaseInsensitiveLess {
+    [[nodiscard]] constexpr bool operator()(std::string_view left, std::string_view right) const noexcept {
+        const usize common_size = left.size() < right.size() ? left.size() : right.size();
+        for (usize index = 0; index < common_size; ++index) {
+            const char left_value = ascii_to_lower(left[index]);
+            const char right_value = ascii_to_lower(right[index]);
+            if (left_value != right_value) return left_value < right_value;
+        }
+        return left.size() < right.size();
     }
-    return true;
-}
-
-[[nodiscard]] constexpr u64 hash_name(std::string_view name) noexcept {
-    constexpr u64 offset_basis = 14'695'981'039'346'656'037ULL;
-    constexpr u64 prime = 1'099'511'628'211ULL;
-
-    u64 hash = offset_basis;
-    for (const char value : name) {
-        hash ^= static_cast<u8>(ascii_to_lower(value));
-        hash *= prime;
-    }
-    return hash;
-}
+};
 
 [[nodiscard]] consteval usize count_aliases() {
     usize count = 0;
@@ -196,88 +189,39 @@ constexpr std::array k_registry = {
 
 constexpr usize k_alias_count = count_aliases();
 
-[[nodiscard]] consteval usize alias_index_capacity() {
-    usize capacity = 1;
-    while (capacity < k_alias_count * 2) capacity *= 2;
-    return capacity;
-}
+using AliasMap = FlatMap<std::string_view, Factory, AsciiCaseInsensitiveLess>;
 
-constexpr usize k_alias_index_capacity = alias_index_capacity();
-constexpr usize k_alias_index_mask = k_alias_index_capacity - 1;
-constexpr u16 k_no_binding = std::numeric_limits<u16>::max();
+[[nodiscard]] consteval auto make_aliases() {
+    AliasMap aliases;
+    aliases.reserve(k_alias_count);
 
-struct AliasEntry {
-    u64 hash = 0;
-    u16 binding = k_no_binding;
-    u16 begin = 0;
-    u16 size = 0;
-};
-
-[[nodiscard]] consteval auto make_alias_index() {
-    std::array<AliasEntry, k_alias_index_capacity> index{};
-
-    for (usize binding_index = 0; binding_index < k_registry.size(); ++binding_index) {
-        const LanguageBinding &binding = k_registry[binding_index];
-        if (binding.names.size() > std::numeric_limits<u16>::max()) throw "lexer language alias list is too long";
-
+    for (const LanguageBinding &binding : k_registry) {
         usize begin = 0;
         while (begin <= binding.names.size()) {
             const usize separator = binding.names.find('|', begin);
             const usize end = separator == std::string_view::npos ? binding.names.size() : separator;
             const std::string_view alias = binding.names.substr(begin, end - begin);
             if (alias.empty()) throw "lexer language alias is empty";
-
-            const u64 hash = hash_name(alias);
-            usize slot = static_cast<usize>(hash) & k_alias_index_mask;
-            for (usize probe = 0; probe < k_alias_index_capacity; ++probe) {
-                AliasEntry &entry = index[slot];
-                if (entry.binding == k_no_binding) {
-                    entry = {
-                        .hash = hash,
-                        .binding = static_cast<u16>(binding_index),
-                        .begin = static_cast<u16>(begin),
-                        .size = static_cast<u16>(alias.size()),
-                    };
-                    break;
-                }
-                const LanguageBinding &existing_binding = k_registry[entry.binding];
-                const std::string_view existing_alias = existing_binding.names.substr(entry.begin, entry.size);
-                if (entry.hash == hash && equal_ignoring_ascii_case(existing_alias, alias)) {
-                    throw "duplicate lexer language alias";
-                }
-                slot = (slot + 1) & k_alias_index_mask;
-                if (probe + 1 == k_alias_index_capacity) throw "lexer language alias index is full";
-            }
+            if (!aliases.try_emplace(alias, binding.create).second) throw "duplicate lexer language alias";
 
             if (separator == std::string_view::npos) break;
             begin = separator + 1;
         }
     }
-    return index;
+
+    std::array<AliasMap::value_type, k_alias_count> result{};
+    std::ranges::copy(aliases, result.begin());
+    return result;
 }
 
-constexpr auto k_alias_index = make_alias_index();
-
-static_assert(k_registry.size() < k_no_binding);
-static_assert((k_alias_index_capacity & k_alias_index_mask) == 0);
+constexpr auto k_aliases = make_aliases();
 
 } // namespace
 
 std::optional<Lexer> lexer_for_language(std::string_view name) {
-    if (name.empty()) return std::nullopt;
-
-    const u64 hash = hash_name(name);
-    usize slot = static_cast<usize>(hash) & k_alias_index_mask;
-    for (usize probe = 0; probe < k_alias_index_capacity; ++probe) {
-        const AliasEntry &entry = k_alias_index[slot];
-        if (entry.binding == k_no_binding) return std::nullopt;
-
-        const LanguageBinding &binding = k_registry[entry.binding];
-        const std::string_view alias = binding.names.substr(entry.begin, entry.size);
-        if (entry.hash == hash && equal_ignoring_ascii_case(alias, name)) return binding.create();
-        slot = (slot + 1) & k_alias_index_mask;
-    }
-    return std::nullopt;
+    constexpr AsciiCaseInsensitiveLess compare;
+    const auto found = std::ranges::lower_bound(k_aliases, name, compare, [](const AliasMap::value_type &alias) { return alias.first; });
+    return found == k_aliases.end() || compare(name, found->first) ? std::nullopt : std::optional{found->second()};
 }
 
 } // namespace lighter::lexer
