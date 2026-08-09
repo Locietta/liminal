@@ -4,8 +4,10 @@
 #include <meta>
 #include <optional>
 #include <type_traits>
+#include <utility>
 
 #include <lighter/types.hpp>
+#include <lighter/utils/type_traits.h>
 
 /// Trivially-relocatable trait, P2786-flavoured, built on C++26 reflection
 /// until the language trait ships in our toolchain.
@@ -51,6 +53,7 @@ inline constexpr TriviallyRelocatable trivially_relocatable{};
 namespace detail::reloc {
 
 consteval bool entry(std::meta::info type);
+consteval bool via_trait(std::meta::info type);
 
 } // namespace detail::reloc
 
@@ -67,6 +70,13 @@ constexpr bool is_trivially_relocatable_v<std::shared_ptr<T>> = true;
 
 template <typename T>
 constexpr bool is_trivially_relocatable_v<std::weak_ptr<T>> = true;
+
+template <typename T>
+    requires(specializes(^^T, ^^std::pair))
+constexpr bool is_trivially_relocatable_v<T> = [] consteval {
+    auto arguments = std::meta::template_arguments_of(^^T);
+    return detail::reloc::via_trait(arguments[0]) && detail::reloc::via_trait(arguments[1]);
+}();
 
 namespace detail::reloc {
 

@@ -95,6 +95,7 @@ static_assert(is_trivially_relocatable_v<std::unique_ptr<int>>);
 static_assert(is_trivially_relocatable_v<Nested>);
 static_assert(is_trivially_relocatable_v<DerivedOwner>);
 static_assert(is_trivially_relocatable_v<std::shared_ptr<int>>);
+static_assert(is_trivially_relocatable_v<std::pair<int, std::unique_ptr<int>>>);
 
 // lambdas: capturing relocatable state is relocatable
 constexpr auto probe_lambda = [p = std::unique_ptr<int>{}, n = 7]() { return n + (p ? *p : 0); };
