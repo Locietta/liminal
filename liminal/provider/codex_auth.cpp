@@ -260,7 +260,7 @@ Task<void, Error> login_device(std::filesystem::path path, DeviceCodeNotice noti
         .now = [] { return std::chrono::steady_clock::now(); },
         .now_unix_milliseconds = [] { return unix_milliseconds(); },
     };
-    co_return co_await detail::login_device(attempts, notice, k_login_timeout).or_fail();
+    co_return co_await detail::login_device(attempts, std::move(notice), k_login_timeout).or_fail();
 }
 
 } // namespace liminal::codex

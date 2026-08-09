@@ -12,7 +12,7 @@
 
 namespace liminal::codex {
 
-using DeviceCodeNotice = std::function_ref<void(std::string_view verification_url, std::string_view user_code)>;
+using DeviceCodeNotice = std::move_only_function<void(std::string_view verification_url, std::string_view user_code)>;
 
 std::filesystem::path default_auth_file();
 
