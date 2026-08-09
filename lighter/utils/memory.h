@@ -249,6 +249,11 @@ struct StackTemporary {
         construct(storage_pointer(), std::forward<Args>(args)...);
     }
 
+    template <typename... Args>
+    constexpr explicit StackTemporary(std::in_place_t, Args &&...args) {
+        construct(storage_pointer(), std::forward<Args>(args)...);
+    }
+
     constexpr ~StackTemporary() { destroy(get_pointer()); }
 
     [[nodiscard]] constexpr const value_type &get() const noexcept { return *get_pointer(); }
