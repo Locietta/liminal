@@ -39,7 +39,20 @@ bool test_semantic_styles() {
     return has_role(document, "function", TokenRole::KEYWORD) && has_role(document, "greet", TokenRole::FUNCTION) &&
            has_role(document, "name", TokenRole::PROPERTY) && has_role(document, "$1", TokenRole::PROPERTY) &&
            has_role(document, "printf", TokenRole::FUNCTION) && has_role(document, "${name}", TokenRole::PARAMETER) &&
-           has_role(document, "\\n", TokenRole::ESCAPE) && has_role(document, "# comment", TokenRole::COMMENT);
+           has_role(document, "\\n", TokenRole::ESCAPE) && has_role(document, "# comment", TokenRole::COMMENT) &&
+           has_role(document, "world", TokenRole::IDENTIFIER);
+}
+
+bool test_command_invocations_and_options() {
+    Document document;
+    assign(document, "git diff --check && rg -n 'needle' . --glob '*.cpp' | head -n 5\n");
+    lex(document, {.begin = 0, .end = document.source.size()});
+    const usize rg = document.source.find("rg");
+    const usize head = document.source.find("head");
+    return has_role(document, "git", TokenRole::FUNCTION) && has_role(document, "--check", TokenRole::ATTRIBUTE) &&
+           has_role(document, "rg", TokenRole::FUNCTION, rg) && has_role(document, "-n", TokenRole::ATTRIBUTE, rg) &&
+           has_role(document, "--glob", TokenRole::ATTRIBUTE, rg) && has_role(document, "head", TokenRole::FUNCTION, head) &&
+           has_role(document, "-n", TokenRole::ATTRIBUTE, head);
 }
 
 bool test_streamed_quotes_and_heredoc() {
@@ -56,4 +69,4 @@ bool test_streamed_quotes_and_heredoc() {
 
 } // namespace
 
-int main() { return test_semantic_styles() && test_streamed_quotes_and_heredoc() ? 0 : 1; }
+int main() { return test_semantic_styles() && test_command_invocations_and_options() && test_streamed_quotes_and_heredoc() ? 0 : 1; }

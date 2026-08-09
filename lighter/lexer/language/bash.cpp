@@ -279,6 +279,8 @@ void paint_expansions(LexContext &context, usize begin, usize end) {
                 function_name = word == "function";
             } else if (command_position || k_builtins.contains(word)) {
                 style = Style::FUNCTION;
+            } else if (word.starts_with('-')) {
+                style = Style::OPTION;
             }
             paint(context, {.begin = token_begin, .end = position}, style);
             command_position = word == "then" || word == "do" || word == "else" || word == "elif";

@@ -36,6 +36,7 @@ struct ScriptingLexer {
         IDENTIFIER[[= token_role(TokenRole::IDENTIFIER)]],
         VARIABLE[[= token_role(TokenRole::PROPERTY)]],
         PARAMETER[[= token_role(TokenRole::PARAMETER)]],
+        OPTION[[= token_role(TokenRole::ATTRIBUTE)]],
         PROPERTY[[= token_role(TokenRole::PROPERTY)]],
         CONSTANT[[= token_role(TokenRole::CONSTANT)]],
         STRING[[= token_role(TokenRole::STRING)]],

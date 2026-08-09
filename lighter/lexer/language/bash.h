@@ -19,6 +19,7 @@ struct BashLexer {
         IDENTIFIER[[= token_role(TokenRole::IDENTIFIER)]],
         VARIABLE[[= token_role(TokenRole::PROPERTY)]],
         PARAMETER[[= token_role(TokenRole::PARAMETER)]],
+        OPTION[[= token_role(TokenRole::ATTRIBUTE)]],
         STRING[[= token_role(TokenRole::STRING)]],
         ESCAPE[[= token_role(TokenRole::ESCAPE)]],
         NUMBER[[= token_role(TokenRole::NUMBER)]],

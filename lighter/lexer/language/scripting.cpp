@@ -222,6 +222,12 @@ template <usize Size>
     return ascii_identifier_continue(value) || value == '_' || value == '?' || value == '!' || value == '\'';
 }
 
+[[nodiscard]] bool powershell_word_continue(char value) noexcept { return identifier_continue(value) || value == '-'; }
+
+[[nodiscard]] bool powershell_command_after(std::string_view word) noexcept {
+    return equal_ascii_ci(word, "in") || equal_ascii_ci(word, "return");
+}
+
 [[nodiscard]] bool operator_character(char value) noexcept { return std::string_view("{}[]()<>;:,.@?~!%^&*+-=/|\\#").contains(value); }
 
 struct LongDelimiter {
@@ -415,6 +421,8 @@ void paint_string_details(LexContext &context, usize begin, usize end, Dialect d
         return k_block_comment | 1;
     }
     Pending pending = Pending::NONE;
+    bool command_position = dialect == Dialect::POWERSHELL;
+    bool command_arguments = false;
     while (position < line_end) {
         const char current = context.source[position];
         if (ascii_space(current)) {
@@ -492,6 +500,7 @@ void paint_string_details(LexContext &context, usize begin, usize end, Dialect d
             while (position < line_end && identifier_continue(context.source[position])) ++position;
             if (position < line_end && context.source[position] == '}') ++position;
             paint(context, {.begin = token_begin, .end = position}, Style::VARIABLE);
+            if (dialect == Dialect::POWERSHELL && command_position) command_position = false;
             continue;
         }
         if (dialect == Dialect::JULIA && current == '@') {
@@ -507,10 +516,15 @@ void paint_string_details(LexContext &context, usize begin, usize end, Dialect d
             paint(context, {.begin = token_begin, .end = position}, Style::LABEL);
             continue;
         }
-        if (dialect == Dialect::POWERSHELL && current == '-' && position + 1 < line_end && identifier_start(context.source[position + 1])) {
+        const bool powershell_option =
+            dialect == Dialect::POWERSHELL && current == '-' && position + 1 < line_end &&
+            (identifier_start(context.source[position + 1]) ||
+             (context.source[position + 1] == '-' && position + 2 < line_end && identifier_start(context.source[position + 2])));
+        if (powershell_option) {
             const usize token_begin = position++;
-            while (position < line_end && identifier_continue(context.source[position])) ++position;
-            paint(context, {.begin = token_begin, .end = position}, Style::PARAMETER);
+            if (context.source[position] == '-') ++position;
+            while (position < line_end && powershell_word_continue(context.source[position])) ++position;
+            paint(context, {.begin = token_begin, .end = position}, command_arguments ? Style::OPTION : Style::OPERATOR);
             continue;
         }
         if (ascii_digit(current)) {
@@ -523,7 +537,9 @@ void paint_string_details(LexContext &context, usize begin, usize end, Dialect d
         }
         if (identifier_start(current)) {
             const usize token_begin = position++;
-            while (position < line_end && identifier_continue(context.source[position])) ++position;
+            while (position < line_end && (dialect == Dialect::POWERSHELL ? powershell_word_continue(context.source[position]) :
+                                                                            identifier_continue(context.source[position])))
+                ++position;
             const std::string_view word = context.source.substr(token_begin, position - token_begin);
             const usize next = skip_space(context.source, position, line_end);
             const usize previous = previous_non_space(context.source, token_begin, begin);
@@ -542,14 +558,30 @@ void paint_string_details(LexContext &context, usize begin, usize end, Dialect d
                 style = Style::FUNCTION;
             } else if (previous > begin && (context.source[previous - 1] == '.' || context.source[previous - 1] == '$')) {
                 style = Style::PROPERTY;
+            } else if (dialect == Dialect::POWERSHELL && command_position) {
+                style = Style::FUNCTION;
             }
             paint(context, {.begin = token_begin, .end = position}, style);
+            if (dialect == Dialect::POWERSHELL) {
+                if (style == Style::KEYWORD && powershell_command_after(word)) {
+                    command_position = true;
+                    command_arguments = false;
+                } else if (command_position) {
+                    command_arguments = style == Style::FUNCTION;
+                    command_position = false;
+                }
+            }
             continue;
         }
         if (operator_character(current)) {
             const usize token_begin = position++;
             while (position < line_end && operator_character(context.source[position])) ++position;
             paint(context, {.begin = token_begin, .end = position}, Style::OPERATOR);
+            if (dialect == Dialect::POWERSHELL) {
+                const auto value = context.source.substr(token_begin, position - token_begin);
+                command_position = value == "=" || value.find_first_of("|;&{(") != std::string_view::npos;
+                if (command_position) command_arguments = false;
+            }
             continue;
         }
         ++position;

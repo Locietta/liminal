@@ -74,7 +74,7 @@ bool test_declarations_and_sigils() {
     return has_role(ruby, "Demo", TokenRole::MODULE) && has_role(ruby, "Counter", TokenRole::TYPE) &&
            has_role(ruby, "add", TokenRole::FUNCTION) && has_role(ruby, "@total", TokenRole::PROPERTY) &&
            has_role(powershell, "Get", TokenRole::FUNCTION) && has_role(powershell, "$Name", TokenRole::PROPERTY) &&
-           has_role(powershell, "-InputObject", TokenRole::PARAMETER);
+           has_role(powershell, "-InputObject", TokenRole::ATTRIBUTE);
 }
 
 bool test_streamed_multiline_constructs() {
@@ -100,6 +100,27 @@ bool test_streamed_multiline_constructs() {
            has_role(powershell, "return", TokenRole::KEYWORD);
 }
 
+bool test_powershell_command_invocations() {
+    Document document;
+    assign(document, "git diff --check; Write-Output 'done'\n"
+                     "rg -n \"needle\" . --glob '*.cpp' | Select-Object -First 10\n"
+                     "$content = Get-Content README.md\n");
+    lex(document, ScriptingDialect::POWERSHELL, {.begin = 0, .end = document.source.size()});
+    const usize second_line = document.source.find("rg");
+    const usize assignment = document.source.find("Get-Content");
+    return has_role(document, "git", TokenRole::FUNCTION) && has_role(document, "--check", TokenRole::ATTRIBUTE) &&
+           has_role(document, "Write-Output", TokenRole::FUNCTION) && has_role(document, "rg", TokenRole::FUNCTION, second_line) &&
+           has_role(document, "-n", TokenRole::ATTRIBUTE, second_line) && has_role(document, "--glob", TokenRole::ATTRIBUTE, second_line) &&
+           has_role(document, "Select-Object", TokenRole::FUNCTION, second_line) &&
+           has_role(document, "-First", TokenRole::ATTRIBUTE, second_line) &&
+           has_role(document, "Get-Content", TokenRole::FUNCTION, assignment);
+}
+
 } // namespace
 
-int main() { return test_all_keyword_profiles() && test_declarations_and_sigils() && test_streamed_multiline_constructs() ? 0 : 1; }
+int main() {
+    return test_all_keyword_profiles() && test_declarations_and_sigils() && test_streamed_multiline_constructs() &&
+                   test_powershell_command_invocations() ?
+               0 :
+               1;
+}
