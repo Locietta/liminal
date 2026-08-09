@@ -345,9 +345,9 @@ diff --git a/file.cpp b/file.cpp
     tui::SessionScreen tools([&now] { return now; });
     tools.apply(ToolStarted{.call_id = "one", .name = "read_file", .description = "Read README.md"});
 #ifdef _WIN32
-    const auto command = std::string("foreach ($item in Get-ChildItem) { Write-Output $item }");
+    const auto command = std::string(R"(rg -n "needle" . --glob '!build/**' | Select-Object -First 10)");
 #else
-    const auto command = std::string("for file in \"$HOME\"/*; do printf '%s\\n' \"$file\"; done");
+    const auto command = std::string(R"(rg -n "needle" . --glob '!build/**' | head -n 10)");
 #endif
     tools.apply(ToolStarted{.call_id = "two", .name = "run_command", .command = command});
     tools.apply(ToolCompleted{
@@ -368,11 +368,21 @@ diff --git a/file.cpp b/file.cpp
     auto command_rows = tools.layout_block(tools.transcript.blocks[1]);
     require(layout_rows_text(command_rows).contains("• Running " + command),
             "a running shell tool must render its command inline after the Running state");
+    require(layout_text_has_style(command_rows, "rg", tui::Style::CODE_FUNCTION),
+            "shell executables must be highlighted in command position");
+    require(layout_text_has_style(command_rows, "-n", tui::Style::CODE_PROPERTY) &&
+                layout_text_has_style(command_rows, "--glob", tui::Style::CODE_PROPERTY),
+            "shell options must be visually distinct from ordinary arguments");
+    require(layout_text_has_style(command_rows, "needle", tui::Style::CODE_STRING) &&
+                layout_text_has_style(command_rows, "|", tui::Style::CODE_OPERATOR),
+            "shell strings and pipeline operators must retain their semantic styles");
 #ifdef _WIN32
-    require(layout_text_has_style(command_rows, "foreach", tui::Style::CODE_KEYWORD),
-            "Windows shell commands must use the PowerShell lexer");
+    require(layout_text_has_style(command_rows, "Select-Object", tui::Style::CODE_FUNCTION) &&
+                layout_text_has_style(command_rows, "-First", tui::Style::CODE_PROPERTY),
+            "Windows command pipelines must use PowerShell command and option semantics");
 #else
-    require(layout_text_has_style(command_rows, "for", tui::Style::CODE_KEYWORD), "Linux shell commands must use the Bash lexer");
+    require(layout_text_has_style(command_rows, "head", tui::Style::CODE_FUNCTION),
+            "Linux command pipelines must use Bash command semantics");
 #endif
     now += std::chrono::seconds(9);
     require(!layout_rows_text(tools.layout_block(tools.transcript.blocks[1])).contains("(9s)"),
