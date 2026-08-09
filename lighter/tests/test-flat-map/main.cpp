@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <concepts>
 #include <cstdlib>
 #include <iostream>
@@ -8,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <lighter/types.hpp>
 #include <lighter/utils/flat_map.h>
@@ -15,19 +17,19 @@
 
 namespace {
 
-lighter::usize live_allocations = 0;
+std::atomic<lighter::usize> live_allocations = 0;
 
 } // namespace
 
 void *operator new(std::size_t size) {
-    ++live_allocations;
+    live_allocations.fetch_add(1, std::memory_order_relaxed);
     if (void *allocation = std::malloc(size)) return allocation;
-    --live_allocations;
+    live_allocations.fetch_sub(1, std::memory_order_relaxed);
     throw std::bad_alloc();
 }
 
 void operator delete(void *allocation) noexcept {
-    if (allocation != nullptr) --live_allocations;
+    if (allocation != nullptr) live_allocations.fetch_sub(1, std::memory_order_relaxed);
     std::free(allocation);
 }
 
@@ -138,6 +140,15 @@ bool grows_without_a_fixed_capacity() {
     return true;
 }
 
+bool bulk_constructs_unsorted_ranges() {
+    const std::vector<std::pair<int, std::string>> values{{4, "four"}, {1, "first"}, {3, "three"}, {1, "second"}, {2, "two"}};
+    const FlatMap<int, std::string> map(values);
+
+    if (map.size() != 4 || map.capacity() != map.size()) return false;
+    if (map.at(1) != "first" || map.at(2) != "two" || map.at(3) != "three" || map.at(4) != "four") return false;
+    return std::ranges::is_sorted(map, {}, [](const auto &entry) { return entry.first; });
+}
+
 bool uses_parallel_storage() {
     FlatMap<int, std::string> map{{{3, "three"}, {1, "one"}, {2, "two"}}};
     usize index = 0;
@@ -214,7 +225,7 @@ bool preserves_storage_when_copy_growth_fails() {
 }
 
 bool releases_both_allocations() {
-    const usize allocations_before = live_allocations;
+    const usize allocations_before = live_allocations.load(std::memory_order_relaxed);
     {
         FlatMap<int, std::unique_ptr<int>> map;
         for (int value = 0; value < 128; ++value) map.try_emplace(value, std::make_unique<int>(value));
@@ -223,7 +234,7 @@ bool releases_both_allocations() {
         map.shrink_to_fit();
         map.clear();
     }
-    return live_allocations == allocations_before;
+    return live_allocations.load(std::memory_order_relaxed) == allocations_before;
 }
 
 bool reports_invalid_access() {
@@ -239,9 +250,22 @@ bool reports_invalid_access() {
 } // namespace
 
 int main() {
-    if (modifies_and_erases() && grows_without_a_fixed_capacity() && uses_parallel_storage() && owns_and_relocates_entries() &&
-        copies_and_moves_storage() && preserves_storage_when_copy_growth_fails() && releases_both_allocations() && reports_invalid_access())
-        return 0;
-    std::cerr << "FlatMap test failed\n";
-    return 1;
+#define RUN_TEST(test)                  \
+    if (!(test())) {                    \
+        std::cerr << #test " failed\n"; \
+        return 1;                       \
+    }
+
+    RUN_TEST(modifies_and_erases)
+    RUN_TEST(grows_without_a_fixed_capacity)
+    RUN_TEST(bulk_constructs_unsorted_ranges)
+    RUN_TEST(uses_parallel_storage)
+    RUN_TEST(owns_and_relocates_entries)
+    RUN_TEST(copies_and_moves_storage)
+    RUN_TEST(preserves_storage_when_copy_growth_fails)
+    RUN_TEST(releases_both_allocations)
+    RUN_TEST(reports_invalid_access)
+
+#undef RUN_TEST
+    return 0;
 }

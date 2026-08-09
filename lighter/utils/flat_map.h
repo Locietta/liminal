@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <lighter/types.hpp>
 #include <lighter/utils/memory.h>
@@ -133,8 +134,14 @@ struct FlatMap {
     constexpr explicit FlatMap(const key_compare &compare) : compare_(compare) {}
 
     constexpr FlatMap(std::initializer_list<value_type> values, const key_compare &compare = {}) : compare_(compare) {
-        reserve(values.size());
-        for (const value_type &value : values) insert(value);
+        construct_from_unsorted_range(values);
+    }
+
+    template <std::ranges::input_range Range>
+        requires(!std::same_as<std::remove_cvref_t<Range>, FlatMap> &&
+                 std::constructible_from<value_type, std::ranges::range_reference_t<Range>>)
+    constexpr explicit FlatMap(Range &&values, const key_compare &compare = {}) : compare_(compare) {
+        construct_from_unsorted_range(std::forward<Range>(values));
     }
 
     constexpr FlatMap(const FlatMap &other)
@@ -361,6 +368,41 @@ private:
         U *suffix_begin;
         U *suffix_end;
     };
+
+    template <std::ranges::input_range Range>
+    constexpr void construct_from_unsorted_range(Range &&values) {
+        std::vector<value_type> sorted;
+        if constexpr (std::ranges::sized_range<Range>) sorted.reserve(std::ranges::size(values));
+        for (auto &&value : values) sorted.emplace_back(std::forward<decltype(value)>(value));
+
+        std::stable_sort(sorted.begin(), sorted.end(), [this](const value_type &left, const value_type &right) {
+            return std::invoke(compare_, left.first, right.first);
+        });
+        const auto duplicate_begin = std::ranges::unique(sorted, [this](const value_type &left, const value_type &right) {
+                                         return equivalent(left.first, right.first);
+                                     }).begin();
+        sorted.erase(duplicate_begin, sorted.end());
+        if (sorted.empty()) return;
+        if (sorted.size() > max_size()) LIGHTER_THROW(std::length_error("FlatMap capacity overflow"));
+
+        mem::AllocationGuard<key_type> key_guard(sorted.size());
+        mem::AllocationGuard<mapped_type> mapped_guard(sorted.size());
+        key_type *key_out = key_guard.data();
+        mapped_type *mapped_out = mapped_guard.data();
+        for (value_type &value : sorted) {
+            mem::construct(key_out, std::move_if_noexcept(value.first));
+            key_guard.mark(++key_out);
+        }
+        for (value_type &value : sorted) {
+            mem::construct(mapped_out, std::move_if_noexcept(value.second));
+            mapped_guard.mark(++mapped_out);
+        }
+
+        keys_ = key_guard.release();
+        mapped_ = mapped_guard.release();
+        size_ = sorted.size();
+        capacity_ = sorted.size();
+    }
 
     [[nodiscard]] constexpr auto keys() noexcept { return range_from(keys_, size_); }
     [[nodiscard]] constexpr auto keys() const noexcept { return range_from(keys_, size_); }
