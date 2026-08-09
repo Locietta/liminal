@@ -306,6 +306,10 @@ private:
     value_type *m_data;
 };
 
+/// Owns an allocation and its constructed prefix until released.
+///
+/// Allocation uses a temporary default-constructed allocator, so Alloc must be
+/// stateless and interchangeable across instances.
 template <typename T, typename Alloc = std::allocator<T>>
 struct AllocationGuard {
     using value_type = T;
