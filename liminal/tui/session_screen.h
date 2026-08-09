@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -16,6 +18,8 @@
 namespace liminal::tui {
 
 using namespace lighter::types;
+
+using MonotonicNow = std::copyable_function<std::chrono::steady_clock::time_point() const>;
 
 struct Composer {
     void insert(std::string_view value);
@@ -85,6 +89,8 @@ struct CachedBlockLayout {
     BlockState state = BlockState::COMPLETED;
     std::string text;
     std::string detail;
+    std::string tool_name;
+    std::string command;
     std::vector<LayoutRow> rows;
 };
 
@@ -101,6 +107,8 @@ enum struct SessionState {
 /// Application-owned TUI state. Transcript and composer source data are
 /// independent of terminal width; Frame is a disposable projection.
 struct SessionScreen {
+    explicit SessionScreen(MonotonicNow now = {});
+
     void resize(lighter::TerminalSize next) noexcept;
     void set_model(std::string_view name, const std::optional<std::string> &effort);
     void apply(const Event &event);
@@ -135,6 +143,7 @@ struct SessionScreen {
     i32 viewport_rows() const;
     std::vector<LayoutRow> layout_block(const Block &block) const;
     LayoutDiagnostics layout_diagnostics() const noexcept;
+    bool has_elapsed_running_command() const;
 
     lighter::TerminalSize size{80, 24};
     Transcript transcript;
@@ -151,6 +160,8 @@ struct SessionScreen {
 
 private:
     void mark_editing() noexcept;
+
+    MonotonicNow monotonic_now;
 };
 
 } // namespace liminal::tui

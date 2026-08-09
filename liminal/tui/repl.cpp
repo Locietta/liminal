@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <deque>
@@ -40,6 +41,8 @@ using lighter::usize;
 using lighter::WhenAny;
 
 namespace {
+
+using namespace std::chrono_literals;
 
 struct TurnControl {
     CancellationSource *active_turn = nullptr;
@@ -265,6 +268,22 @@ Task<i32> render_monitor(lighter::Event &requested, ConsoleRenderer &renderer, T
         requested.reset();
         if (auto error = renderer.flush()) {
             failure.record("cannot render coalesced frame", error, control);
+            co_return 1;
+        }
+    }
+}
+
+Task<i32> command_elapsed_monitor(ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure) {
+    auto timer = lighter::Timer::create();
+    timer.start(1s, 1s);
+    while (true) {
+        auto tick = co_await timer.wait();
+        if (!tick) {
+            failure.record("cannot refresh command elapsed time", tick.error(), control);
+            co_return 1;
+        }
+        if (auto error = renderer.refresh_elapsed_commands()) {
+            failure.record("cannot render command elapsed time", error, control);
             co_return 1;
         }
     }
@@ -550,6 +569,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
                                           terminal_input_loop(terminal, renderer, prompts, editor_requests, control, failure),
                                           render_monitor(render_requested, renderer, control, failure),
                                           external_editor_loop(editor_requests, terminal, renderer, control, failure),
+                                          command_elapsed_monitor(renderer, control, failure),
                                           suspend_monitor(suspend_controls, terminal, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
@@ -557,17 +577,20 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             if (raced.index() == 3) exit_code = std::get<3>(raced);
             if (raced.index() == 4) exit_code = std::get<4>(raced);
             if (raced.index() == 5) exit_code = std::get<5>(raced);
+            if (raced.index() == 6) exit_code = std::get<6>(raced);
 #else
             auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
                                           signal_monitor(interrupts, renderer, control, failure),
                                           terminal_input_loop(terminal, renderer, prompts, editor_requests, control, failure),
                                           render_monitor(render_requested, renderer, control, failure),
-                                          external_editor_loop(editor_requests, terminal, renderer, control, failure));
+                                          external_editor_loop(editor_requests, terminal, renderer, control, failure),
+                                          command_elapsed_monitor(renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
             if (raced.index() == 3) exit_code = std::get<3>(raced);
             if (raced.index() == 4) exit_code = std::get<4>(raced);
+            if (raced.index() == 5) exit_code = std::get<5>(raced);
 #endif
             renderer.set_redraw_scheduler({});
         } else {

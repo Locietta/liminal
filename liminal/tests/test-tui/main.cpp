@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -64,6 +63,32 @@ bool text_has_style(const std::vector<tui::StyledRow> &rows, std::string_view te
     return false;
 }
 
+std::string layout_rows_text(const std::vector<tui::LayoutRow> &rows) {
+    std::string text;
+    for (const auto &row : rows) {
+        if (!text.empty()) text += '\n';
+        if (row.spans.empty()) {
+            text += row.text;
+        } else {
+            for (const auto &span : row.spans) text += span.text;
+        }
+    }
+    return text;
+}
+
+bool layout_text_has_style(const std::vector<tui::LayoutRow> &rows, std::string_view text, tui::Style style) {
+    for (const auto &row : rows) {
+        if (row.spans.empty()) {
+            if (row.style == style && row.text.contains(text)) return true;
+            continue;
+        }
+        for (const auto &span : row.spans) {
+            if (span.style == style && span.text.contains(text)) return true;
+        }
+    }
+    return false;
+}
+
 void check_surface_cells_and_encoding() {
     tui::Surface surface(4, 1);
     require(surface.write(0, 0, "A中B") == 4, "surface must account for wide terminal cells");
@@ -89,9 +114,20 @@ void check_surface_cells_and_encoding() {
     require(encoded.ends_with("\x1b[1;4H\x1b[?25h"), "frame must restore the requested visible cursor");
     require(tui::encode_frame_diff(&frame, frame).empty(), "an unchanged frame must not emit terminal operations");
 
-    tui::Frame palette{.surface = tui::Surface(1, 1)};
-    palette.surface.write(0, 0, "K", tui::Style::CODE_KEYWORD);
-    require(tui::encode_frame(palette).contains("\x1b[95mK"), "code keywords must use bright ANSI magenta");
+    tui::Frame palette{.surface = tui::Surface(10, 1)};
+    constexpr tui::Style syntax_styles[] = {
+        tui::Style::CODE,          tui::Style::CODE_KEYWORD,  tui::Style::CODE_PREPROCESSOR, tui::Style::CODE_TYPE,
+        tui::Style::CODE_FUNCTION, tui::Style::CODE_STRING,   tui::Style::CODE_COMMENT,      tui::Style::CODE_NUMBER,
+        tui::Style::CODE_CONSTANT, tui::Style::CODE_PROPERTY,
+    };
+    for (usize index = 0; index < std::size(syntax_styles); ++index) {
+        palette.surface.write(0, static_cast<i32>(index), "K", syntax_styles[index]);
+    }
+    const auto encoded_palette = tui::encode_frame(palette);
+    require(encoded_palette.contains("\x1b[1;38;2;240;200;255mK"), "code keywords must use bold, high-luminance lavender");
+    require(encoded_palette.contains("\x1b[1;38;2;255;210;138mK"), "code preprocessors must use distinct bold, high-luminance gold");
+    require(!encoded_palette.contains("\x1b[2m") && !encoded_palette.contains("\x1b[90m"),
+            "syntax highlighting must not dim text or use a dark comment color");
 
     auto changed = frame;
     changed.surface.write(0, 3, "C");
@@ -249,6 +285,9 @@ diff --git a/file.cpp b/file.cpp
                 text_has_style(wide, "MAX_RETRIES", tui::Style::CODE_CONSTANT) &&
                 text_has_style(wide, "value", tui::Style::CODE_PROPERTY) && text_has_style(wide, "+", tui::Style::CODE_OPERATOR),
             "recognized fenced languages must distinguish richer semantic token roles");
+    const auto preprocessor = tui::layout_rich_text("```cpp\n#include <vector>\n```", 50);
+    require(text_has_style(preprocessor, "#include", tui::Style::CODE_PREPROCESSOR),
+            "C++ preprocessor directives must use the dedicated bright syntax style");
     require(has_style(wide, tui::Style::DIFF_ADDITION) && has_style(wide, tui::Style::DIFF_DELETION) &&
                 has_style(wide, tui::Style::DIFF_HUNK),
             "unified diff markers must receive distinct semantic styles");
@@ -302,9 +341,15 @@ diff --git a/file.cpp b/file.cpp
     require(diagnostics.cache_hits > 0 && diagnostics.cached_blocks == 1,
             "a completed rich block must enter the existing stable layout cache");
 
-    tui::SessionScreen tools;
+    auto now = std::chrono::steady_clock::time_point{};
+    tui::SessionScreen tools([&now] { return now; });
     tools.apply(ToolStarted{.call_id = "one", .name = "read_file", .description = "Read README.md"});
-    tools.apply(ToolStarted{.call_id = "two", .name = "run_tests", .description = "Run command\n  $ pixi run test-unit"});
+#ifdef _WIN32
+    const auto command = std::string("foreach ($item in Get-ChildItem) { Write-Output $item }");
+#else
+    const auto command = std::string("for file in \"$HOME\"/*; do printf '%s\\n' \"$file\"; done");
+#endif
+    tools.apply(ToolStarted{.call_id = "two", .name = "run_command", .command = command});
     tools.apply(ToolCompleted{
         .call_id = "one",
         .name = "read_file",
@@ -319,18 +364,36 @@ diff --git a/file.cpp b/file.cpp
             "completed tools must show the concrete action and bounded output summary");
     require(read_rows.size() == 2 && read_rows[0].style == tui::Style::NORMAL && read_rows[1].style == tui::Style::MUTED,
             "tool actions and targets must stay bright while completion detail is muted");
+
+    auto command_rows = tools.layout_block(tools.transcript.blocks[1]);
+    require(layout_rows_text(command_rows).contains("• Running " + command),
+            "a running shell tool must render its command inline after the Running state");
+#ifdef _WIN32
+    require(layout_text_has_style(command_rows, "foreach", tui::Style::CODE_KEYWORD),
+            "Windows shell commands must use the PowerShell lexer");
+#else
+    require(layout_text_has_style(command_rows, "for", tui::Style::CODE_KEYWORD), "Linux shell commands must use the Bash lexer");
+#endif
+    now += std::chrono::seconds(9);
+    require(!layout_rows_text(tools.layout_block(tools.transcript.blocks[1])).contains("(9s)"),
+            "short-running commands must not show elapsed time");
+    now += std::chrono::seconds(2);
+    require(tools.has_elapsed_running_command() && layout_rows_text(tools.layout_block(tools.transcript.blocks[1])).contains("(11s)"),
+            "commands running beyond ten seconds must show elapsed time");
+
     tools.apply(ToolCompleted{
         .call_id = "two",
-        .name = "run_tests",
-        .description = "Run command\n  $ pixi run test-unit",
+        .name = "run_command",
+        .command = command,
         .summary = "exit 0 · stdout 2 lines\nstdout:\n2 tests passed",
     });
-    const auto command_rows = tools.layout_block(tools.transcript.blocks[1]);
-    require(command_rows.size() == 5 && command_rows[0].style == tui::Style::NORMAL && command_rows[1].style == tui::Style::NORMAL,
-            "the run-command label and exact command must use the bright primary style");
-    require(
-        std::all_of(command_rows.begin() + 2, command_rows.end(), [](const tui::LayoutRow &row) { return row.style == tui::Style::MUTED; }),
-        "command status and output preview rows must use the dim secondary style");
+    command_rows = tools.layout_block(tools.transcript.blocks[1]);
+    const auto completed_command = layout_rows_text(command_rows);
+    require(completed_command.contains("✓ Ran " + command) && !completed_command.contains("(11s)"),
+            "a completed shell tool must switch to Ran and stop showing live elapsed time");
+    require(layout_text_has_style(command_rows, "exit 0", tui::Style::MUTED) &&
+                layout_text_has_style(command_rows, "2 tests passed", tui::Style::MUTED),
+            "command status and output preview rows must use the dim secondary style");
     require(tools.state == tui::SessionState::STREAMING, "tool state may settle only after the final concurrent tool completes");
 }
 
@@ -429,6 +492,25 @@ void check_headless_virtual_time_and_snapshots() {
             "headless snapshots must expose the real transcript reducer state");
     require(!snapshot.ansi_operations.empty() && !snapshot.cells.empty(), "headless snapshots must expose ANSI operations and cells");
     require(session.inspect().layout == snapshot.layout, "inspection must not mutate layout diagnostics");
+
+    tui::HeadlessSession command_session(80, 8);
+    require(
+        command_session.apply({.type = "tool_started", .call_id = "command", .name = "run_command", .command = "echo ready"}).has_value(),
+        "headless command start must apply");
+    require(command_session.apply({.type = "advance_time", .milliseconds = 9'999}).has_value(),
+            "headless command time must advance below the elapsed threshold");
+    auto command_snapshot = command_session.inspect();
+    std::string command_text;
+    for (const auto &line : command_snapshot.visible_text) command_text += line + "\n";
+    require(command_snapshot.blocks[0].command == "echo ready" && !command_text.contains("(9s)"),
+            "headless snapshots must retain command data without early elapsed copy");
+    require(command_session.apply({.type = "advance_time", .milliseconds = 1}).has_value(),
+            "headless command time must cross the elapsed threshold");
+    command_snapshot = command_session.inspect();
+    command_text.clear();
+    for (const auto &line : command_snapshot.visible_text) command_text += line + "\n";
+    require(command_text.contains("• Running echo ready (10s)"),
+            "virtual time must drive the same elapsed command refresh as the interactive timer");
 }
 
 void check_headless_resize_and_markup_stress() {

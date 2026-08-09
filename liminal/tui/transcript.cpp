@@ -1,13 +1,22 @@
 #include "transcript.h"
 
+#include <type_traits>
 #include <utility>
 
 #include <lighter/utils/panic.h>
 
 namespace liminal::tui {
 
-void Transcript::apply(const Event &event) {
-    std::visit([this](const auto &value) { apply_one(value); }, event);
+void Transcript::apply(const Event &event, std::chrono::steady_clock::time_point now) {
+    std::visit(
+        [this, now](const auto &value) {
+            if constexpr (std::is_same_v<std::remove_cvref_t<decltype(value)>, ToolStarted>) {
+                apply_one(value, now);
+            } else {
+                apply_one(value);
+            }
+        },
+        event);
 }
 
 void Transcript::apply_one(const PromptSubmitted &event) {
@@ -24,13 +33,16 @@ void Transcript::apply_one(const AssistantTextDelta &event) {
 
 void Transcript::apply_one(const AssistantSegmentCompleted &) { finish_streaming(BlockState::COMPLETED); }
 
-void Transcript::apply_one(const ToolStarted &event) {
+void Transcript::apply_one(const ToolStarted &event, std::chrono::steady_clock::time_point now) {
     finish_streaming(BlockState::COMPLETED);
     append({
         .kind = BlockKind::TOOL,
         .state = BlockState::RUNNING,
         .text = event.description.empty() ? event.name : event.description,
+        .tool_name = event.name,
+        .command = event.command,
         .call_id = event.call_id,
+        .started_at = now,
     });
 }
 
@@ -40,6 +52,7 @@ void Transcript::apply_one(const ToolCompleted &event) {
             lighter::check(block->state == BlockState::RUNNING, "completed tool block was not running");
             block->state = event.is_error ? BlockState::FAILED : BlockState::COMPLETED;
             if (!event.description.empty()) block->text = event.description;
+            if (!event.command.empty()) block->command = event.command;
             block->detail = event.summary;
             return;
         }

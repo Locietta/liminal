@@ -22,8 +22,8 @@ constexpr usize k_max_highlight_line_bytes = 4 * 1024;
         case TokenRole::PARAMETER: return Style::NORMAL;
         case TokenRole::COMMENT:
         case TokenRole::DOCUMENTATION: return Style::CODE_COMMENT;
-        case TokenRole::KEYWORD:
-        case TokenRole::PREPROCESSOR: return Style::CODE_KEYWORD;
+        case TokenRole::KEYWORD: return Style::CODE_KEYWORD;
+        case TokenRole::PREPROCESSOR: return Style::CODE_PREPROCESSOR;
         case TokenRole::TYPE:
         case TokenRole::MODULE: return Style::CODE_TYPE;
         case TokenRole::FUNCTION: return Style::CODE_FUNCTION;

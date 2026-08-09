@@ -47,6 +47,7 @@ struct ConsoleRenderer {
     lighter::Error scroll(i32 rows);
     lighter::Error page(i32 direction);
     lighter::Error resize(lighter::TerminalSize size);
+    lighter::Error refresh_elapsed_commands();
     lighter::Error redraw();
     lighter::Error flush();
     void pause_rendering() noexcept;

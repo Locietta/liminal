@@ -27,10 +27,12 @@ lighter::Error render_plain(const Event &event) {
             if constexpr (std::same_as<T, AssistantTextDelta>) {
                 return write_stdout(plain_text(value.text));
             } else if constexpr (std::same_as<T, ToolStarted>) {
+                if (!value.command.empty()) return write_stdout("\n[tool running] Running " + plain_text(value.command) + "\n");
                 const auto description = value.description.empty() ? value.name : value.description;
                 return write_stdout("\n[tool running] " + plain_text(description) + "\n");
             } else if constexpr (std::same_as<T, ToolCompleted>) {
-                const auto description = value.description.empty() ? value.name : value.description;
+                const auto description =
+                    !value.command.empty() ? "Ran " + value.command : (value.description.empty() ? value.name : value.description);
                 auto output = std::string("[tool ") + (value.is_error ? "failed] " : "completed] ") + plain_text(description);
                 if (!value.summary.empty()) output += "\n  " + plain_text(value.summary);
                 return write_stdout(output + "\n");
@@ -209,6 +211,11 @@ lighter::Error ConsoleRenderer::page(i32 direction) {
 
 lighter::Error ConsoleRenderer::resize(lighter::TerminalSize size) {
     screen.resize(size);
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::refresh_elapsed_commands() {
+    if (!screen.has_elapsed_running_command()) return {};
     return redraw();
 }
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -9,6 +10,7 @@
 #include <vector>
 
 #include <liminal/tui/rich_text.h>
+#include <liminal/tui/syntax_highlight.h>
 
 namespace liminal::tui {
 
@@ -29,6 +31,119 @@ struct BlockPresentation {
     std::string text;
     usize muted_from = std::string::npos;
 };
+
+using StyledLine = std::vector<StyledSpan>;
+
+constexpr auto k_command_elapsed_threshold = std::chrono::seconds(10);
+
+void append_span(StyledLine &spans, std::string_view text, Style style) {
+    if (text.empty()) return;
+    if (!spans.empty() && spans.back().style == style) {
+        spans.back().text += text;
+    } else {
+        spans.push_back({.text = std::string(text), .style = style});
+    }
+}
+
+std::string_view shell_language() noexcept {
+#ifdef _WIN32
+    return "powershell";
+#else
+    return "bash";
+#endif
+}
+
+std::string elapsed_text(std::chrono::seconds elapsed) {
+    const auto total = elapsed.count();
+    const auto hours = total / 3600;
+    const auto minutes = total % 3600 / 60;
+    const auto seconds = total % 60;
+    std::string result;
+    if (hours > 0) result += std::to_string(hours) + "h ";
+    if (minutes > 0 || hours > 0) result += std::to_string(minutes) + "m ";
+    return result + std::to_string(seconds) + "s";
+}
+
+std::vector<std::string_view> lines(std::string_view text) {
+    std::vector<std::string_view> result;
+    usize offset = 0;
+    while (true) {
+        const auto end = text.find('\n', offset);
+        auto line = text.substr(offset, end == std::string_view::npos ? text.size() - offset : end - offset);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        result.push_back(line);
+        if (end == std::string_view::npos) break;
+        offset = end + 1;
+    }
+    return result;
+}
+
+std::vector<LayoutRow> wrap_styled_lines(u64 block_id, const std::vector<StyledLine> &logical_lines, i32 columns) {
+    std::vector<LayoutRow> rows;
+    const auto width = std::max(columns, 1);
+    usize source_offset = 0;
+    for (const auto &line : logical_lines) {
+        LayoutRow current{.block_id = block_id, .source_offset = source_offset};
+        i32 used = 0;
+        usize consumed = 0;
+        for (const auto &span : line) {
+            usize offset = 0;
+            while (offset < span.text.size()) {
+                const auto grapheme = next_grapheme(span.text, offset);
+                const auto encoded = std::string_view(span.text).substr(offset, grapheme.size);
+                const auto cells = std::max(grapheme.width, 0);
+                if (cells > 0 && used > 0 && used + cells > width) {
+                    rows.push_back(std::move(current));
+                    current = {.block_id = block_id, .source_offset = source_offset + consumed};
+                    used = 0;
+                }
+                append_span(current.spans, encoded, span.style);
+                offset += grapheme.size;
+                consumed += grapheme.size;
+                used += cells;
+            }
+        }
+        rows.push_back(std::move(current));
+        source_offset += consumed + 1;
+    }
+    return rows;
+}
+
+std::vector<LayoutRow> wrap_command_block(const Block &block, i32 columns, std::chrono::steady_clock::time_point now) {
+    auto command_lines = lines(block.command);
+    const auto detail_lines = lines(block.detail);
+    std::vector<StyledLine> logical_lines;
+    logical_lines.reserve(command_lines.size() + detail_lines.size());
+    CodeHighlighter highlighter(shell_language());
+    const auto prefix_style = block.state == BlockState::FAILED ? Style::FAILURE : Style::NORMAL;
+
+    std::string_view prefix = "✓ Ran ";
+    if (block.state == BlockState::RUNNING) prefix = "• Running ";
+    if (block.state == BlockState::CANCELLED) prefix = "– Cancelled ";
+    if (block.state == BlockState::FAILED) prefix = "✗ Ran ";
+
+    for (usize index = 0; index < command_lines.size(); ++index) {
+        StyledLine line;
+        append_span(line, index == 0 ? prefix : "  ", prefix_style);
+        auto highlighted = highlighter.highlight_line(command_lines[index]);
+        line.insert(line.end(), std::make_move_iterator(highlighted.begin()), std::make_move_iterator(highlighted.end()));
+        if (index + 1 == command_lines.size() && block.state == BlockState::RUNNING && now >= block.started_at) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - block.started_at);
+            if (elapsed >= k_command_elapsed_threshold) append_span(line, " (" + elapsed_text(elapsed) + ")", Style::MUTED);
+        }
+        logical_lines.push_back(std::move(line));
+    }
+
+    if (!block.detail.empty()) {
+        for (usize index = 0; index < detail_lines.size(); ++index) {
+            StyledLine line;
+            append_span(line, index == 0 ? "  └ " : "    ", Style::MUTED);
+            append_span(line, detail_lines[index], Style::MUTED);
+            logical_lines.push_back(std::move(line));
+        }
+    }
+    return wrap_styled_lines(block.id, logical_lines, columns);
+}
 
 BlockPresentation present_block(const Block &block) {
     switch (block.kind) {
@@ -56,7 +171,7 @@ BlockPresentation present_block(const Block &block) {
     return {.text = block.text};
 }
 
-std::vector<LayoutRow> wrap_block(const Block &block, i32 columns) {
+std::vector<LayoutRow> wrap_block(const Block &block, i32 columns, std::chrono::steady_clock::time_point now) {
     if (block.kind == BlockKind::ASSISTANT) {
         auto rich = layout_rich_text(block.text, columns);
         std::vector<LayoutRow> rows;
@@ -66,6 +181,7 @@ std::vector<LayoutRow> wrap_block(const Block &block, i32 columns) {
         }
         return rows;
     }
+    if (block.kind == BlockKind::TOOL && !block.command.empty()) return wrap_command_block(block, columns, now);
 
     std::vector<LayoutRow> rows;
     const auto presentation = present_block(block);
@@ -506,6 +622,10 @@ void PromptHistory::edited() noexcept {
     draft.clear();
 }
 
+SessionScreen::SessionScreen(MonotonicNow now) : monotonic_now(std::move(now)) {
+    if (!monotonic_now) monotonic_now = [] { return std::chrono::steady_clock::now(); };
+}
+
 void SessionScreen::resize(lighter::TerminalSize next) noexcept {
     size.columns = std::max(next.columns, 1);
     size.rows = std::max(next.rows, 1);
@@ -518,9 +638,9 @@ void SessionScreen::set_model(std::string_view name, const std::optional<std::st
 
 void SessionScreen::apply(const Event &event) {
     if (const auto *notice = std::get_if<SessionNotice>(&event)) {
-        transcript.apply(SessionNotice{.text = trim_notice(notice->text)});
+        transcript.apply(SessionNotice{.text = trim_notice(notice->text)}, monotonic_now());
     } else {
-        transcript.apply(event);
+        transcript.apply(event, monotonic_now());
     }
     if (const auto *selected = std::get_if<ModelSelected>(&event)) set_model(selected->name, selected->effort);
     if (std::holds_alternative<PromptSubmitted>(event)) state = SessionState::WAITING;
@@ -664,7 +784,8 @@ std::vector<LayoutRow> SessionScreen::layout_block(const Block &block) const {
     if (stable) {
         const auto cached = layout_cache.find(block.id);
         if (cached != layout_cache.end() && cached->second.columns == size.columns && cached->second.kind == block.kind &&
-            cached->second.state == block.state && cached->second.text == block.text && cached->second.detail == block.detail) {
+            cached->second.state == block.state && cached->second.text == block.text && cached->second.detail == block.detail &&
+            cached->second.tool_name == block.tool_name && cached->second.command == block.command) {
             ++diagnostics.cache_hits;
             return cached->second.rows;
         }
@@ -672,7 +793,7 @@ std::vector<LayoutRow> SessionScreen::layout_block(const Block &block) const {
 
     ++diagnostics.cache_misses;
     ++diagnostics.blocks_laid_out;
-    auto rows = wrap_block(block, size.columns);
+    auto rows = wrap_block(block, size.columns, monotonic_now());
     if (stable) {
         layout_cache.insert_or_assign(block.id, CachedBlockLayout{
                                                     .columns = size.columns,
@@ -680,6 +801,8 @@ std::vector<LayoutRow> SessionScreen::layout_block(const Block &block) const {
                                                     .state = block.state,
                                                     .text = block.text,
                                                     .detail = block.detail,
+                                                    .tool_name = block.tool_name,
+                                                    .command = block.command,
                                                     .rows = rows,
                                                 });
     }
@@ -690,6 +813,14 @@ LayoutDiagnostics SessionScreen::layout_diagnostics() const noexcept {
     auto result = diagnostics;
     result.cached_blocks = layout_cache.size();
     return result;
+}
+
+bool SessionScreen::has_elapsed_running_command() const {
+    const auto now = monotonic_now();
+    return std::ranges::any_of(transcript.blocks, [now](const Block &block) {
+        return block.kind == BlockKind::TOOL && block.state == BlockState::RUNNING && !block.command.empty() && now >= block.started_at &&
+               now - block.started_at >= k_command_elapsed_threshold;
+    });
 }
 
 void SessionScreen::scroll(i32 row_delta) {

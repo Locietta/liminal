@@ -63,15 +63,17 @@ void test_tools_are_available_by_default() {
 
 void test_tool_presentations_are_specific_and_bounded() {
     const auto read = make_call("read", "read_file", R"({"path":"docs/code-style-guide.md"})");
-    require(describe_tool_call(read) == "Read docs/code-style-guide.md", "read_file presentation must name the requested path");
+    const auto read_presentation = describe_tool_call(read);
+    require(read_presentation.description == "Read docs/code-style-guide.md" && read_presentation.command.empty(),
+            "read_file presentation must name the requested path without pretending it is a shell command");
     const provider::ToolResult read_result{.call_id = "read", .content = "first\nsecond\n"};
     require(summarize_tool_result(read, read_result) == "2 lines · 13 bytes",
             "read_file completion must summarize line and byte counts without echoing file contents");
 
     const auto command = make_call("command", "run_command", R"({"command":"pixi run build\npixi run test-unit"})");
-    const auto description = describe_tool_call(command);
-    require(description.contains("Run command") && description.contains("$ pixi run build") && description.contains("pixi run test-unit"),
-            "run_command presentation must retain the exact multiline command");
+    const auto presentation = describe_tool_call(command);
+    require(presentation.description.empty() && presentation.command == "pixi run build\npixi run test-unit",
+            "run_command presentation must retain the exact multiline command as semantic data");
     const provider::ToolResult command_result{
         .call_id = "command",
         .content = "exit_code: 7\n\nstdout:\nconfigured\nbuilt\n\nstderr:\none test failed\n",

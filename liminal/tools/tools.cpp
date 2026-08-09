@@ -69,16 +69,6 @@ std::string normalize_newlines(std::string_view text) {
     return result;
 }
 
-std::string indent_lines(std::string_view text, std::string_view indentation) {
-    std::string result;
-    result.reserve(text.size() + indentation.size() * 2);
-    for (const auto character : text) {
-        result += character;
-        if (character == '\n') result += indentation;
-    }
-    return result;
-}
-
 std::vector<std::string> content_lines(std::string_view text) {
     std::vector<std::string> result;
     usize start = 0;
@@ -392,19 +382,18 @@ Task<std::string, Error> tool_run_command(const ToolSet &tools, RunCommandInput 
 
 } // namespace
 
-std::string describe_tool_call(const provider::ToolCall &call) {
+ToolCallPresentation describe_tool_call(const provider::ToolCall &call) {
     if (call.name == "read_file") {
         const auto input = parse_input<ReadFileInput>(call.input);
-        if (input) return "Read " + bounded_text(input->path, k_max_call_summary_bytes);
+        if (input) return {.description = "Read " + bounded_text(input->path, k_max_call_summary_bytes)};
     }
     if (call.name == "run_command") {
         const auto input = parse_input<RunCommandInput>(call.input);
         if (input) {
-            auto command = bounded_text(normalize_newlines(input->command), k_max_call_summary_bytes);
-            return "Run command\n  $ " + indent_lines(command, "    ");
+            return {.command = bounded_text(normalize_newlines(input->command), k_max_call_summary_bytes)};
         }
     }
-    return "Run " + bounded_text(call.name, k_max_call_summary_bytes);
+    return {.description = "Run " + bounded_text(call.name, k_max_call_summary_bytes)};
 }
 
 std::string summarize_tool_result(const provider::ToolCall &call, const provider::ToolResult &result) {

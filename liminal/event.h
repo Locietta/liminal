@@ -23,12 +23,14 @@ struct ToolStarted {
     std::string call_id;
     std::string name;
     std::string description;
+    std::string command;
 };
 
 struct ToolCompleted {
     std::string call_id;
     std::string name;
     std::string description;
+    std::string command;
     std::string summary;
     bool is_error = false;
 };

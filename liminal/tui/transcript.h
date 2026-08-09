@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -34,11 +35,14 @@ struct Block {
     BlockState state = BlockState::COMPLETED;
     std::string text;
     std::string detail;
+    std::string tool_name;
+    std::string command;
     std::string call_id;
+    std::chrono::steady_clock::time_point started_at;
 };
 
 struct Transcript {
-    void apply(const Event &event);
+    void apply(const Event &event, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
 
     std::vector<Block> blocks;
 
@@ -46,7 +50,7 @@ private:
     void apply_one(const PromptSubmitted &event);
     void apply_one(const AssistantTextDelta &event);
     void apply_one(const AssistantSegmentCompleted &event);
-    void apply_one(const ToolStarted &event);
+    void apply_one(const ToolStarted &event, std::chrono::steady_clock::time_point now);
     void apply_one(const ToolCompleted &event);
     void apply_one(const TurnCompleted &event);
     void apply_one(const TurnCancelled &event);

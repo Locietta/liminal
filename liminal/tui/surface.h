@@ -18,6 +18,7 @@ enum struct Style {
     ACCENT,
     CODE,
     CODE_KEYWORD,
+    CODE_PREPROCESSOR,
     CODE_TYPE,
     CODE_FUNCTION,
     CODE_STRING,

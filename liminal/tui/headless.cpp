@@ -49,6 +49,7 @@ std::string_view name(Style style) {
         case Style::ACCENT: return "accent";
         case Style::CODE: return "code";
         case Style::CODE_KEYWORD: return "code_keyword";
+        case Style::CODE_PREPROCESSOR: return "code_preprocessor";
         case Style::CODE_TYPE: return "code_type";
         case Style::CODE_FUNCTION: return "code_function";
         case Style::CODE_STRING: return "code_string";
@@ -102,7 +103,9 @@ std::string visible_ansi(std::string_view operation) {
 
 } // namespace
 
-HeadlessSession::HeadlessSession(i32 columns, i32 rows, i64 initial_now_ms) : now_ms(std::max(initial_now_ms, i64{0})) {
+HeadlessSession::HeadlessSession(i32 columns, i32 rows, i64 initial_now_ms)
+    : screen([this] { return std::chrono::steady_clock::time_point(std::chrono::milliseconds(now_ms)); }),
+      now_ms(std::max(initial_now_ms, i64{0})) {
     screen.resize({.columns = std::clamp(columns, 1, k_max_columns), .rows = std::clamp(rows, 1, k_max_rows)});
     screen.set_model("headless", std::nullopt);
     invalidate();
@@ -112,8 +115,8 @@ HeadlessSession::HeadlessSession(i32 columns, i32 rows, i64 initial_now_ms) : no
 std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &action) {
     if (action_count >= k_max_actions) return std::unexpected("session action limit exceeded");
     if (action.text.size() > k_max_text_bytes) return std::unexpected("action text limit exceeded");
-    const auto action_bytes =
-        action.text.size() + action.call_id.size() + action.name.size() + (action.effort ? action.effort->size() : usize{0});
+    const auto action_bytes = action.text.size() + action.call_id.size() + action.name.size() + action.command.size() +
+                              (action.effort ? action.effort->size() : usize{0});
     if (text_bytes + action_bytes > k_max_session_text_bytes) return std::unexpected("session text limit exceeded");
     text_bytes += action_bytes;
     ++action_count;
@@ -162,11 +165,12 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "assistant_segment_completed") {
         screen.apply(AssistantSegmentCompleted{});
     } else if (action.type == "tool_started") {
-        screen.apply(ToolStarted{.call_id = action.call_id, .name = action.name, .description = action.text});
+        screen.apply(ToolStarted{.call_id = action.call_id, .name = action.name, .description = action.text, .command = action.command});
     } else if (action.type == "tool_completed") {
         screen.apply(ToolCompleted{
             .call_id = action.call_id,
             .name = action.name,
+            .command = action.command,
             .summary = action.text,
             .is_error = action.is_error,
         });
@@ -194,7 +198,12 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "advance_time") {
         if (action.milliseconds < 0) return std::unexpected("virtual time cannot move backwards");
         now_ms += action.milliseconds;
-        if (render_pending && now_ms >= render_at_ms) flush();
+        if (screen.has_elapsed_running_command()) {
+            invalidate();
+            flush();
+        } else if (render_pending && now_ms >= render_at_ms) {
+            flush();
+        }
         return {};
     } else if (action.type == "flush") {
         flush();
@@ -243,6 +252,7 @@ HeadlessSnapshot HeadlessSession::inspect() const {
                                    .state = std::string(name(block.state)),
                                    .text = block.text,
                                    .detail = block.detail,
+                                   .command = block.command,
                                    .call_id = block.call_id});
     }
     for (i32 row = 0; row < frame.surface.rows; ++row) snapshot.visible_text.push_back(frame.surface.row_text(row));

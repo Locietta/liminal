@@ -18,6 +18,7 @@ struct HeadlessAction {
     std::string text;
     std::string call_id;
     std::string name;
+    std::string command;
     std::optional<std::string> effort;
     i32 columns = 0;
     i32 rows = 0;
@@ -32,6 +33,7 @@ struct SnapshotBlock {
     std::string state;
     std::string text;
     std::string detail;
+    std::string command;
     std::string call_id;
 };
 
