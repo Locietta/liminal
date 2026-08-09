@@ -135,7 +135,7 @@ public:
     using error_type = detail::task_error_type_t<Task>;
     using cancel_type = detail::task_cancel_type_t<Task>;
 
-    using success_type = std::conditional_t<All, SmallVector<detail::task_success_t<Task, capture_cancel>>,
+    using success_type = std::conditional_t<All, vector<detail::task_success_t<Task, capture_cancel>>,
                                             std::pair<usize, detail::task_success_t<Task, capture_cancel>>>;
 
     using result_type = detail::aggregate_result_t<success_type, error_type, cancel_type>;
@@ -224,7 +224,7 @@ private:
         }
     }
 
-    SmallVector<Task> tasks;
+    vector<Task> tasks;
 };
 
 /// Awaits all tasks concurrently, collecting results into a tuple.
@@ -233,7 +233,7 @@ private:
 /// and returns `std::tuple<T...>` where each element is the result of the corresponding Task.
 /// Void tasks produce `std::nullopt_t` in the tuple.
 ///
-/// Range overload: accepts a range of homogeneous tasks and returns `SmallVector<T>`.
+/// Range overload: accepts a range of homogeneous tasks and returns `vector<T>`.
 ///
 /// If any child Task produces a structured Error, the first Error cancels all siblings
 /// and the combinator returns `Outcome<..., E, ...>` carrying that Error.

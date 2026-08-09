@@ -115,7 +115,7 @@ static_assert(!is_trivially_relocatable_v<ForcedOffTc>);
 static_assert(!is_trivially_relocatable_v<HoldsForcedOffTc>);
 
 // lighter's own types
-static_assert(!is_trivially_relocatable_v<SmallVector<int>>); // inline storage is address-sensitive
+static_assert(!is_trivially_relocatable_v<SmallVector<int, 1>>); // inline storage is address-sensitive
 
 // --- allocation counting ----------------------------------------------------
 

@@ -40,17 +40,6 @@ concept small_vector_compatible_range =
 template <typename T>
 using small_vector_size_type = std::conditional_t<sizeof(T) < 4 && sizeof(void *) >= 8, u64, u32>;
 
-template <typename T>
-struct DefaultBufferSize {
-    constexpr static usize k_preferred_size = 64;
-
-    static_assert(sizeof(T) <= 256, "Default SmallVector inline storage would be too large. "
-                                    "Use SmallVector<T, N> with an explicit inline capacity.");
-
-    constexpr static usize k_inline_bytes = k_preferred_size > sizeof(SmallVector<T, 0>) ? k_preferred_size - sizeof(SmallVector<T, 0>) : 0;
-    constexpr static usize k_value = k_inline_bytes / sizeof(T) == 0 ? 1 : k_inline_bytes / sizeof(T);
-};
-
 struct SynthThreeWay {
     template <typename LHS, typename RHS>
     [[nodiscard]]
@@ -1177,7 +1166,7 @@ public:
     }
 };
 
-template <typename T, u32 InlineCapacity = detail::DefaultBufferSize<T>::k_value>
+template <typename T, u32 InlineCapacity>
 struct SmallVector : HybridVector<T>, private detail::InlineBuffer<T, InlineCapacity> {
 private:
     using base_type = HybridVector<T>;
@@ -1346,13 +1335,6 @@ public:
         this->commit_relocated(guard.release(), this->size(), this->size());
     }
 };
-
-template <typename Range>
-    requires detail::small_vector_compatible_range<Range, std::ranges::range_value_t<Range>>
-SmallVector(Range &&) -> SmallVector<std::ranges::range_value_t<Range>>;
-
-template <typename T>
-SmallVector(std::initializer_list<T>) -> SmallVector<T>;
 
 template <typename T>
 using vector = SmallVector<T, 0>;
