@@ -157,6 +157,17 @@ bool resolves_common_markdown_aliases() {
     return resolves(cases);
 }
 
+bool rejects_near_misses() {
+    constexpr std::array names{"cppp"sv, "javascriptx"sv, "python-3"sv, "type"sv, "unknown"sv};
+    for (const std::string_view name : names) {
+        if (lexer_for_language(name)) {
+            std::cerr << "unexpectedly resolved " << name << '\n';
+            return false;
+        }
+    }
+    return true;
+}
+
 bool dispatches_selected_lexer() {
     auto lexer = lexer_for_language("cpp");
     if (!lexer) return false;
@@ -171,8 +182,8 @@ bool dispatches_selected_lexer() {
 } // namespace
 
 int main() {
-    return resolves_every_language_identity() && resolves_common_markdown_aliases() && dispatches_selected_lexer() &&
-                   !lexer_for_language("") && !lexer_for_language("unknown") ?
+    return resolves_every_language_identity() && resolves_common_markdown_aliases() && rejects_near_misses() &&
+                   dispatches_selected_lexer() && !lexer_for_language("") ?
                0 :
                1;
 }
