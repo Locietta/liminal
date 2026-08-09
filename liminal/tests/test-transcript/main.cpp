@@ -38,13 +38,21 @@ void check_tool_lifecycle() {
     tui::Transcript transcript;
     transcript.apply(AssistantTextDelta{.text = "checking"});
     transcript.apply(AssistantSegmentCompleted{});
-    transcript.apply(ToolStarted{.call_id = "call-1", .name = "read_file"});
-    transcript.apply(ToolCompleted{.call_id = "call-1", .name = "read_file", .is_error = false});
+    transcript.apply(ToolStarted{.call_id = "call-1", .name = "read_file", .description = "Read README.md"});
+    transcript.apply(ToolCompleted{
+        .call_id = "call-1",
+        .name = "read_file",
+        .description = "Read README.md",
+        .summary = "5 lines · 189 bytes",
+        .is_error = false,
+    });
 
     require(transcript.blocks.size() == 2, "a tool must follow, not replace, its assistant segment");
     require(transcript.blocks[0].state == tui::BlockState::COMPLETED, "assistant output must stabilize before a tool block");
     require(transcript.blocks[1].kind == tui::BlockKind::TOOL && transcript.blocks[1].call_id == "call-1",
             "tool identity must remain inspectable");
+    require(transcript.blocks[1].text == "Read README.md" && transcript.blocks[1].detail == "5 lines · 189 bytes",
+            "tool blocks must retain their specific invocation and bounded completion detail");
     require(transcript.blocks[1].state == tui::BlockState::COMPLETED, "tool completion must update the matching block");
 }
 

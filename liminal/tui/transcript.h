@@ -33,6 +33,7 @@ struct Block {
     BlockKind kind = BlockKind::NOTICE;
     BlockState state = BlockState::COMPLETED;
     std::string text;
+    std::string detail;
     std::string call_id;
 };
 

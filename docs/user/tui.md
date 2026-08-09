@@ -1,6 +1,6 @@
 # Interactive TUI
 
-Liminal's interactive terminal interface keeps the transcript and prompt composer available at the same time. Long drafts can be handed to an external editor.
+Liminal's interactive terminal interface keeps the transcript and prompt composer available at the same time. Tool activity updates in place, and long drafts can be handed to an external editor.
 
 ## External prompt editor
 
@@ -27,6 +27,16 @@ export VISUAL='code --wait'
 Terminal editors can be configured directly, for example `VISUAL=nvim`. Graphical editors must include their wait option—such as `code --wait`—so Liminal knows when editing is finished. Editor commands may contain quoted arguments. Restart Liminal after changing a persistent environment variable.
 
 Liminal temporarily restores the terminal before launching the editor. The editor inherits standard input, output, error, and the current working directory. If configuration, launch, or editor exit fails, Liminal shows an error and preserves the original draft.
+
+## Tool activity
+
+Built-in tools show the consequential details in the transcript:
+
+- `read_file` names the requested path, then reports line and byte counts.
+- `run_command` shows the exact command, then reports its exit code, stdout/stderr line counts, and a bounded head/tail preview.
+
+Large results stay bounded, and separate parallel calls keep independent running and completion states.
+The action and exact path or command stay bright, while completion metadata and output previews are dimmed for quick scanning.
 
 ## Keyboard shortcuts
 

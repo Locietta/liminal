@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -302,11 +303,34 @@ diff --git a/file.cpp b/file.cpp
             "a completed rich block must enter the existing stable layout cache");
 
     tui::SessionScreen tools;
-    tools.apply(ToolStarted{.call_id = "one", .name = "read_file"});
-    tools.apply(ToolStarted{.call_id = "two", .name = "run_tests"});
-    tools.apply(ToolCompleted{.call_id = "one", .name = "read_file"});
+    tools.apply(ToolStarted{.call_id = "one", .name = "read_file", .description = "Read README.md"});
+    tools.apply(ToolStarted{.call_id = "two", .name = "run_tests", .description = "Run command\n  $ pixi run test-unit"});
+    tools.apply(ToolCompleted{
+        .call_id = "one",
+        .name = "read_file",
+        .description = "Read README.md",
+        .summary = "5 lines · 189 bytes",
+    });
     require(tools.state == tui::SessionState::RUNNING_TOOLS, "one completed tool must not hide a concurrently running sibling");
-    tools.apply(ToolCompleted{.call_id = "two", .name = "run_tests"});
+    const auto read_rows = tools.layout_block(tools.transcript.blocks[0]);
+    std::string read_text;
+    for (const auto &row : read_rows) read_text += row.text + "\n";
+    require(read_text.contains("✓ Read README.md") && read_text.contains("└ 5 lines · 189 bytes"),
+            "completed tools must show the concrete action and bounded output summary");
+    require(read_rows.size() == 2 && read_rows[0].style == tui::Style::NORMAL && read_rows[1].style == tui::Style::MUTED,
+            "tool actions and targets must stay bright while completion detail is muted");
+    tools.apply(ToolCompleted{
+        .call_id = "two",
+        .name = "run_tests",
+        .description = "Run command\n  $ pixi run test-unit",
+        .summary = "exit 0 · stdout 2 lines\nstdout:\n2 tests passed",
+    });
+    const auto command_rows = tools.layout_block(tools.transcript.blocks[1]);
+    require(command_rows.size() == 5 && command_rows[0].style == tui::Style::NORMAL && command_rows[1].style == tui::Style::NORMAL,
+            "the run-command label and exact command must use the bright primary style");
+    require(
+        std::all_of(command_rows.begin() + 2, command_rows.end(), [](const tui::LayoutRow &row) { return row.style == tui::Style::MUTED; }),
+        "command status and output preview rows must use the dim secondary style");
     require(tools.state == tui::SessionState::STREAMING, "tool state may settle only after the final concurrent tool completes");
 }
 

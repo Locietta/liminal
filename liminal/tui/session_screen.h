@@ -84,6 +84,7 @@ struct CachedBlockLayout {
     BlockKind kind = BlockKind::NOTICE;
     BlockState state = BlockState::COMPLETED;
     std::string text;
+    std::string detail;
     std::vector<LayoutRow> rows;
 };
 

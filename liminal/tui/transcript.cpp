@@ -26,7 +26,12 @@ void Transcript::apply_one(const AssistantSegmentCompleted &) { finish_streaming
 
 void Transcript::apply_one(const ToolStarted &event) {
     finish_streaming(BlockState::COMPLETED);
-    append({.kind = BlockKind::TOOL, .state = BlockState::RUNNING, .text = event.name, .call_id = event.call_id});
+    append({
+        .kind = BlockKind::TOOL,
+        .state = BlockState::RUNNING,
+        .text = event.description.empty() ? event.name : event.description,
+        .call_id = event.call_id,
+    });
 }
 
 void Transcript::apply_one(const ToolCompleted &event) {
@@ -34,6 +39,8 @@ void Transcript::apply_one(const ToolCompleted &event) {
         if (block->kind == BlockKind::TOOL && block->call_id == event.call_id) {
             lighter::check(block->state == BlockState::RUNNING, "completed tool block was not running");
             block->state = event.is_error ? BlockState::FAILED : BlockState::COMPLETED;
+            if (!event.description.empty()) block->text = event.description;
+            block->detail = event.summary;
             return;
         }
     }

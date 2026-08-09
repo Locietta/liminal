@@ -61,6 +61,28 @@ void test_tools_are_available_by_default() {
             "run_command must execute without an opt-in mode");
 }
 
+void test_tool_presentations_are_specific_and_bounded() {
+    const auto read = make_call("read", "read_file", R"({"path":"docs/code-style-guide.md"})");
+    require(describe_tool_call(read) == "Read docs/code-style-guide.md", "read_file presentation must name the requested path");
+    const provider::ToolResult read_result{.call_id = "read", .content = "first\nsecond\n"};
+    require(summarize_tool_result(read, read_result) == "2 lines · 13 bytes",
+            "read_file completion must summarize line and byte counts without echoing file contents");
+
+    const auto command = make_call("command", "run_command", R"({"command":"pixi run build\npixi run test-unit"})");
+    const auto description = describe_tool_call(command);
+    require(description.contains("Run command") && description.contains("$ pixi run build") && description.contains("pixi run test-unit"),
+            "run_command presentation must retain the exact multiline command");
+    const provider::ToolResult command_result{
+        .call_id = "command",
+        .content = "exit_code: 7\n\nstdout:\nconfigured\nbuilt\n\nstderr:\none test failed\n",
+        .is_error = true,
+    };
+    const auto summary = summarize_tool_result(command, command_result);
+    require(summary.contains("exit 7") && summary.contains("stdout 2 lines") && summary.contains("stderr 1 line") &&
+                summary.contains("configured") && summary.contains("one test failed"),
+            "run_command completion must expose exit status, stream counts, and a bounded output preview");
+}
+
 void test_read_file_is_bounded_and_regular() {
     constexpr usize k_file_limit = 128 * 1024;
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -105,10 +127,24 @@ void test_command_timeout() {
     require(elapsed < 2s, "a timed-out command must be killed promptly");
 }
 
+void test_nonzero_command_is_an_error_result() {
+    ToolSet tools(std::filesystem::current_path());
+#ifdef _WIN32
+    auto call = make_call("nonzero", "run_command", R"({"command":"Write-Error 'failed'; exit 7"})");
+#else
+    auto call = make_call("nonzero", "run_command", R"({"command":"printf 'failed\\n' >&2; exit 7"})");
+#endif
+    auto outcome = execute(tools, std::move(call));
+    require(outcome.has_value() && outcome->is_error && outcome->content.starts_with("exit_code: 7"),
+            "a nonzero shell exit must remain a tool result while entering the failed UI state");
+}
+
 i32 run_all() {
     test_tools_are_available_by_default();
+    test_tool_presentations_are_specific_and_bounded();
     test_read_file_is_bounded_and_regular();
     test_command_timeout();
+    test_nonzero_command_is_an_error_result();
     return 0;
 }
 

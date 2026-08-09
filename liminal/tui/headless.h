@@ -31,6 +31,7 @@ struct SnapshotBlock {
     std::string kind;
     std::string state;
     std::string text;
+    std::string detail;
     std::string call_id;
 };
 

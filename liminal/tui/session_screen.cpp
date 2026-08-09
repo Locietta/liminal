@@ -18,27 +18,42 @@ Style block_style(const Block &block) {
     if (block.state == BlockState::FAILED) return Style::FAILURE;
     switch (block.kind) {
         case BlockKind::USER: return Style::ACCENT;
-        case BlockKind::TOOL: return Style::MUTED;
+        case BlockKind::TOOL: return Style::NORMAL;
         case BlockKind::NOTICE: return block.state == BlockState::CANCELLED ? Style::FAILURE : Style::MUTED;
         case BlockKind::ASSISTANT: return Style::NORMAL;
     }
     return Style::NORMAL;
 }
 
-std::string block_text(const Block &block) {
+struct BlockPresentation {
+    std::string text;
+    usize muted_from = std::string::npos;
+};
+
+BlockPresentation present_block(const Block &block) {
     switch (block.kind) {
-        case BlockKind::USER: return "you: " + block.text;
-        case BlockKind::ASSISTANT: return "assistant: " + block.text;
+        case BlockKind::USER: return {.text = "you: " + block.text};
+        case BlockKind::ASSISTANT: return {.text = "assistant: " + block.text};
         case BlockKind::TOOL: {
-            auto state = std::string("completed");
-            if (block.state == BlockState::RUNNING) state = "running";
-            if (block.state == BlockState::CANCELLED) state = "cancelled";
-            if (block.state == BlockState::FAILED) state = "failed";
-            return "[tool: " + block.text + " - " + state + "]";
+            auto result = std::string("✓ ") + block.text;
+            if (block.state == BlockState::RUNNING) result = "• " + block.text + " (running)";
+            if (block.state == BlockState::CANCELLED) result = "– " + block.text + " (cancelled)";
+            if (block.state == BlockState::FAILED) result = "✗ " + block.text;
+            auto presentation = BlockPresentation{.text = std::move(result)};
+            if (!block.detail.empty()) {
+                presentation.text += "\n";
+                presentation.muted_from = presentation.text.size();
+                presentation.text += "  └ ";
+                for (const auto character : block.detail) {
+                    presentation.text += character;
+                    if (character == '\n') presentation.text += "    ";
+                }
+            }
+            return presentation;
         }
-        case BlockKind::NOTICE: return block.text;
+        case BlockKind::NOTICE: return {.text = block.text};
     }
-    return block.text;
+    return {.text = block.text};
 }
 
 std::vector<LayoutRow> wrap_block(const Block &block, i32 columns) {
@@ -53,9 +68,14 @@ std::vector<LayoutRow> wrap_block(const Block &block, i32 columns) {
     }
 
     std::vector<LayoutRow> rows;
-    const auto source = block_text(block);
+    const auto presentation = present_block(block);
+    const auto &source = presentation.text;
     const auto width = std::max(columns, 1);
-    LayoutRow current{.block_id = block.id, .style = block_style(block)};
+    const auto style_at = [&](usize source_offset) {
+        if (source_offset >= presentation.muted_from) return Style::MUTED;
+        return block_style(block);
+    };
+    LayoutRow current{.block_id = block.id, .style = style_at(0)};
     i32 used = 0;
     usize offset = 0;
     while (offset < source.size()) {
@@ -66,14 +86,14 @@ std::vector<LayoutRow> wrap_block(const Block &block, i32 columns) {
         if (encoded == "\r") continue;
         if (encoded == "\n") {
             rows.push_back(std::move(current));
-            current = {.block_id = block.id, .source_offset = offset, .style = block_style(block)};
+            current = {.block_id = block.id, .source_offset = offset, .style = style_at(offset)};
             used = 0;
             continue;
         }
         const auto cells = std::max(grapheme.width, 0);
         if (cells > 0 && used > 0 && used + cells > width) {
             rows.push_back(std::move(current));
-            current = {.block_id = block.id, .source_offset = start, .style = block_style(block)};
+            current = {.block_id = block.id, .source_offset = start, .style = style_at(start)};
             used = 0;
         }
         current.text += encoded;
@@ -644,7 +664,7 @@ std::vector<LayoutRow> SessionScreen::layout_block(const Block &block) const {
     if (stable) {
         const auto cached = layout_cache.find(block.id);
         if (cached != layout_cache.end() && cached->second.columns == size.columns && cached->second.kind == block.kind &&
-            cached->second.state == block.state && cached->second.text == block.text) {
+            cached->second.state == block.state && cached->second.text == block.text && cached->second.detail == block.detail) {
             ++diagnostics.cache_hits;
             return cached->second.rows;
         }
@@ -654,9 +674,14 @@ std::vector<LayoutRow> SessionScreen::layout_block(const Block &block) const {
     ++diagnostics.blocks_laid_out;
     auto rows = wrap_block(block, size.columns);
     if (stable) {
-        layout_cache.insert_or_assign(
-            block.id,
-            CachedBlockLayout{.columns = size.columns, .kind = block.kind, .state = block.state, .text = block.text, .rows = rows});
+        layout_cache.insert_or_assign(block.id, CachedBlockLayout{
+                                                    .columns = size.columns,
+                                                    .kind = block.kind,
+                                                    .state = block.state,
+                                                    .text = block.text,
+                                                    .detail = block.detail,
+                                                    .rows = rows,
+                                                });
     }
     return rows;
 }

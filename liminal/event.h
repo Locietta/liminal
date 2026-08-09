@@ -22,11 +22,14 @@ struct AssistantSegmentCompleted {};
 struct ToolStarted {
     std::string call_id;
     std::string name;
+    std::string description;
 };
 
 struct ToolCompleted {
     std::string call_id;
     std::string name;
+    std::string description;
+    std::string summary;
     bool is_error = false;
 };
 

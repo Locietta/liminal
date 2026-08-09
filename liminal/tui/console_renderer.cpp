@@ -27,7 +27,13 @@ lighter::Error render_plain(const Event &event) {
             if constexpr (std::same_as<T, AssistantTextDelta>) {
                 return write_stdout(plain_text(value.text));
             } else if constexpr (std::same_as<T, ToolStarted>) {
-                return write_stdout("\n[running tool: " + plain_text(value.name) + "]\n");
+                const auto description = value.description.empty() ? value.name : value.description;
+                return write_stdout("\n[tool running] " + plain_text(description) + "\n");
+            } else if constexpr (std::same_as<T, ToolCompleted>) {
+                const auto description = value.description.empty() ? value.name : value.description;
+                auto output = std::string("[tool ") + (value.is_error ? "failed] " : "completed] ") + plain_text(description);
+                if (!value.summary.empty()) output += "\n  " + plain_text(value.summary);
+                return write_stdout(output + "\n");
             } else if constexpr (std::same_as<T, TurnCompleted>) {
                 return write_stdout("\n");
             } else if constexpr (std::same_as<T, TurnCancelled>) {

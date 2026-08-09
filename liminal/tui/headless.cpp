@@ -162,9 +162,14 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "assistant_segment_completed") {
         screen.apply(AssistantSegmentCompleted{});
     } else if (action.type == "tool_started") {
-        screen.apply(ToolStarted{.call_id = action.call_id, .name = action.name});
+        screen.apply(ToolStarted{.call_id = action.call_id, .name = action.name, .description = action.text});
     } else if (action.type == "tool_completed") {
-        screen.apply(ToolCompleted{.call_id = action.call_id, .name = action.name, .is_error = action.is_error});
+        screen.apply(ToolCompleted{
+            .call_id = action.call_id,
+            .name = action.name,
+            .summary = action.text,
+            .is_error = action.is_error,
+        });
     } else if (action.type == "turn_completed") {
         screen.apply(TurnCompleted{});
     } else if (action.type == "turn_cancelled") {
@@ -237,6 +242,7 @@ HeadlessSnapshot HeadlessSession::inspect() const {
                                    .kind = std::string(name(block.kind)),
                                    .state = std::string(name(block.state)),
                                    .text = block.text,
+                                   .detail = block.detail,
                                    .call_id = block.call_id});
     }
     for (i32 row = 0; row < frame.surface.rows; ++row) snapshot.visible_text.push_back(frame.surface.row_text(row));

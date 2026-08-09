@@ -22,6 +22,11 @@ struct ToolPolicy {
 /// Load resource limits for built-in tools.
 Result<ToolPolicy> load_tool_policy();
 
+/// Bounded, user-facing descriptions for the built-in tool lifecycle. These
+/// never expose provider wire values directly to a terminal renderer.
+std::string describe_tool_call(const provider::ToolCall &call);
+std::string summarize_tool_result(const provider::ToolCall &call, const provider::ToolResult &result);
+
 /// The v1 built-in tools: read_file and run_command (PowerShell on Windows,
 /// POSIX sh on Linux).
 /// Deliberately not a generic registry - two tools need two branches.

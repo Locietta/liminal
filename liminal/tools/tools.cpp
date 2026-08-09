@@ -36,6 +36,9 @@ constexpr i64 k_min_command_timeout_ms = 1;
 constexpr i64 k_max_command_timeout_ms = 60 * 60 * 1000;
 constexpr usize k_max_parallel_call_limit = 32;
 constexpr usize k_max_turn_call_limit = 256;
+constexpr usize k_max_call_summary_bytes = 2 * 1024;
+constexpr usize k_max_preview_line_bytes = 240;
+constexpr usize k_max_preview_lines = 4;
 
 struct ReadFileInput {
     std::string path;
@@ -44,6 +47,130 @@ struct ReadFileInput {
 struct RunCommandInput {
     std::string command;
 };
+
+std::string bounded_text(std::string_view text, usize limit) {
+    if (text.size() <= limit) return std::string(text);
+    auto end = limit;
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xc0) == 0x80) --end;
+    return std::string(text.substr(0, end)) + "…";
+}
+
+std::string normalize_newlines(std::string_view text) {
+    std::string result;
+    result.reserve(text.size());
+    for (usize index = 0; index < text.size(); ++index) {
+        if (text[index] == '\r') {
+            if (index + 1 < text.size() && text[index + 1] == '\n') ++index;
+            result += '\n';
+        } else {
+            result += text[index];
+        }
+    }
+    return result;
+}
+
+std::string indent_lines(std::string_view text, std::string_view indentation) {
+    std::string result;
+    result.reserve(text.size() + indentation.size() * 2);
+    for (const auto character : text) {
+        result += character;
+        if (character == '\n') result += indentation;
+    }
+    return result;
+}
+
+std::vector<std::string> content_lines(std::string_view text) {
+    std::vector<std::string> result;
+    usize start = 0;
+    while (start <= text.size()) {
+        const auto end = text.find('\n', start);
+        auto line = text.substr(start, end == std::string_view::npos ? text.size() - start : end - start);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        if (line.find_first_not_of(" \t") != std::string_view::npos) {
+            result.push_back(bounded_text(line, k_max_preview_line_bytes));
+        }
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    return result;
+}
+
+std::vector<std::string> preview_lines(const std::vector<std::string> &lines) {
+    if (lines.size() <= k_max_preview_lines) return lines;
+    return {
+        lines[0],     lines[1], "… " + std::to_string(lines.size() - k_max_preview_lines) + " lines omitted …", lines[lines.size() - 2],
+        lines.back(),
+    };
+}
+
+std::string append_preview(std::string summary, std::string_view label, const std::vector<std::string> &lines) {
+    if (lines.empty()) return summary;
+    summary += "\n";
+    summary += label;
+    summary += ":";
+    for (const auto &line : preview_lines(lines)) summary += "\n" + line;
+    return summary;
+}
+
+std::string line_count(usize count, std::string_view stream = {}) {
+    std::string result;
+    if (!stream.empty()) result = std::string(stream) + " ";
+    result += std::to_string(count) + (count == 1 ? " line" : " lines");
+    return result;
+}
+
+std::string byte_count(usize bytes) {
+    if (bytes < 1024) return std::to_string(bytes) + (bytes == 1 ? " byte" : " bytes");
+    constexpr usize kibibyte = 1024;
+    constexpr usize mebibyte = 1024 * kibibyte;
+    const auto unit = bytes < mebibyte ? kibibyte : mebibyte;
+    const auto tenths = (bytes * 10 + unit / 2) / unit;
+    return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + (unit == kibibyte ? " KiB" : " MiB");
+}
+
+std::string generic_result_summary(const provider::ToolResult &result) {
+    const auto lines = content_lines(result.content);
+    if (lines.empty()) return result.is_error ? "No error detail" : "No output";
+    std::string summary = result.is_error ? "Error" : line_count(lines.size());
+    for (const auto &line : preview_lines(lines)) summary += "\n" + line;
+    return summary;
+}
+
+std::string command_result_summary(const provider::ToolResult &result) {
+    constexpr std::string_view stdout_marker = "\n\nstdout:\n";
+    constexpr std::string_view stderr_marker = "\n\nstderr:\n";
+    const auto stdout_at = result.content.find(stdout_marker);
+    const auto stderr_at = result.content.find(stderr_marker);
+    if (stdout_at == std::string_view::npos || stderr_at == std::string_view::npos || stderr_at < stdout_at) {
+        return generic_result_summary(result);
+    }
+
+    const auto header = std::string_view(result.content).substr(0, stdout_at);
+    const auto stdout_text =
+        std::string_view(result.content).substr(stdout_at + stdout_marker.size(), stderr_at - stdout_at - stdout_marker.size());
+    const auto stderr_text = std::string_view(result.content).substr(stderr_at + stderr_marker.size());
+    const auto stdout_lines = content_lines(stdout_text);
+    const auto stderr_lines = content_lines(stderr_text);
+
+    std::string summary;
+    const auto header_lines = content_lines(header);
+    if (!header_lines.empty() && header_lines.front().starts_with("exit_code: ")) {
+        summary = "exit " + header_lines.front().substr(std::string_view("exit_code: ").size());
+    } else {
+        summary = result.is_error ? "failed" : "completed";
+    }
+    if (header_lines.size() > 1 && header_lines[1].starts_with("term_signal: ")) {
+        summary += " · signal " + header_lines[1].substr(std::string_view("term_signal: ").size());
+    }
+    if (stdout_lines.empty() && stderr_lines.empty()) {
+        summary += " · no output";
+    } else {
+        if (!stdout_lines.empty()) summary += " · " + line_count(stdout_lines.size(), "stdout");
+        if (!stderr_lines.empty()) summary += " · " + line_count(stderr_lines.size(), "stderr");
+    }
+    summary = append_preview(std::move(summary), "stdout", stdout_lines);
+    return append_preview(std::move(summary), "stderr", stderr_lines);
+}
 
 /// Decode a tool_use input (already validated as a JSON object) into the
 /// tool's typed input struct. Strict: unknown keys are rejected here, matching
@@ -265,6 +392,37 @@ Task<std::string, Error> tool_run_command(const ToolSet &tools, RunCommandInput 
 
 } // namespace
 
+std::string describe_tool_call(const provider::ToolCall &call) {
+    if (call.name == "read_file") {
+        const auto input = parse_input<ReadFileInput>(call.input);
+        if (input) return "Read " + bounded_text(input->path, k_max_call_summary_bytes);
+    }
+    if (call.name == "run_command") {
+        const auto input = parse_input<RunCommandInput>(call.input);
+        if (input) {
+            auto command = bounded_text(normalize_newlines(input->command), k_max_call_summary_bytes);
+            return "Run command\n  $ " + indent_lines(command, "    ");
+        }
+    }
+    return "Run " + bounded_text(call.name, k_max_call_summary_bytes);
+}
+
+std::string summarize_tool_result(const provider::ToolCall &call, const provider::ToolResult &result) {
+    if (call.name == "read_file") {
+        if (result.is_error) return generic_result_summary(result);
+        usize lines = 0;
+        if (!result.content.empty()) {
+            lines = static_cast<usize>(std::ranges::count(result.content, '\n'));
+            if (!result.content.ends_with('\n')) ++lines;
+        }
+        auto summary = line_count(lines) + " · " + byte_count(result.content.size());
+        if (result.content.contains("... [truncated after ")) summary += " · truncated";
+        return summary;
+    }
+    if (call.name == "run_command") return command_result_summary(result);
+    return generic_result_summary(result);
+}
+
 Result<ToolPolicy> load_tool_policy() {
     ToolPolicy policy;
     auto timeout = parse_bounded_environment<i64>("LIMINAL_COMMAND_TIMEOUT_MS", policy.command_timeout.count(), k_min_command_timeout_ms,
@@ -332,6 +490,7 @@ Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &cal
     if (call.name == "run_command") {
         auto input = co_await or_fail(parse_input<RunCommandInput>(call.input));
         result.content = co_await tool_run_command(*this, std::move(input)).or_fail();
+        result.is_error = !result.content.starts_with("exit_code: 0\n");
         co_return result;
     }
     co_await fail(Error::tool("unknown tool: " + call.name));
