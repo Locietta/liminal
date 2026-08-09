@@ -42,14 +42,19 @@ struct ConsoleRenderer {
     lighter::Error move_end();
     lighter::Error move_document_home();
     lighter::Error move_document_end();
+    lighter::Error replace_prompt(std::string text);
+    lighter::Error set_external_editor_active(bool active);
     lighter::Error scroll(i32 rows);
     lighter::Error page(i32 direction);
     lighter::Error resize(lighter::TerminalSize size);
     lighter::Error redraw();
     lighter::Error flush();
+    void pause_rendering() noexcept;
+    lighter::Error resume_rendering();
     void set_redraw_scheduler(std::copyable_function<void()> scheduler);
     lighter::Error clear_prompt();
     bool prompt_empty() const noexcept;
+    std::string prompt_text() const;
     std::string take_prompt();
 
     lighter::TerminalSession *terminal;
@@ -58,6 +63,7 @@ struct ConsoleRenderer {
     std::optional<Frame> previous_frame;
     std::copyable_function<void()> redraw_scheduler;
     bool redraw_pending = false;
+    bool rendering_paused = false;
 };
 
 } // namespace liminal::tui

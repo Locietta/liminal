@@ -615,6 +615,12 @@ void SessionScreen::move_document_end() {
     mark_editing();
 }
 
+void SessionScreen::replace_prompt(std::string text) {
+    prompt_history.edited();
+    composer.replace(std::move(text));
+    mark_editing();
+}
+
 void SessionScreen::clear_prompt() {
     prompt_history.edited();
     composer.clear();
@@ -737,11 +743,13 @@ Frame SessionScreen::frame() const {
 
     if (status) {
         std::string status_text;
-        if (anchor) {
+        if (external_editor_active) {
+            status_text = "Save and close external editor to continue";
+        } else if (anchor) {
             status_text = "history";
             if (unread) status_text += " | new output";
         } else {
-            status_text = "Up/Down/wheel scroll | Ctrl+Up/Down prompts | Ctrl+J newline | Enter send";
+            status_text = "Up/Down/wheel scroll | Ctrl+Up/Down prompts | Ctrl+G editor | Ctrl+J newline | Enter send";
         }
         result.surface.write(prompt_row - 1, 0, status_text, Style::MUTED);
     }

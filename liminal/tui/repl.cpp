@@ -1,6 +1,7 @@
 #include "repl.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstdio>
 #include <deque>
@@ -22,6 +23,7 @@
 #include <lighter/async/io/watcher.h>
 
 #include <liminal/tui/console_renderer.h>
+#include <liminal/tui/external_editor.h>
 
 namespace liminal::tui {
 
@@ -67,6 +69,22 @@ struct PromptQueue {
     }
 
     std::deque<std::string> pending;
+    lighter::Event ready;
+};
+
+struct ExternalEditorRequests {
+    void request() {
+        pending = true;
+        ready.set();
+    }
+
+    Task<void> next() {
+        while (!pending) co_await ready.wait();
+        pending = false;
+        ready.reset();
+    }
+
+    bool pending = false;
     lighter::Event ready;
 };
 
@@ -116,7 +134,8 @@ struct PromptReader {
     }
 };
 
-lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, ConsoleRenderer &renderer, PromptQueue &prompts) {
+lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, ConsoleRenderer &renderer, PromptQueue &prompts,
+                                    ExternalEditorRequests &editor_requests) {
     switch (event.kind) {
         case TerminalEventKind::TEXT:
         case TerminalEventKind::PASTE: return renderer.insert(event.text);
@@ -125,6 +144,10 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             const bool control = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::CONTROL);
             const bool shift = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::SHIFT);
             const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
+            if (event.key == TerminalKey::CHARACTER && control && !alt_gr && event.text == "g") {
+                editor_requests.request();
+                return {};
+            }
             if (event.key == TerminalKey::ENTER) {
                 if (shift) return renderer.insert("\n");
                 prompts.push(finish_prompt(renderer.take_prompt()));
@@ -162,8 +185,8 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
     return {};
 }
 
-Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &renderer, PromptQueue &prompts, TurnControl &control,
-                              SessionFailure &failure) {
+Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &renderer, PromptQueue &prompts,
+                              ExternalEditorRequests &editor_requests, TurnControl &control, SessionFailure &failure) {
     while (true) {
         auto event = co_await terminal.next_event();
         if (!event) {
@@ -171,8 +194,65 @@ Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &render
             co_return 1;
         }
         if (event->kind == TerminalEventKind::CLOSED) co_return 0;
-        if (auto error = apply_terminal_event(*event, renderer, prompts)) {
+        if (auto error = apply_terminal_event(*event, renderer, prompts, editor_requests)) {
             failure.record("cannot render terminal input", error, control);
+            co_return 1;
+        }
+    }
+}
+
+Task<i32> external_editor_loop(ExternalEditorRequests &requests, TerminalSession &terminal, ConsoleRenderer &renderer, TurnControl &control,
+                               SessionFailure &failure) {
+    while (true) {
+        co_await requests.next();
+        auto command = resolve_external_editor_command();
+        if (!command) {
+            if (auto error = renderer.notice("[editor error: " + command.error().detail + "]\n")) {
+                failure.record("cannot render external editor error", error, control);
+                co_return 1;
+            }
+            continue;
+        }
+
+        const auto seed = renderer.prompt_text();
+        if (auto error = renderer.set_external_editor_active(true)) {
+            failure.record("cannot render external editor status", error, control);
+            co_return 1;
+        }
+        if (auto error = renderer.flush()) {
+            failure.record("cannot flush external editor status", error, control);
+            co_return 1;
+        }
+        renderer.pause_rendering();
+        if (auto error = terminal.suspend()) {
+            renderer.set_external_editor_active(false);
+            renderer.resume_rendering();
+            failure.record("cannot restore terminal for external editor", error, control);
+            co_return 1;
+        }
+
+        auto edited = co_await run_external_editor(seed, *command);
+        if (auto error = terminal.resume()) {
+            failure.record("cannot resume terminal after external editor", error, control);
+            co_return 1;
+        }
+        auto size = terminal.size();
+        if (!size) {
+            failure.record("cannot read terminal size after external editor", size.error(), control);
+            co_return 1;
+        }
+
+        renderer.set_external_editor_active(false);
+        if (!edited) {
+            renderer.notice("[editor error: " + edited.error().detail + "]\n");
+        } else {
+            auto text = *std::move(edited);
+            while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())) != 0) text.pop_back();
+            renderer.replace_prompt(std::move(text));
+        }
+        renderer.resize(*size);
+        if (auto error = renderer.resume_rendering()) {
+            failure.record("cannot redraw after external editor", error, control);
             co_return 1;
         }
     }
@@ -460,29 +540,34 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             exit_code = 1;
         } else if (interactive) {
             PromptQueue prompts;
+            ExternalEditorRequests editor_requests;
             PromptReader reader{.prompts = &prompts};
             lighter::Event render_requested;
             renderer.set_redraw_scheduler([&render_requested] { render_requested.set(); });
 #ifndef _WIN32
             auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
                                           signal_monitor(interrupts, renderer, control, failure),
-                                          terminal_input_loop(terminal, renderer, prompts, control, failure),
+                                          terminal_input_loop(terminal, renderer, prompts, editor_requests, control, failure),
                                           render_monitor(render_requested, renderer, control, failure),
+                                          external_editor_loop(editor_requests, terminal, renderer, control, failure),
                                           suspend_monitor(suspend_controls, terminal, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
             if (raced.index() == 3) exit_code = std::get<3>(raced);
             if (raced.index() == 4) exit_code = std::get<4>(raced);
+            if (raced.index() == 5) exit_code = std::get<5>(raced);
 #else
             auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
                                           signal_monitor(interrupts, renderer, control, failure),
-                                          terminal_input_loop(terminal, renderer, prompts, control, failure),
-                                          render_monitor(render_requested, renderer, control, failure));
+                                          terminal_input_loop(terminal, renderer, prompts, editor_requests, control, failure),
+                                          render_monitor(render_requested, renderer, control, failure),
+                                          external_editor_loop(editor_requests, terminal, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
             if (raced.index() == 3) exit_code = std::get<3>(raced);
+            if (raced.index() == 4) exit_code = std::get<4>(raced);
 #endif
             renderer.set_redraw_scheduler({});
         } else {

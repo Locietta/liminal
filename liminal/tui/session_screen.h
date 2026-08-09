@@ -122,6 +122,7 @@ struct SessionScreen {
     void move_end();
     void move_document_home();
     void move_document_end();
+    void replace_prompt(std::string text);
     void clear_prompt();
     std::string take_prompt();
 
@@ -142,6 +143,7 @@ struct SessionScreen {
     std::optional<std::string> effort;
     std::optional<ViewportAnchor> anchor;
     bool unread = false;
+    bool external_editor_active = false;
     SessionState state = SessionState::EDITING;
     mutable std::unordered_map<u64, CachedBlockLayout> layout_cache;
     mutable LayoutDiagnostics diagnostics;

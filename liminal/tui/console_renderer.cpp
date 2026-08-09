@@ -181,6 +181,16 @@ lighter::Error ConsoleRenderer::move_document_end() {
     return redraw();
 }
 
+lighter::Error ConsoleRenderer::replace_prompt(std::string text) {
+    screen.replace_prompt(std::move(text));
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::set_external_editor_active(bool active) {
+    screen.external_editor_active = active;
+    return redraw();
+}
+
 lighter::Error ConsoleRenderer::scroll(i32 rows) {
     screen.scroll(rows);
     return redraw();
@@ -198,6 +208,10 @@ lighter::Error ConsoleRenderer::resize(lighter::TerminalSize size) {
 
 lighter::Error ConsoleRenderer::redraw() {
     if (!terminal) return {};
+    if (rendering_paused) {
+        redraw_pending = true;
+        return {};
+    }
     if (redraw_scheduler) {
         if (!redraw_pending) {
             redraw_pending = true;
@@ -209,7 +223,7 @@ lighter::Error ConsoleRenderer::redraw() {
 }
 
 lighter::Error ConsoleRenderer::flush() {
-    if (!terminal) return {};
+    if (!terminal || rendering_paused) return {};
     redraw_pending = false;
     auto frame = screen.frame();
     auto encoded = encode_frame_diff(previous_frame ? &*previous_frame : nullptr, frame);
@@ -220,6 +234,15 @@ lighter::Error ConsoleRenderer::flush() {
     return {};
 }
 
+void ConsoleRenderer::pause_rendering() noexcept { rendering_paused = true; }
+
+lighter::Error ConsoleRenderer::resume_rendering() {
+    rendering_paused = false;
+    redraw_pending = false;
+    previous_frame.reset();
+    return redraw();
+}
+
 void ConsoleRenderer::set_redraw_scheduler(std::copyable_function<void()> scheduler) { redraw_scheduler = std::move(scheduler); }
 
 lighter::Error ConsoleRenderer::clear_prompt() {
@@ -228,6 +251,8 @@ lighter::Error ConsoleRenderer::clear_prompt() {
 }
 
 bool ConsoleRenderer::prompt_empty() const noexcept { return screen.composer.empty(); }
+
+std::string ConsoleRenderer::prompt_text() const { return screen.composer.text; }
 
 std::string ConsoleRenderer::take_prompt() { return screen.take_prompt(); }
 

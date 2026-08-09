@@ -1,13 +1,18 @@
+#include <chrono>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 #include <lighter/types.hpp>
+#include <lighter/async/io/loop.h>
 #include <lighter/encoding/utf8.h>
 
 #include <liminal/event.h>
 #include <liminal/tui/headless.h>
+#include <liminal/tui/external_editor.h>
 #include <liminal/tui/rich_text.h>
 #include <liminal/tui/session_screen.h>
 #include <liminal/tui/surface.h>
@@ -183,6 +188,11 @@ void check_multiline_navigation_history_and_projection() {
     active.apply(AssistantTextDelta{.text = "streaming"});
     active.insert("queued draft");
     require(active.state == tui::SessionState::STREAMING, "editing a draft during a turn must not overwrite the turn's semantic state");
+
+    active.external_editor_active = true;
+    active.resize({40, 8});
+    require(frame_text(active.frame()).contains("Save and close external editor"),
+            "the status row must explain how to return from an external editor handoff");
 }
 
 void check_rich_output_and_concurrent_tools() {
@@ -298,6 +308,44 @@ diff --git a/file.cpp b/file.cpp
     require(tools.state == tui::SessionState::RUNNING_TOOLS, "one completed tool must not hide a concurrently running sibling");
     tools.apply(ToolCompleted{.call_id = "two", .name = "run_tests"});
     require(tools.state == tui::SessionState::STREAMING, "tool state may settle only after the final concurrent tool completes");
+}
+
+void check_external_editor_round_trip(std::string_view executable) {
+    auto parsed = tui::parse_external_editor_command("code --wait \"profile name\"");
+    require(parsed.has_value() && parsed->arguments == std::vector<std::string>{"code", "--wait", "profile name"},
+            "external editor commands must preserve quoted platform-native arguments");
+
+    tui::ExternalEditorCommand command{
+        .arguments = {std::filesystem::absolute(executable).string(), "--external-editor-helper"},
+    };
+    lighter::EventLoop loop;
+    auto task = tui::run_external_editor("original draft", command);
+    loop.schedule(task);
+    loop.run();
+    auto edited = task.result();
+    require(edited.has_value() && *edited == "edited externally\n\n",
+            "external editor handoff must seed a temporary file and reload its saved contents");
+
+#ifdef _WIN32
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto directory = std::filesystem::temp_directory_path() / ("liminal-editor-test-" + std::to_string(nonce));
+    std::filesystem::create_directories(directory);
+    const auto batch = directory / "editor helper.cmd";
+    {
+        std::ofstream output(batch, std::ios::binary | std::ios::trunc);
+        output << "@echo off\r\n>\"%~1\" echo edited by batch\r\n";
+        require(static_cast<bool>(output), "failed to create the Windows batch editor fixture");
+    }
+    tui::ExternalEditorCommand batch_command{.arguments = {batch.string()}};
+    auto batch_task = tui::run_external_editor("batch seed", batch_command);
+    loop.schedule(batch_task);
+    loop.run();
+    auto batch_edited = batch_task.result();
+    require(batch_edited.has_value() && batch_edited->starts_with("edited by batch"),
+            "Windows editor handoff must launch .cmd shims such as code.cmd through COMSPEC");
+    std::error_code remove_error;
+    std::filesystem::remove_all(directory, remove_error);
+#endif
 }
 
 void check_scroll_resize_and_unread_state() {
@@ -418,11 +466,12 @@ void check_headless_resize_and_markup_stress() {
     require(snapshot.text_bytes <= 8 * 1024 * 1024, "stress session must remain inside its declared text budget");
 }
 
-i32 run_all() {
+i32 run_all(std::string_view executable) {
     check_surface_cells_and_encoding();
     check_composer_editing();
     check_multiline_navigation_history_and_projection();
     check_rich_output_and_concurrent_tools();
+    check_external_editor_round_trip(executable);
     check_scroll_resize_and_unread_state();
     check_headless_virtual_time_and_snapshots();
     check_headless_resize_and_markup_stress();
@@ -431,9 +480,14 @@ i32 run_all() {
 
 } // namespace
 
-i32 main() {
+i32 main(i32 argc, char **argv) {
+    if (argc == 3 && std::string_view(argv[1]) == "--external-editor-helper") {
+        std::ofstream output(argv[2], std::ios::binary | std::ios::trunc);
+        output << "edited externally\n\n";
+        return output ? 0 : 1;
+    }
     try {
-        return run_all();
+        return run_all(argv[0]);
     } catch (const std::exception &error) {
         std::fputs(error.what(), stderr);
         std::fputc('\n', stderr);
