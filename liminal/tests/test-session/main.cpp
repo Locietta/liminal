@@ -75,10 +75,33 @@ void test_cumulative_token_usage() {
     require(selected.has_value() && log.tokens_used() == 97, "branch selection changed tokens already consumed by the session");
 }
 
+void test_reply_selection() {
+    session::Session log({.value = 13});
+    log.append(session::UserMessage{.text = "first"});
+    log.append(session::AgentOutput{.parts = {provider::TextPart{.text = "first answer"}}});
+    const auto first_leaf = *log.active_leaf;
+    log.append(session::UserMessage{.text = "second"});
+    log.append(session::AgentOutput{
+        .parts = {provider::TextPart{.text = "checking"}, provider::ToolCall{.id = "call", .name = "read_file"}},
+    });
+    log.append(session::ToolResults{});
+    log.append(session::AgentOutput{
+        .parts = {provider::OpaquePart{.provider_tag = "test", .payload = "private"}, provider::TextPart{.text = "second answer"}}});
+
+    require(log.reply_from_latest() == "checking\n\nsecond answer",
+            "latest reply did not join textual tool-round segments or exclude non-text parts");
+    require(log.reply_from_latest(2) == "first answer", "older reply selection used the wrong newest-first ordinal");
+    require(!log.reply_from_latest(0) && !log.reply_from_latest(3), "reply selection accepted an invalid ordinal");
+
+    auto selected = log.select_leaf(first_leaf);
+    require(selected.has_value() && log.reply_from_latest() == "first answer", "reply selection escaped the active session branch");
+}
+
 i32 run_all() {
     test_append_only_branching();
     test_checkpoint_projection();
     test_cumulative_token_usage();
+    test_reply_selection();
     return 0;
 }
 

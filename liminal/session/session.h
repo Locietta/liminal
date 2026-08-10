@@ -76,6 +76,8 @@ struct Session {
 
     const SessionEntry *find(EntryId id) const noexcept;
     std::vector<const SessionEntry *> active_branch() const;
+    /// Returns the Nth-newest textual assistant reply on the active branch.
+    std::optional<std::string> reply_from_latest(usize ordinal = 1) const;
     u64 tokens_used() const noexcept;
 
     SessionId id;

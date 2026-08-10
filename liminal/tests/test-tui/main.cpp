@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -12,6 +14,7 @@
 #include <lighter/encoding/utf8.h>
 
 #include <liminal/event.h>
+#include <liminal/tui/clipboard.h>
 #include <liminal/tui/headless.h>
 #include <liminal/tui/external_editor.h>
 #include <liminal/tui/rich_text.h>
@@ -512,6 +515,46 @@ void check_external_editor_round_trip(std::string_view executable) {
 #endif
 }
 
+void check_clipboard_helper() {
+#ifndef _WIN32
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto directory = std::filesystem::temp_directory_path() / ("liminal-clipboard-test-" + std::to_string(nonce));
+    std::filesystem::create_directories(directory);
+    const auto helper = directory / "wl-copy";
+    const auto output_path = directory / "clipboard.txt";
+    {
+        std::ofstream output(helper, std::ios::binary | std::ios::trunc);
+        output << "#!/bin/sh\ncat > \"$LIMINAL_CLIPBOARD_TEST_OUTPUT\"\n";
+        require(static_cast<bool>(output), "failed to create the clipboard helper fixture");
+    }
+    std::filesystem::permissions(helper, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
+
+    const auto *old_path_pointer = std::getenv("PATH");
+    const std::string old_path = old_path_pointer ? old_path_pointer : "";
+    const auto test_path = directory.string() + ":" + old_path;
+    setenv("PATH", test_path.c_str(), 1);
+    setenv("WAYLAND_DISPLAY", "liminal-test", 1);
+    setenv("LIMINAL_CLIPBOARD_TEST_OUTPUT", output_path.c_str(), 1);
+
+    lighter::EventLoop loop;
+    auto task = tui::copy_to_clipboard("copied from Liminal\n");
+    loop.schedule(task);
+    loop.run();
+    const auto copied = task.result();
+
+    setenv("PATH", old_path.c_str(), 1);
+    unsetenv("WAYLAND_DISPLAY");
+    unsetenv("LIMINAL_CLIPBOARD_TEST_OUTPUT");
+
+    std::ifstream input(output_path, std::ios::binary);
+    const std::string contents(std::istreambuf_iterator<char>(input), {});
+    std::error_code remove_error;
+    std::filesystem::remove_all(directory, remove_error);
+    require(copied.has_value() && contents == "copied from Liminal\n",
+            "Linux clipboard integration must stream the reply to a session-compatible helper");
+#endif
+}
+
 void check_scroll_resize_and_unread_state() {
     tui::SessionScreen screen;
     screen.resize({18, 8});
@@ -655,6 +698,7 @@ i32 run_all(std::string_view executable) {
     check_multiline_navigation_history_and_projection();
     check_rich_output_and_concurrent_tools();
     check_external_editor_round_trip(executable);
+    check_clipboard_helper();
     check_scroll_resize_and_unread_state();
     check_headless_virtual_time_and_snapshots();
     check_headless_resize_and_markup_stress();

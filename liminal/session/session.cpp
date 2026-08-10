@@ -61,6 +61,38 @@ std::vector<const SessionEntry *> Session::active_branch() const {
     return branch;
 }
 
+std::optional<std::string> Session::reply_from_latest(usize ordinal) const {
+    if (ordinal == 0) return std::nullopt;
+
+    std::vector<std::string> replies;
+    std::string reply;
+    bool in_turn = false;
+    const auto finish_turn = [&] {
+        if (!reply.empty()) replies.push_back(std::exchange(reply, {}));
+    };
+    for (const auto *entry : active_branch()) {
+        if (std::holds_alternative<UserMessage>(entry->payload)) {
+            if (in_turn) finish_turn();
+            in_turn = true;
+            continue;
+        }
+        if (!in_turn) continue;
+        const auto *output = std::get_if<AgentOutput>(&entry->payload);
+        if (!output) continue;
+
+        std::string segment;
+        for (const auto &part : output->parts) {
+            if (const auto *text = std::get_if<provider::TextPart>(&part)) segment += text->text;
+        }
+        if (segment.empty()) continue;
+        if (!reply.empty()) reply += "\n\n";
+        reply += segment;
+    }
+    if (in_turn) finish_turn();
+    if (ordinal > replies.size()) return std::nullopt;
+    return replies[replies.size() - ordinal];
+}
+
 u64 Session::tokens_used() const noexcept {
     u64 total = 0;
     for (const auto &entry : entries) {
