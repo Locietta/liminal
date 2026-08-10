@@ -1,27 +1,23 @@
 #include "default_instructions.h"
 
 #include <cstddef>
+#include <span>
 #include <string>
 
 namespace liminal {
 
 namespace {
 
-constexpr unsigned char k_runtime_prompt[] = {
-#include "runtime-tools.md.h"
-};
+extern "C" {
+extern const std::byte _binary_runtime_tools_md_start[];
+extern const std::byte _binary_runtime_tools_md_end[];
+extern const std::byte _binary_default_agent_md_start[];
+extern const std::byte _binary_default_agent_md_end[];
+}
 
-constexpr unsigned char k_application_prompt[] = {
-#include "default-agent.md.h"
-};
-
-static_assert(k_runtime_prompt[sizeof(k_runtime_prompt) - 1] == 0);
-static_assert(k_application_prompt[sizeof(k_application_prompt) - 1] == 0);
-
-template <std::size_t Size>
-std::string embedded_prompt(const unsigned char (&content)[Size]) {
-    static_assert(Size > 0);
-    return {reinterpret_cast<const char *>(content), Size - 1};
+std::string embedded_prompt(const std::byte *begin, const std::byte *end) {
+    const auto content = std::span(begin, end);
+    return {reinterpret_cast<const char *>(content.data()), content.size()};
 }
 
 } // namespace
@@ -31,7 +27,7 @@ context::InstructionSource default_runtime_instruction() {
         .authority = context::InstructionAuthority::RUNTIME,
         .trust = context::InstructionTrust::PLATFORM,
         .origin = "builtin:runtime-tools",
-        .content = embedded_prompt(k_runtime_prompt),
+        .content = embedded_prompt(_binary_runtime_tools_md_start, _binary_runtime_tools_md_end),
     };
 }
 
@@ -40,7 +36,7 @@ context::InstructionSource default_application_instruction() {
         .authority = context::InstructionAuthority::APPLICATION,
         .trust = context::InstructionTrust::PLATFORM,
         .origin = "builtin:default-agent",
-        .content = embedded_prompt(k_application_prompt),
+        .content = embedded_prompt(_binary_default_agent_md_start, _binary_default_agent_md_end),
     };
 }
 

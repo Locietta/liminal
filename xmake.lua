@@ -1,4 +1,4 @@
-set_xmakever("3.0.0")
+set_xmakever("3.0.9")
 set_project("liminal")
 
 -- use releasedbg for development builds, ship with release
