@@ -84,6 +84,7 @@ option("__pixi_package_manager")
 option_end()
 
 includes("xmake/rules/*.lua")
+add_rules("ci.test-output")
 
 add_includedirs(".")
 
