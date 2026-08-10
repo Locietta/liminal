@@ -1,18 +1,37 @@
 #include "default_instructions.h"
 
+#include <cstddef>
+#include <string>
+
 namespace liminal {
+
+namespace {
+
+constexpr unsigned char k_runtime_prompt[] = {
+#include "runtime-tools.md.h"
+};
+
+constexpr unsigned char k_application_prompt[] = {
+#include "default-agent.md.h"
+};
+
+static_assert(k_runtime_prompt[sizeof(k_runtime_prompt) - 1] == 0);
+static_assert(k_application_prompt[sizeof(k_application_prompt) - 1] == 0);
+
+template <std::size_t Size>
+std::string embedded_prompt(const unsigned char (&content)[Size]) {
+    static_assert(Size > 0);
+    return {reinterpret_cast<const char *>(content), Size - 1};
+}
+
+} // namespace
 
 context::InstructionSource default_runtime_instruction() {
     return {
         .authority = context::InstructionAuthority::RUNTIME,
         .trust = context::InstructionTrust::PLATFORM,
         .origin = "builtin:runtime-tools",
-        .content =
-            "You are Liminal, a coding and general-purpose assistant.\n"
-            "For workspace discovery, prefer `rg` for text search and `rg --files` for file lists. Use the installed uutils "
-            "commands for other routine filesystem and text operations; assume ripgrep and uutils are available on Windows and Linux.\n"
-            "Use `apply_patch` for manual file edits instead of rewriting files through the shell. Use hosted web tools when a task "
-            "needs current or external information, and cite the sources you rely on.",
+        .content = embedded_prompt(k_runtime_prompt),
     };
 }
 
@@ -21,7 +40,7 @@ context::InstructionSource default_application_instruction() {
         .authority = context::InstructionAuthority::APPLICATION,
         .trust = context::InstructionTrust::PLATFORM,
         .origin = "builtin:default-agent",
-        .content = "Be helpful, direct, and careful.",
+        .content = embedded_prompt(k_application_prompt),
     };
 }
 
