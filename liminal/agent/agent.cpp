@@ -80,13 +80,13 @@ Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::Too
     } else {
         result = *std::move(outcome);
     }
-    const auto presentation = describe_tool_call(call);
+    const auto presentation = tools.describe(call);
     emit(events, ToolCompleted{
                      .call_id = call.id,
                      .name = call.name,
                      .description = presentation.description,
                      .command = presentation.command,
-                     .summary = summarize_tool_result(call, result),
+                     .summary = tools.summarize(call, result),
                      .is_error = result.is_error,
                  });
     co_return result;
@@ -192,7 +192,7 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
         std::vector<Task<provider::ToolResult>> pending;
         pending.reserve(calls.size());
         for (const auto *call : calls) {
-            const auto presentation = describe_tool_call(*call);
+            const auto presentation = tools->describe(*call);
             emit(events, ToolStarted{
                              .call_id = call->id,
                              .name = call->name,

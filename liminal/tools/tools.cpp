@@ -5,16 +5,18 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 
-#include <lighter/async/io/fs.h>
 #include <lighter/async/io/process.h>
 #include <lighter/async/runtime/timeout.h>
 #include <lighter/async/runtime/when.h>
 #include <lighter/codec/json/json.h>
+#include <lighter/utils/panic.h>
 
 namespace liminal {
 
@@ -42,6 +44,10 @@ constexpr usize k_max_preview_lines = 4;
 
 struct ReadFileInput {
     std::string path;
+    std::optional<u64> offset;
+    std::optional<usize> limit;
+    std::optional<usize> line_start;
+    std::optional<usize> line_end;
 };
 
 struct RunCommandInput {
@@ -212,6 +218,72 @@ Result<std::filesystem::path> resolve_read_path(const ToolSet &tools, const Read
     return resolved;
 }
 
+Result<std::string> read_byte_range(const std::filesystem::path &path, u64 offset, usize limit) {
+    if (limit == 0) return outcome_error(Error::tool("limit must be at least 1"));
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return outcome_error(Error::tool("cannot open '" + path.string() + "'"));
+
+    stream.seekg(0, std::ios::end);
+    const auto end = stream.tellg();
+    if (end < 0) return outcome_error(Error::tool("cannot size '" + path.string() + "'"));
+    const auto size = static_cast<u64>(end);
+    if (offset > size) {
+        return outcome_error(Error::tool("offset " + std::to_string(offset) + " exceeds file size " + std::to_string(size)));
+    }
+    if (offset > static_cast<u64>(std::numeric_limits<std::streamoff>::max())) {
+        return outcome_error(Error::tool("offset is too large for this platform"));
+    }
+    stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+
+    const auto available = size - offset;
+    const auto count = static_cast<usize>(std::min<u64>(available, limit));
+    std::string content(count, '\0');
+    stream.read(content.data(), static_cast<std::streamsize>(count));
+    content.resize(static_cast<usize>(stream.gcount()));
+    if (!stream && !stream.eof()) return outcome_error(Error::tool("cannot read '" + path.string() + "'"));
+    if (content.find('\0') != std::string::npos) return outcome_error(Error::tool("'" + path.string() + "' looks like a binary file"));
+    if (available > count) {
+        content += "\n... [truncated after " + std::to_string(count) + " bytes; next offset " + std::to_string(offset + count) + "]";
+    }
+    return content;
+}
+
+Result<std::string> read_line_range(const std::filesystem::path &path, usize first, std::optional<usize> last) {
+    if (first == 0) return outcome_error(Error::tool("line_start must be at least 1"));
+    if (last && (*last == 0 || *last < first)) {
+        return outcome_error(Error::tool("line_end must be at least line_start"));
+    }
+
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return outcome_error(Error::tool("cannot open '" + path.string() + "'"));
+
+    std::string content;
+    std::string line;
+    usize line_number = 0;
+    bool truncated = false;
+    while (std::getline(stream, line)) {
+        ++line_number;
+        if (line_number < first) continue;
+        if (last && line_number > *last) break;
+        if (line.find('\0') != std::string::npos) return outcome_error(Error::tool("'" + path.string() + "' looks like a binary file"));
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (content.size() + line.size() + 1 > k_file_limit) {
+            truncated = true;
+            break;
+        }
+        content += line;
+        content += '\n';
+    }
+    if (!stream.eof() && stream.fail() && !(last && line_number > *last)) {
+        return outcome_error(Error::tool("cannot read '" + path.string() + "'"));
+    }
+    if (truncated) {
+        content +=
+            "... [truncated before line " + std::to_string(line_number) + "; continue with line_start " + std::to_string(line_number) + "]";
+    }
+    return content;
+}
+
 std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input) {
     auto resolved = resolve_read_path(tools, input);
     if (!resolved) return "Error: " + resolved.error().message();
@@ -226,17 +298,14 @@ std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input) {
         return "Error: '" + path + "' is not a regular file";
     }
 
-    auto content = lighter::fs::sync::read_to_string(path, k_file_limit + 1);
-    if (!content) {
-        return "Error: cannot read '" + path + "': " + std::string(content.error().message());
-    }
-    if (content->find('\0') != std::string::npos) {
-        return "Error: '" + path + "' looks like a binary file";
-    }
-    if (content->size() > k_file_limit) {
-        content->resize(k_file_limit);
-        *content += "\n... [truncated after " + std::to_string(k_file_limit) + " bytes]";
-    }
+    const bool lines = input.line_start.has_value() || input.line_end.has_value();
+    const bool bytes = input.offset.has_value() || input.limit.has_value();
+    if (lines && bytes) return "Error: line ranges cannot be combined with byte offsets";
+
+    const auto byte_limit = std::min(input.limit.value_or(k_file_limit), k_file_limit);
+    Result<std::string> content = lines ? read_line_range(*resolved, input.line_start.value_or(1), input.line_end) :
+                                          read_byte_range(*resolved, input.offset.value_or(0), byte_limit);
+    if (!content) return "Error: " + content.error().message();
     return *std::move(content);
 }
 
@@ -382,35 +451,123 @@ Task<std::string, Error> tool_run_command(const ToolSet &tools, RunCommandInput 
 
 } // namespace
 
-ToolCallPresentation describe_tool_call(const provider::ToolCall &call) {
-    if (call.name == "read_file") {
-        const auto input = parse_input<ReadFileInput>(call.input);
-        if (input) return {.description = "Read " + bounded_text(input->path, k_max_call_summary_bytes)};
+namespace {
+
+ToolCallPresentation describe_read_file(const provider::ToolCall &call) {
+    const auto input = parse_input<ReadFileInput>(call.input);
+    if (!input) return {.description = "Read file"};
+    auto description = "Read " + bounded_text(input->path, k_max_call_summary_bytes);
+    if (input->line_start || input->line_end) {
+        description += " lines " + std::to_string(input->line_start.value_or(1));
+        description += input->line_end ? "-" + std::to_string(*input->line_end) : "+";
+    } else if (input->offset || input->limit) {
+        description += " bytes from " + std::to_string(input->offset.value_or(0));
+        if (input->limit) description += " limit " + std::to_string(*input->limit);
     }
-    if (call.name == "run_command") {
-        const auto input = parse_input<RunCommandInput>(call.input);
-        if (input) {
-            return {.command = bounded_text(normalize_newlines(input->command), k_max_call_summary_bytes)};
-        }
+    return {.description = std::move(description)};
+}
+
+ToolCallPresentation describe_run_command(const provider::ToolCall &call) {
+    const auto input = parse_input<RunCommandInput>(call.input);
+    if (input) return {.command = bounded_text(normalize_newlines(input->command), k_max_call_summary_bytes)};
+    return {.description = "Run command"};
+}
+
+std::string summarize_read_file(const provider::ToolCall &, const provider::ToolResult &result) {
+    if (result.is_error) return generic_result_summary(result);
+    usize lines = 0;
+    if (!result.content.empty()) {
+        lines = static_cast<usize>(std::ranges::count(result.content, '\n'));
+        if (!result.content.ends_with('\n')) ++lines;
+    }
+    auto summary = line_count(lines) + " · " + byte_count(result.content.size());
+    if (result.content.contains("... [truncated ")) summary += " · truncated";
+    return summary;
+}
+
+std::string summarize_run_command(const provider::ToolCall &, const provider::ToolResult &result) { return command_result_summary(result); }
+
+ToolRegistration read_file_registration() {
+    return {
+        .definition =
+            {
+                .name = "read_file",
+                .description = "Read a local text file or a bounded byte/line range. Use byte offsets for large generated files and "
+                               "one-based inclusive line ranges for source inspection. Do not combine byte and line ranges.",
+                .input_schema =
+                    {
+                        .properties =
+                            {
+                                {"path", {.type = "string", .description = "Absolute path, or a path relative to the working directory."}},
+                                {"offset", {.type = "integer", .description = "Zero-based byte offset. Defaults to 0."}},
+                                {"limit",
+                                 {.type = "integer", .description = "Maximum bytes to return, capped at 131072. Defaults to 131072."}},
+                                {"line_start", {.type = "integer", .description = "One-based first line. Defaults to 1."}},
+                                {"line_end", {.type = "integer", .description = "One-based inclusive last line. Omit to read onward."}},
+                            },
+                        .required = {"path"},
+                    },
+            },
+        .execute = [](const ToolSet &tools, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
+            auto input = co_await or_fail(parse_input<ReadFileInput>(call.input));
+            provider::ToolResult result{.call_id = call.id};
+            result.content = tool_read_file(tools, input);
+            result.is_error = result.content.starts_with("Error:");
+            co_return result;
+        },
+        .describe = describe_read_file,
+        .summarize = summarize_read_file,
+    };
+}
+
+ToolRegistration run_command_registration() {
+    return {
+        .definition =
+            {
+                .name = "run_command",
+#ifdef _WIN32
+                .description =
+                    "Run a PowerShell (pwsh) command in the working directory. Use this to inspect the environment, build, test, "
+                    "or perform actions.",
+                .input_schema = {.properties = {{"command",
+                                                 {.type = "string",
+                                                  .description =
+                                                      "PowerShell command text, passed as a single argument to pwsh -Command."}}},
+                                 .required = {"command"}},
+#else
+                .description = "Run a POSIX sh command in the working directory. Use this to inspect the environment, build, test, or "
+                               "perform actions.",
+                .input_schema = {.properties = {{"command",
+                                                 {.type = "string",
+                                                  .description = "POSIX shell command text, passed as a single argument to /bin/sh -lc."}}},
+                                 .required = {"command"}},
+#endif
+            },
+        .execute = [](const ToolSet &tools, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
+            auto input = co_await or_fail(parse_input<RunCommandInput>(call.input));
+            provider::ToolResult result{.call_id = call.id};
+            result.content = co_await tool_run_command(tools, std::move(input)).or_fail();
+            result.is_error = !result.content.starts_with("exit_code: 0\n");
+            co_return result;
+        },
+        .describe = describe_run_command,
+        .summarize = summarize_run_command,
+    };
+}
+
+const ToolRegistration *find_registration(const std::vector<ToolRegistration> &registrations, std::string_view name) {
+    const auto found = std::ranges::find(registrations, name, [](const auto &tool) { return std::string_view(tool.definition.name); });
+    return found == registrations.end() ? nullptr : &*found;
+}
+
+ToolCallPresentation fallback_description(const provider::ToolCall &call) {
+    if (call.name == "read_file") {
+        return {.description = "Read file"};
     }
     return {.description = "Run " + bounded_text(call.name, k_max_call_summary_bytes)};
 }
 
-std::string summarize_tool_result(const provider::ToolCall &call, const provider::ToolResult &result) {
-    if (call.name == "read_file") {
-        if (result.is_error) return generic_result_summary(result);
-        usize lines = 0;
-        if (!result.content.empty()) {
-            lines = static_cast<usize>(std::ranges::count(result.content, '\n'));
-            if (!result.content.ends_with('\n')) ++lines;
-        }
-        auto summary = line_count(lines) + " · " + byte_count(result.content.size());
-        if (result.content.contains("... [truncated after ")) summary += " · truncated";
-        return summary;
-    }
-    if (call.name == "run_command") return command_result_summary(result);
-    return generic_result_summary(result);
-}
+} // namespace
 
 Result<ToolPolicy> load_tool_policy() {
     ToolPolicy policy;
@@ -430,59 +587,43 @@ Result<ToolPolicy> load_tool_policy() {
 }
 
 ToolSet::ToolSet(std::filesystem::path working_directory, ToolPolicy policy)
-    : working_directory(std::move(working_directory)), policy(policy) {}
+    : working_directory(std::move(working_directory)), policy(policy) {
+    lighter::check(static_cast<bool>(register_tool(read_file_registration())), "failed to register read_file");
+    lighter::check(static_cast<bool>(register_tool(run_command_registration())), "failed to register run_command");
+}
+
+Result<void> ToolSet::register_tool(ToolRegistration tool) {
+    if (tool.definition.name.empty()) return outcome_error(Error::config("tool name cannot be empty"));
+    if (!tool.execute) return outcome_error(Error::config("tool '" + tool.definition.name + "' has no executor"));
+    if (find_registration(registrations, tool.definition.name)) {
+        return outcome_error(Error::config("duplicate tool name: " + tool.definition.name));
+    }
+    registrations.push_back(std::move(tool));
+    return {};
+}
 
 std::vector<provider::ToolDefinition> ToolSet::definitions() const {
-    return {
-        {
-            .name = "read_file",
-            .description = "Read a local text file. Use this when you need the exact contents of a "
-                           "file before answering or acting.",
-            .input_schema = {.properties = {{"path",
-                                             {.type = "string",
-                                              .description = "Absolute path, or a path relative to the "
-                                                             "working directory."}}},
-                             .required = {"path"}},
-        },
-        {
-            .name = "run_command",
-#ifdef _WIN32
-            .description = "Run a PowerShell (pwsh) command in the working directory. Use this to "
-                           "inspect the environment, build, test, or perform actions.",
-            .input_schema = {.properties = {{"command",
-                                             {.type = "string",
-                                              .description = "PowerShell command text, passed as a "
-                                                             "single argument to pwsh -Command."}}},
-                             .required = {"command"}},
-#else
-            .description = "Run a POSIX sh command in the working directory. Use this to inspect "
-                           "the environment, build, test, or perform actions.",
-            .input_schema = {.properties = {{"command",
-                                             {.type = "string",
-                                              .description = "POSIX shell command text, passed as a "
-                                                             "single argument to /bin/sh -lc."}}},
-                             .required = {"command"}},
-#endif
-        },
-    };
+    std::vector<provider::ToolDefinition> result;
+    result.reserve(registrations.size());
+    for (const auto &tool : registrations) result.push_back(tool.definition);
+    return result;
 }
 
 Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &call) const {
-    provider::ToolResult result{.call_id = call.id};
-
-    if (call.name == "read_file") {
-        auto input = co_await or_fail(parse_input<ReadFileInput>(call.input));
-        result.content = tool_read_file(*this, input);
-        result.is_error = result.content.starts_with("Error:");
-        co_return result;
-    }
-    if (call.name == "run_command") {
-        auto input = co_await or_fail(parse_input<RunCommandInput>(call.input));
-        result.content = co_await tool_run_command(*this, std::move(input)).or_fail();
-        result.is_error = !result.content.starts_with("exit_code: 0\n");
-        co_return result;
+    if (const auto *tool = find_registration(registrations, call.name)) {
+        co_return co_await tool->execute(*this, call).or_fail();
     }
     co_await fail(Error::tool("unknown tool: " + call.name));
+}
+
+ToolCallPresentation ToolSet::describe(const provider::ToolCall &call) const {
+    const auto *tool = find_registration(registrations, call.name);
+    return tool && tool->describe ? tool->describe(call) : fallback_description(call);
+}
+
+std::string ToolSet::summarize(const provider::ToolCall &call, const provider::ToolResult &result) const {
+    const auto *tool = find_registration(registrations, call.name);
+    return tool && tool->summarize ? tool->summarize(call, result) : generic_result_summary(result);
 }
 
 } // namespace liminal
