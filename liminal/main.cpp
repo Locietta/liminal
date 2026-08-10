@@ -9,6 +9,7 @@
 #include <lighter/async/runtime/interrupt.h>
 
 #include <liminal/agent/agent.h>
+#include <liminal/agent/default_instructions.h>
 #include <liminal/context/context.h>
 #include <liminal/context/project_instructions.h>
 #include <liminal/model/catalog.h>
@@ -60,14 +61,20 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
             .origin = "environment:LIMINAL_SYSTEM_PROMPT",
             .content = system,
         });
+    } else {
+        instructions.push_back(default_runtime_instruction());
     }
     const char *developer = std::getenv("LIMINAL_DEVELOPER_PROMPT");
-    instructions.push_back({
-        .authority = context::InstructionAuthority::APPLICATION,
-        .trust = developer && *developer ? context::InstructionTrust::OPERATOR : context::InstructionTrust::PLATFORM,
-        .origin = developer && *developer ? "environment:LIMINAL_DEVELOPER_PROMPT" : "builtin:default-agent",
-        .content = developer && *developer ? developer : "You are a helpful coding assistant.",
-    });
+    if (developer && *developer) {
+        instructions.push_back({
+            .authority = context::InstructionAuthority::APPLICATION,
+            .trust = context::InstructionTrust::OPERATOR,
+            .origin = "environment:LIMINAL_DEVELOPER_PROMPT",
+            .content = developer,
+        });
+    } else {
+        instructions.push_back(default_application_instruction());
+    }
     auto instruction_files = pro::make_proxy<context::InstructionFilesFacade, context::LocalInstructionFiles>();
     auto project_root = context::discover_project_root(tools.working_directory);
     if (!project_root) {

@@ -1,5 +1,7 @@
 #include "agent.h"
 
+#include "default_instructions.h"
+
 #include <string>
 #include <utility>
 #include <vector>
@@ -94,14 +96,7 @@ Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::Too
 
 } // namespace
 
-Agent::Agent(model::Choice model, ToolSet &tools)
-    : Agent(std::move(model), tools,
-            {{
-                .authority = context::InstructionAuthority::APPLICATION,
-                .trust = context::InstructionTrust::PLATFORM,
-                .origin = "builtin:default-agent",
-                .content = "You are a helpful coding assistant.",
-            }}) {}
+Agent::Agent(model::Choice model, ToolSet &tools) : Agent(std::move(model), tools, default_agent_instructions()) {}
 
 Agent::Agent(model::Choice model, ToolSet &tools, std::vector<context::InstructionSource> instructions)
     : model(std::move(model)), tools(&tools), instructions(std::move(instructions)) {}

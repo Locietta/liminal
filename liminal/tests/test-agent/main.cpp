@@ -33,13 +33,22 @@ glz::generic read_file_input() {
     return input;
 }
 
+std::vector<context::InstructionSource> compact_test_instructions() {
+    return {{
+        .authority = context::InstructionAuthority::APPLICATION,
+        .origin = "test:compact",
+        .content = "test policy",
+    }};
+}
+
 void test_successful_turn() {
     ToolSet tools(std::filesystem::current_path().string());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>()
         .then_calls([](const provider::History &history, const std::vector<provider::ToolDefinition> &,
                        const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::TurnResponse, Error> {
-            require(history.size() == 2 && history[0].role == provider::Role::DEVELOPER && history[1].role == provider::Role::USER,
+            require(history.size() == 3 && history[0].role == provider::Role::SYSTEM && history[1].role == provider::Role::DEVELOPER &&
+                        history[2].role == provider::Role::USER,
                     "initial request used the wrong instruction or task roles");
             callbacks.on_text_delta("checking");
             provider::TurnResponse response{
@@ -58,8 +67,9 @@ void test_successful_turn() {
         })
         .then_calls([](const provider::History &history, const std::vector<provider::ToolDefinition> &,
                        const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::TurnResponse, Error> {
-            require(history.size() == 4 && history[0].role == provider::Role::DEVELOPER && history[1].role == provider::Role::USER &&
-                        history[2].role == provider::Role::ASSISTANT && history[3].role == provider::Role::USER,
+            require(history.size() == 5 && history[0].role == provider::Role::SYSTEM && history[1].role == provider::Role::DEVELOPER &&
+                        history[2].role == provider::Role::USER && history[3].role == provider::Role::ASSISTANT &&
+                        history[4].role == provider::Role::USER,
                     "tool continuation used the wrong message roles");
             callbacks.on_text_delta("done");
             provider::TurnResponse response{
@@ -86,10 +96,15 @@ void test_successful_turn() {
     Agent agent(std::move(choice), tools);
     require(agent.session.entries.empty(), "instructions must not be stored as session entries");
     auto initial_context = agent.context_manifest();
-    require(initial_context && initial_context->instructions.size() == 1 &&
-                initial_context->instructions[0].origin == "builtin:default-agent" &&
-                initial_context->provider_history[0].role == provider::Role::DEVELOPER,
-            "an agent must resolve its profile prompt as a sourced developer instruction");
+    require(initial_context && initial_context->instructions.size() == 2 &&
+                initial_context->instructions[0].origin == "builtin:runtime-tools" &&
+                initial_context->instructions[0].content.contains("`rg --files`") &&
+                initial_context->instructions[0].content.contains("uutils") &&
+                initial_context->instructions[0].content.contains("`apply_patch`") &&
+                initial_context->instructions[1].origin == "builtin:default-agent" &&
+                initial_context->provider_history[0].role == provider::Role::SYSTEM &&
+                initial_context->provider_history[1].role == provider::Role::DEVELOPER,
+            "an agent must resolve its runtime and application instructions");
 
     std::vector<Event> events;
     EventSink sink = [&events](const Event &event) { events.push_back(event); };
@@ -128,8 +143,9 @@ void test_successful_turn() {
     require(agent.session.entries.size() == 5 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries.back().payload),
             "compaction must append a checkpoint without deleting session entries");
     auto compacted_context = agent.context_manifest();
-    require(compacted_context && compacted_context->provider_history.size() == 2 &&
-                compacted_context->provider_history[0].role == provider::Role::DEVELOPER &&
+    require(compacted_context && compacted_context->provider_history.size() == 3 &&
+                compacted_context->provider_history[0].role == provider::Role::SYSTEM &&
+                compacted_context->provider_history[1].role == provider::Role::DEVELOPER &&
                 compacted_context->omitted_session_entries == 4 && compacted_context->session_entries.size() == 1,
             "compaction did not reconstruct the instruction prefix");
     provider_mock.verify();
@@ -198,7 +214,7 @@ void test_automatic_compaction() {
         .handle = provider_mock.handle(),
         .entry = {.provider = "fake", .id = "test", .context_window = 80, .max_output_tokens = 10},
     };
-    Agent agent(std::move(choice), tools);
+    Agent agent(std::move(choice), tools, compact_test_instructions());
     agent.session.append(session::UserMessage{.text = std::string(100, 'u')});
     agent.session.append(session::AgentOutput{.parts = {provider::TextPart{.text = std::string(100, 'a')}}});
 
@@ -241,7 +257,7 @@ void test_proactive_compaction_uses_reported_context() {
         .handle = provider_mock.handle(),
         .entry = {.provider = "fake", .id = "test", .context_window = 100, .max_output_tokens = 1},
     };
-    Agent agent(std::move(choice), tools);
+    Agent agent(std::move(choice), tools, compact_test_instructions());
     agent.session.append(session::UserMessage{.text = "old"});
     agent.session.append(session::AgentOutput{
         .parts = {provider::TextPart{.text = "answer"}},
@@ -278,7 +294,7 @@ void test_failed_turn_does_not_report_staged_compaction() {
         .handle = provider_mock.handle(),
         .entry = {.provider = "fake", .id = "test", .context_window = 80, .max_output_tokens = 10},
     };
-    Agent agent(std::move(choice), tools);
+    Agent agent(std::move(choice), tools, compact_test_instructions());
     agent.session.append(session::UserMessage{.text = std::string(100, 'u')});
     agent.session.append(session::AgentOutput{.parts = {provider::TextPart{.text = std::string(100, 'a')}}});
 
