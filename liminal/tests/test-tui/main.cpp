@@ -222,13 +222,31 @@ void check_multiline_navigation_history_and_projection() {
     screen.next_prompt();
     require(screen.composer.text == "scratch", "next-prompt navigation past the newest entry must restore the original draft");
 
+    tui::SessionScreen visual;
+    visual.resize({40, 10});
+    visual.set_model("test-model", std::optional<std::string>("high"));
+    const auto empty = visual.frame();
+    const auto row_uses_style = [&empty](i32 row, tui::Style style) {
+        const auto begin = empty.surface.cells.begin() + static_cast<isize>(row * empty.surface.columns);
+        return std::ranges::all_of(begin, begin + empty.surface.columns, [style](const tui::Cell &cell) { return cell.style == style; });
+    };
+    require(empty.surface.row_text(0) == "liminal", "the header must keep product identity separate from input metadata");
+    require(empty.surface.row_text(6).empty() && empty.surface.row_text(7) == "›" && empty.surface.row_text(8).empty() &&
+                row_uses_style(6, tui::Style::COMPOSER) && row_uses_style(7, tui::Style::COMPOSER) &&
+                row_uses_style(8, tui::Style::COMPOSER),
+            "an empty composer must render as a padded three-row input surface");
+    require(empty.cursor.row == 7 && empty.cursor.column == 2, "the composer cursor must begin after its concise prompt marker");
+    require(empty.surface.row_text(9).starts_with("test-model high · Enter send") &&
+                empty.surface.cells[static_cast<usize>(9 * empty.surface.columns)].style == tui::Style::CODE,
+            "the footer must place model metadata below the composer before interaction hints");
+
     screen.clear_prompt();
     screen.insert("one\ntwo\nthree\nfour");
     const auto frame = screen.frame();
     require(screen.viewport_rows() == 4, "a growing composer must retain transcript viewport space");
-    require(frame.surface.row_text(6) == "two" && frame.surface.row_text(7) == "three" && frame.surface.row_text(8) == "four",
+    require(frame.surface.row_text(5) == "  two" && frame.surface.row_text(6) == "  three" && frame.surface.row_text(7) == "  four",
             "an overflowing composer must vertically window around its cursor");
-    require(frame.cursor.row == 8 && frame.cursor.column == 4, "the multiline composer cursor must remain visible on its logical row");
+    require(frame.cursor.row == 7 && frame.cursor.column == 6, "the multiline composer cursor must remain visible on its logical row");
 
     tui::SessionScreen active;
     active.apply(AssistantTextDelta{.text = "streaming"});
@@ -464,7 +482,7 @@ void check_scroll_resize_and_unread_state() {
 
     const auto tail = screen.frame();
     require(frame_text(tail).contains("line-8"), "following viewport must show transcript tail");
-    require(tail.surface.row_text(0).starts_with("liminal  test"), "header must retain model identity when clipped");
+    require(tail.surface.row_text(0) == "liminal", "the header must retain concise product identity");
 
     screen.move_up();
     require(screen.anchor.has_value(), "Up at a composer boundary must scroll the transcript by one row");
@@ -485,7 +503,7 @@ void check_scroll_resize_and_unread_state() {
     screen.resize({10, 8});
     require(screen.anchor == original_anchor, "resize must preserve the semantic source anchor");
     const auto resized = screen.frame();
-    require(resized.surface.row_text(6).starts_with("history"), "resize must deterministically reflow browsing status");
+    require(resized.surface.row_text(7).starts_with("history"), "resize must deterministically reflow browsing status");
     require(tui::encode_frame(resized) == tui::encode_frame(screen.frame()), "unchanged state must produce an identical frame");
     const auto diagnostics = screen.layout_diagnostics();
     require(diagnostics.cache_hits > 0 && diagnostics.cached_blocks > 0, "repeated frames must reuse stable block layout");

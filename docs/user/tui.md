@@ -2,6 +2,10 @@
 
 Liminal's interactive terminal interface keeps the transcript and prompt composer available at the same time. Tool activity updates in place, and long drafts can be handed to an external editor.
 
+## Prompt composer
+
+The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline text aligns with the draft instead of the marker and remains vertically windowed around the cursor when it grows. The footer beneath the composer shows the selected model and interaction hints; browsing and external-editor states replace those hints when they need attention. On short terminals, decorative padding is removed before transcript or editing space.
+
 ## External prompt editor
 
 Press Ctrl+G to open the current draft in the command configured by `VISUAL`. If `VISUAL` is not set, Liminal uses `EDITOR`. Save and close the editor to return the edited text to the composer; the draft is not sent automatically.

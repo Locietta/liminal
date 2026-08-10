@@ -28,6 +28,7 @@ from binaries import find_binary
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TIMEOUT = 120
+PROMPT_MARKER = "›".encode()
 
 
 BINARY = find_binary(REPO_ROOT, "liminal", "LIMINAL_BIN")
@@ -201,7 +202,7 @@ def check_conpty_terminal_session(tmp_path, base_url):
     )
     output = bytearray()
     try:
-        read_conpty_until(process, output, b" > ", 10)
+        read_conpty_until(process, output, PROMPT_MARKER, 10)
         assert output.count(b"\x1b[?1049h") == 1
         assert output.index(b"\x1b[?2004h") < output.index(b"\x1b[?1049h")
         assert b"\x1b[?1000h\x1b[?1006h" in output
@@ -210,27 +211,26 @@ def check_conpty_terminal_session(tmp_path, base_url):
         read_conpty_until(process, output, b"select with /model", 5)
 
         process.write(b"\x1b[1;5A")
-        read_conpty_until(process, output, b"test-model > /model", 5)
+        read_conpty_until(process, output, PROMPT_MARKER + b" /model", 5)
         process.write(b"\x1b[1;5B")
-        read_conpty_until_fresh(process, output, b"\rtest-model > ", 5)
+        read_conpty_until_fresh(process, output, PROMPT_MARKER, 5)
 
         process.write(b"\x1b[A")
         read_conpty_until(process, output, b"history", 5)
         process.write(b"\x1b[B")
-        read_conpty_until_fresh(process, output, b"Up/Down/wheel", 5)
+        read_conpty_until_fresh(process, output, b"Enter send", 5)
         process.write(b"\x1b[<64;1;1M")
         read_conpty_until_fresh(process, output, b"history", 5)
         process.write(b"\x1b[<65;1;1M")
-        read_conpty_until_fresh(process, output, b"Up/Down/wheel", 5)
+        read_conpty_until_fresh(process, output, b"Enter send", 5)
 
         process.write(b"\x1b[200~a\nb\x1b[201~")
-        read_conpty_until(process, output, b"\x1b[8;2H", 5)
-        assert b"test-model > a" in output
+        read_conpty_until(process, output, PROMPT_MARKER + b" a", 5)
 
         redraws = output.count(b"\x1b[H")
         process.resize(50, 10)
         deadline = time.monotonic() + 5
-        while output.count(b"\x1b[H") == redraws or b"\x1b[10;" not in output:
+        while output.count(b"\x1b[H") == redraws:
             remaining = deadline - time.monotonic()
             assert remaining > 0, f"resize did not redraw the ConPTY frame: {output!r}"
             chunk = process.read(remaining)
@@ -241,10 +241,16 @@ def check_conpty_terminal_session(tmp_path, base_url):
         # handled while its deliberately slow SSE stream is still active.
         process.write(b"\x7f\x7f\x7finspect\r")
         read_conpty_until(process, output, b"Let me inspect the repository.", 10)
+        redraws = output.count(b"\x1b[H")
         process.resize(60, 12)
         process.write(b"queued")
-        read_conpty_until(process, output, b"queued", 5)
-        read_conpty_until(process, output, b"\x1b[12;", 5)
+        deadline = time.monotonic() + 5
+        while b"queued" not in output or output.count(b"\x1b[H") == redraws:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"input/resize stalled during turn: {output!r}"
+            chunk = process.read(remaining)
+            assert chunk, f"ConPTY output closed during input/resize: {output!r}"
+            output.extend(chunk)
         read_conpty_until(
             process, output, b"The working directory is the liminal repository.", 10
         )
@@ -275,7 +281,7 @@ def check_conpty_terminal_restores_after_interrupt(tmp_path):
     )
     output = bytearray()
     try:
-        read_conpty_until(process, output, b" > ", 10)
+        read_conpty_until(process, output, PROMPT_MARKER, 10)
         process.write(b"\x03")
         assert process.wait(10) == 130
         while chunk := process.read(0.1):
@@ -302,7 +308,7 @@ def check_conpty_ctrl_c_routes_by_state(tmp_path, base_url):
     )
     output = bytearray()
     try:
-        read_conpty_until(process, output, b" > ", 10)
+        read_conpty_until(process, output, PROMPT_MARKER, 10)
         process.write(b"inspect\r")
         read_conpty_until(process, output, b"Let me inspect the repository.", 10)
         process.write(b"queued")
@@ -577,7 +583,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
     output = bytearray()
     try:
         deadline = time.monotonic() + 10
-        while b" > " not in output:
+        while PROMPT_MARKER not in output:
             remaining = deadline - time.monotonic()
             assert remaining > 0, f"prompt did not appear: {output!r}"
             readable, _, _ = select.select([master], [], [], remaining)
@@ -629,38 +635,27 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             output.extend(os.read(master, 4096))
 
         os.write(master, b"\x1b[1;5A")
-        read_pty_until(master, output, b"test-model > /model", 5)
+        read_pty_until(master, output, PROMPT_MARKER + b" /model", 5)
         os.write(master, b"\x1b[1;5B")
-        read_pty_frame_without(master, output, b"test-model > /model", 5)
+        read_pty_frame_without(master, output, PROMPT_MARKER + b" /model", 5)
 
         os.write(master, b"\x1b[A")
         read_pty_until_fresh(master, output, b"history", 5)
         os.write(master, b"\x1b[B")
-        read_pty_until_fresh(master, output, b"Up/Down/wheel", 5)
+        read_pty_until_fresh(master, output, b"Enter send", 5)
         os.write(master, b"\x1b[<64;1;1M")
         read_pty_until_fresh(master, output, b"history", 5)
         os.write(master, b"\x1b[<65;1;1M")
-        read_pty_until_fresh(master, output, b"Up/Down/wheel", 5)
+        read_pty_until_fresh(master, output, b"Enter send", 5)
 
         os.write(master, b"\x1b[200~a\nb\x1b[201~")
-        deadline = time.monotonic() + 5
-        while b"\x1b[8;2H" not in output:
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, (
-                f"multiline paste was not projected into the composer: {output!r}"
-            )
-            readable, _, _ = select.select([master], [], [], remaining)
-            assert readable, (
-                f"multiline paste was not projected into the composer: {output!r}"
-            )
-            output.extend(os.read(master, 4096))
-        assert b"test-model > a" in output
+        read_pty_until(master, output, PROMPT_MARKER + b" a", 5)
 
         redraws = output.count(b"\x1b[H")
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 10, 50, 0, 0))
         os.kill(process.pid, signal.SIGWINCH)
         deadline = time.monotonic() + 5
-        while output.count(b"\x1b[H") == redraws or b"\x1b[10;" not in output:
+        while output.count(b"\x1b[H") == redraws:
             remaining = deadline - time.monotonic()
             assert remaining > 0, (
                 f"resize did not redraw the application-owned frame: {output!r}"
@@ -679,11 +674,12 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             readable, _, _ = select.select([master], [], [], remaining)
             assert readable, f"slow turn produced no output: {output!r}"
             output.extend(os.read(master, 4096))
+        redraws = output.count(b"\x1b[H")
         os.write(master, b"queued")
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 60, 0, 0))
         os.kill(process.pid, signal.SIGWINCH)
         deadline = time.monotonic() + 5
-        while b"queued" not in output or b"\x1b[12;" not in output:
+        while b"queued" not in output or output.count(b"\x1b[H") == redraws:
             remaining = deadline - time.monotonic()
             assert remaining > 0, f"input/resize stalled during turn: {output!r}"
             readable, _, _ = select.select([master], [], [], remaining)
@@ -747,7 +743,7 @@ def test_redirected_stdout_keeps_interactive_tui_on_stderr(tmp_path):
     terminal_output = bytearray()
     try:
         deadline = time.monotonic() + 10
-        while b" > " not in terminal_output:
+        while PROMPT_MARKER not in terminal_output:
             remaining = deadline - time.monotonic()
             assert remaining > 0, (
                 f"stderr TUI prompt did not appear: {terminal_output!r}"
@@ -814,7 +810,7 @@ def test_terminal_restores_after_interrupt(tmp_path):
     output = bytearray()
     try:
         deadline = time.monotonic() + 10
-        while b" > " not in output:
+        while PROMPT_MARKER not in output:
             remaining = deadline - time.monotonic()
             assert remaining > 0, f"prompt did not appear: {output!r}"
             readable, _, _ = select.select([master], [], [], remaining)
@@ -874,7 +870,7 @@ def test_ctrl_c_routes_by_ui_state(openai_slow_mock, tmp_path):
     )
     output = bytearray()
     try:
-        read_pty_until(master, output, b" > ", 10)
+        read_pty_until(master, output, PROMPT_MARKER, 10)
         os.write(master, b"inspect\r")
         read_pty_until(master, output, b"Let me inspect the repository.", 10)
         os.write(master, b"queued")

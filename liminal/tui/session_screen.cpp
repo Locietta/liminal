@@ -399,17 +399,16 @@ struct ComposerProjection {
 };
 
 std::string composer_prefix(const SessionScreen &screen) {
-    auto prefix = screen.model;
-    if (screen.effort) prefix += "@" + *screen.effort;
-    prefix += " > ";
-    if (text_width(prefix) < screen.size.columns) return prefix;
-    return screen.size.columns >= 3 ? "> " : std::string{};
+    if (screen.size.columns >= 3) return "› ";
+    if (screen.size.columns >= 2) return ">";
+    return {};
 }
 
 ComposerProjection project_composer(const SessionScreen &screen) {
     ComposerProjection result;
     const auto columns = std::max(screen.size.columns, 1);
     std::string current = composer_prefix(screen);
+    const std::string continuation(static_cast<usize>(text_width(current)), ' ');
     i32 used = text_width(current);
     bool cursor_set = false;
     usize offset = 0;
@@ -426,8 +425,8 @@ ComposerProjection project_composer(const SessionScreen &screen) {
                 cursor_set = true;
             }
             result.rows.push_back(std::move(current));
-            current.clear();
-            used = 0;
+            current = continuation;
+            used = text_width(current);
             continue;
         }
 
@@ -435,8 +434,8 @@ ComposerProjection project_composer(const SessionScreen &screen) {
         const auto width = encoded == "\t" ? 2 : std::max(grapheme.width, 0);
         if (width > 0 && used > 0 && used + width > columns) {
             result.rows.push_back(std::move(current));
-            current.clear();
-            used = 0;
+            current = continuation;
+            used = text_width(current);
         }
         if (screen.composer.cursor == start) {
             result.cursor_row = static_cast<i32>(result.rows.size());
@@ -454,12 +453,31 @@ ComposerProjection project_composer(const SessionScreen &screen) {
     return result;
 }
 
-i32 composer_height(const SessionScreen &screen, const ComposerProjection &projection) {
+struct ComposerLayout {
+    i32 content_rows = 1;
+    i32 top_padding = 0;
+    i32 bottom_padding = 0;
+
+    [[nodiscard]] i32 rows() const noexcept { return top_padding + content_rows + bottom_padding; }
+};
+
+ComposerLayout composer_layout(const SessionScreen &screen, const ComposerProjection &projection) {
     const auto header = screen.size.rows >= 2 ? 1 : 0;
-    const auto status = screen.size.rows >= 3 ? 1 : 0;
-    const auto available = std::max(screen.size.rows - header - status, 1);
+    const auto footer = screen.size.rows >= 3 ? 1 : 0;
+    const auto available = std::max(screen.size.rows - header - footer, 1);
     const auto growth_limit = std::max(std::min(screen.size.rows / 3, 8), 1);
-    return std::min({static_cast<i32>(projection.rows.size()), growth_limit, available});
+    ComposerLayout result{.content_rows = std::min({static_cast<i32>(projection.rows.size()), growth_limit, available})};
+    constexpr i32 k_transcript_reserve = 4;
+    const auto padding = std::clamp(available - result.content_rows - k_transcript_reserve, 0, 2);
+    result.top_padding = padding == 2 ? 1 : 0;
+    result.bottom_padding = padding >= 1 ? 1 : 0;
+    return result;
+}
+
+std::string model_selection(const SessionScreen &screen) {
+    auto selection = screen.model;
+    if (screen.effort) selection += " " + *screen.effort;
+    return selection;
 }
 
 std::string trim_notice(std::string text) {
@@ -866,8 +884,8 @@ void SessionScreen::follow_tail() noexcept {
 i32 SessionScreen::viewport_rows() const {
     const auto projection = project_composer(*this);
     const auto header = size.rows >= 2 ? 1 : 0;
-    const auto status = size.rows >= 3 ? 1 : 0;
-    return std::max(size.rows - header - status - composer_height(*this, projection), 0);
+    const auto footer = size.rows >= 3 ? 1 : 0;
+    return std::max(size.rows - header - footer - composer_layout(*this, projection).rows(), 0);
 }
 
 Frame SessionScreen::frame() const {
@@ -875,14 +893,12 @@ Frame SessionScreen::frame() const {
     if (size.rows <= 0 || size.columns <= 0) return result;
 
     const bool header = size.rows >= 2;
-    const bool status = size.rows >= 3;
+    const bool footer = size.rows >= 3;
     const auto projected_composer = project_composer(*this);
-    const auto prompt_rows = composer_height(*this, projected_composer);
-    const auto prompt_row = size.rows - prompt_rows;
+    const auto composer = composer_layout(*this, projected_composer);
+    const auto prompt_row = size.rows - (footer ? 1 : 0) - composer.rows();
     if (header) {
-        auto selection = model;
-        if (effort) selection += "@" + *effort;
-        result.surface.write(0, 0, "liminal  " + selection, Style::EMPHASIS);
+        result.surface.write(0, 0, "liminal", Style::EMPHASIS);
     }
 
     const auto rows = visible_rows(*this);
@@ -897,27 +913,35 @@ Frame SessionScreen::frame() const {
         for (const auto &span : row.spans) column = result.surface.write(target_row, column, span.text, span.style);
     }
 
-    if (status) {
+    if (footer) {
         std::string status_text;
         if (external_editor_active) {
             status_text = "Save and close external editor to continue";
         } else if (anchor) {
             status_text = "history";
-            if (unread) status_text += " | new output";
+            if (unread) status_text += " · new output";
         } else {
-            status_text = "Up/Down/wheel scroll | Ctrl+Up/Down prompts | Ctrl+G editor | Ctrl+J newline | Enter send";
+            status_text = "Enter send · Ctrl+J newline · Ctrl+G editor · Up/Down scroll · Ctrl+Up/Down prompts";
         }
-        result.surface.write(prompt_row - 1, 0, status_text, Style::MUTED);
+        if (external_editor_active || anchor) {
+            result.surface.write(size.rows - 1, 0, status_text, Style::MUTED);
+        } else {
+            auto column = result.surface.write(size.rows - 1, 0, model_selection(*this), Style::CODE);
+            if (column > 0) column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
+            result.surface.write(size.rows - 1, column, status_text, Style::MUTED);
+        }
     }
 
-    const auto first_composer_row = std::max(projected_composer.cursor_row - prompt_rows + 1, 0);
-    for (i32 index = 0; index < prompt_rows; ++index) {
+    for (i32 row = prompt_row; row < prompt_row + composer.rows(); ++row) result.surface.fill_row(row, Style::COMPOSER);
+    const auto first_composer_row = std::max(projected_composer.cursor_row - composer.content_rows + 1, 0);
+    const auto content_row = prompt_row + composer.top_padding;
+    for (i32 index = 0; index < composer.content_rows; ++index) {
         const auto source = first_composer_row + index;
         if (source >= static_cast<i32>(projected_composer.rows.size())) break;
-        result.surface.write(prompt_row + index, 0, projected_composer.rows[static_cast<usize>(source)], Style::NORMAL);
+        result.surface.write(content_row + index, 0, projected_composer.rows[static_cast<usize>(source)], Style::COMPOSER);
     }
     result.cursor = {
-        .row = prompt_row + projected_composer.cursor_row - first_composer_row,
+        .row = content_row + projected_composer.cursor_row - first_composer_row,
         .column = std::clamp(projected_composer.cursor_column, 0, size.columns - 1),
         .visible = true,
     };
