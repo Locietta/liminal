@@ -63,6 +63,7 @@ std::string_view name(Style style) {
         case Style::DIFF_DELETION: return "diff_deletion";
         case Style::DIFF_HUNK: return "diff_hunk";
         case Style::FAILURE: return "failure";
+        case Style::COMPOSER: return "composer";
     }
     return "normal";
 }

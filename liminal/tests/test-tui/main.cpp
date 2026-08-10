@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -128,6 +129,14 @@ void check_surface_cells_and_encoding() {
     require(encoded_palette.contains("\x1b[1;38;2;255;210;138mK"), "code preprocessors must use distinct bold, high-luminance gold");
     require(!encoded_palette.contains("\x1b[2m") && !encoded_palette.contains("\x1b[90m"),
             "syntax highlighting must not dim text or use a dark comment color");
+
+    tui::Frame composer{.surface = tui::Surface(4, 1)};
+    composer.surface.fill_row(0, tui::Style::COMPOSER);
+    composer.surface.write(0, 0, ">", tui::Style::COMPOSER);
+    require(std::ranges::all_of(composer.surface.cells, [](const tui::Cell &cell) { return cell.style == tui::Style::COMPOSER; }),
+            "a filled composer row must retain its background style across every cell");
+    require(tui::encode_frame(composer).contains("\x1b[22;39;48;2;38;38;38m>   "),
+            "the composer style must encode an opaque neutral background across trailing cells");
 
     auto changed = frame;
     changed.surface.write(0, 3, "C");

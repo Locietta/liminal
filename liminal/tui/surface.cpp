@@ -41,6 +41,7 @@ std::string_view style_sequence(Style style) {
         case Style::DIFF_DELETION: return "\x1b[31m";
         case Style::DIFF_HUNK: return "\x1b[1;36m";
         case Style::FAILURE: return "\x1b[31m";
+        case Style::COMPOSER: return "\x1b[22;39;48;2;38;38;38m";
     }
     return "\x1b[0m";
 }
@@ -83,6 +84,12 @@ Surface::Surface(i32 columns, i32 rows)
     : columns(std::max(columns, 0)), rows(std::max(rows, 0)), cells(static_cast<usize>(this->columns * this->rows)) {}
 
 void Surface::clear() { std::ranges::fill(cells, Cell{}); }
+
+void Surface::fill_row(i32 row, Style style) {
+    if (row < 0 || row >= rows) return;
+    const auto begin = cells.begin() + static_cast<isize>(row * columns);
+    std::fill(begin, begin + columns, Cell{.style = style});
+}
 
 i32 Surface::write(i32 row, i32 column, std::string_view text, Style style) {
     if (row < 0 || row >= rows || column >= columns) return column;

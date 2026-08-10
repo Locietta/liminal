@@ -32,6 +32,7 @@ enum struct Style {
     DIFF_DELETION,
     DIFF_HUNK,
     FAILURE,
+    COMPOSER,
 };
 
 struct StyledSpan {
@@ -53,6 +54,7 @@ struct Surface {
     Surface(i32 columns = 0, i32 rows = 0);
 
     void clear();
+    void fill_row(i32 row, Style style);
     i32 write(i32 row, i32 column, std::string_view text, Style style = Style::NORMAL);
     std::string row_text(i32 row) const;
 
