@@ -555,6 +555,40 @@ void check_clipboard_helper() {
 #endif
 }
 
+void check_copy_command_and_status() {
+    const auto newest = tui::parse_copy_command("/copy");
+    const auto older = tui::parse_copy_command("/copy  3\t");
+    const auto unrelated = tui::parse_copy_command("/copycat");
+    const auto zero = tui::parse_copy_command("/copy 0");
+    const auto trailing = tui::parse_copy_command("/copy 2 more");
+    require(newest.has_value() && *newest == std::optional<usize>{1}, "/copy must select the newest reply");
+    require(older.has_value() && *older == std::optional<usize>{3}, "/copy N must use a newest-first positive ordinal");
+    require(unrelated.has_value() && !unrelated->has_value(),
+            "slash commands that merely share the copy prefix must remain ordinary prompts");
+    require(!zero && !trailing && zero.error().detail.contains("usage"), "malformed copy ordinals must report the command usage");
+
+    tui::SessionScreen screen;
+    screen.resize({80, 10});
+    screen.set_model("test-model", std::nullopt);
+    screen.show_status("Copied latest reply to clipboard");
+    const auto copied = screen.frame();
+    require(frame_text(copied).contains("Copied latest reply to clipboard") &&
+                copied.surface.cells[static_cast<usize>(9 * copied.surface.columns)].style == tui::Style::ACCENT,
+            "copy success must temporarily replace the footer with an emphasized textual confirmation");
+
+    screen.insert("next prompt");
+    const auto editing = frame_text(screen.frame());
+    require(!editing.contains("Copied latest reply") && editing.contains("test-model"),
+            "the copy confirmation must yield to normal footer metadata on the next interaction");
+
+    screen.show_status("Copied latest reply to clipboard");
+    screen.external_editor_active = true;
+    const auto editor = screen.frame();
+    require(frame_text(editor).contains("Save and close external editor") &&
+                editor.surface.cells[static_cast<usize>(9 * editor.surface.columns)].style == tui::Style::MUTED,
+            "external-editor guidance must take priority over a copy confirmation");
+}
+
 void check_scroll_resize_and_unread_state() {
     tui::SessionScreen screen;
     screen.resize({18, 8});
@@ -699,6 +733,7 @@ i32 run_all(std::string_view executable) {
     check_rich_output_and_concurrent_tools();
     check_external_editor_round_trip(executable);
     check_clipboard_helper();
+    check_copy_command_and_status();
     check_scroll_resize_and_unread_state();
     check_headless_virtual_time_and_snapshots();
     check_headless_resize_and_markup_stress();

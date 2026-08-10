@@ -681,7 +681,10 @@ void SessionScreen::set_model(std::string_view name, const std::optional<std::st
 
 void SessionScreen::set_footer(SessionFooter next) { footer = std::move(next); }
 
+void SessionScreen::show_status(std::string text) { transient_status = std::move(text); }
+
 void SessionScreen::apply(const Event &event) {
+    transient_status.reset();
     if (const auto *notice = std::get_if<SessionNotice>(&event)) {
         transcript.apply(SessionNotice{.text = trim_notice(notice->text)}, monotonic_now());
     } else {
@@ -811,12 +814,14 @@ void SessionScreen::clear_prompt() {
 }
 
 std::string SessionScreen::take_prompt() {
+    transient_status.reset();
     auto prompt = composer.take();
     prompt_history.record(prompt);
     return prompt;
 }
 
 void SessionScreen::mark_editing() noexcept {
+    transient_status.reset();
     if (state != SessionState::WAITING && state != SessionState::STREAMING && state != SessionState::RUNNING_TOOLS) {
         state = SessionState::EDITING;
     }
@@ -867,6 +872,7 @@ bool SessionScreen::has_elapsed_running_command() const {
 }
 
 void SessionScreen::scroll(i32 row_delta) {
+    transient_status.reset();
     if (row_delta == 0 || viewport_rows() <= 0) return;
     const auto current_rows = visible_rows(*this);
     if (current_rows.empty()) return;
@@ -902,6 +908,7 @@ void SessionScreen::scroll(i32 row_delta) {
 void SessionScreen::page(i32 direction) { scroll(direction * std::max(viewport_rows() - 1, 1)); }
 
 void SessionScreen::follow_tail() noexcept {
+    transient_status.reset();
     anchor.reset();
     unread = false;
 }
@@ -942,12 +949,15 @@ Frame SessionScreen::frame() const {
         std::string status_text;
         if (external_editor_active) {
             status_text = "Save and close external editor to continue";
+        } else if (transient_status) {
+            status_text = *transient_status;
         } else if (anchor) {
             status_text = "history";
             if (unread) status_text += " · new output";
         }
-        if (external_editor_active || anchor) {
-            result.surface.write(size.rows - 1, 0, status_text, Style::MUTED);
+        if (external_editor_active || transient_status || anchor) {
+            const auto status_style = !external_editor_active && transient_status ? Style::ACCENT : Style::MUTED;
+            result.surface.write(size.rows - 1, 0, status_text, status_style);
         } else {
             auto column = result.surface.write(size.rows - 1, 0, model_selection(*this), Style::FOOTER_MODEL);
             column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);

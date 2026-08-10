@@ -141,13 +141,13 @@ void check_control_bytes() {
     detail::TerminalInputDecoder decoder;
     std::vector<TerminalEvent> events;
     std::string input;
-    for (const u8 byte : {u8{0}, u8{1}, u8{7}, u8{26}, u8{28}, u8{29}, u8{30}, u8{31}}) {
+    for (const u8 byte : {u8{0}, u8{1}, u8{7}, u8{15}, u8{26}, u8{28}, u8{29}, u8{30}, u8{31}}) {
         input.push_back(static_cast<char>(byte));
     }
     input.push_back('x');
     feed(decoder, input, events);
 
-    constexpr std::string_view expected[] = {" ", "a", "g", "z", "\\", "]", "^", "_"};
+    constexpr std::string_view expected[] = {" ", "a", "g", "o", "z", "\\", "]", "^", "_"};
     require(events.size() == std::size(expected) + 1, "control bytes must not block later input");
     for (usize i = 0; i < std::size(expected); ++i) {
         require(events[i].kind == TerminalEventKind::KEY && events[i].key == TerminalKey::CHARACTER &&

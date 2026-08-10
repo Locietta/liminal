@@ -118,6 +118,7 @@ struct SessionScreen {
     void resize(lighter::TerminalSize next) noexcept;
     void set_model(std::string_view name, const std::optional<std::string> &effort);
     void set_footer(SessionFooter next);
+    void show_status(std::string text);
     void apply(const Event &event);
     void add_notice(std::string text);
 
@@ -159,6 +160,7 @@ struct SessionScreen {
     std::string model;
     std::optional<std::string> effort;
     SessionFooter footer;
+    std::optional<std::string> transient_status;
     std::optional<ViewportAnchor> anchor;
     bool unread = false;
     bool external_editor_active = false;

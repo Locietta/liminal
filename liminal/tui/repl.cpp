@@ -24,6 +24,7 @@
 #include <lighter/async/io/watcher.h>
 
 #include <liminal/tui/console_renderer.h>
+#include <liminal/tui/clipboard.h>
 #include <liminal/tui/external_editor.h>
 
 namespace liminal::tui {
@@ -108,6 +109,22 @@ struct ExternalEditorRequests {
     lighter::Event ready;
 };
 
+struct CopyRequests {
+    void request() {
+        pending = true;
+        ready.set();
+    }
+
+    Task<void> next() {
+        while (!pending) co_await ready.wait();
+        pending = false;
+        ready.reset();
+    }
+
+    bool pending = false;
+    lighter::Event ready;
+};
+
 std::string finish_prompt(std::string line) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
     return line;
@@ -155,7 +172,7 @@ struct PromptReader {
 };
 
 lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, ConsoleRenderer &renderer, PromptQueue &prompts,
-                                    ExternalEditorRequests &editor_requests) {
+                                    ExternalEditorRequests &editor_requests, CopyRequests &copy_requests) {
     switch (event.kind) {
         case TerminalEventKind::TEXT:
         case TerminalEventKind::PASTE: return renderer.insert(event.text);
@@ -166,6 +183,10 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
             if (event.key == TerminalKey::CHARACTER && control && !alt_gr && event.text == "g") {
                 editor_requests.request();
+                return {};
+            }
+            if (event.key == TerminalKey::CHARACTER && control && !alt_gr && event.text == "o") {
+                copy_requests.request();
                 return {};
             }
             if (event.key == TerminalKey::ENTER) {
@@ -206,7 +227,8 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
 }
 
 Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &renderer, PromptQueue &prompts,
-                              ExternalEditorRequests &editor_requests, TurnControl &control, SessionFailure &failure) {
+                              ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, TurnControl &control,
+                              SessionFailure &failure) {
     while (true) {
         auto event = co_await terminal.next_event();
         if (!event) {
@@ -214,8 +236,26 @@ Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &render
             co_return 1;
         }
         if (event->kind == TerminalEventKind::CLOSED) co_return 0;
-        if (auto error = apply_terminal_event(*event, renderer, prompts, editor_requests)) {
+        if (auto error = apply_terminal_event(*event, renderer, prompts, editor_requests, copy_requests)) {
             failure.record("cannot render terminal input", error, control);
+            co_return 1;
+        }
+    }
+}
+
+Task<lighter::Error> copy_reply_with_feedback(Agent &agent, usize ordinal, ConsoleRenderer &renderer) {
+    auto copied = co_await copy_session_reply(agent.session, ordinal);
+    if (!copied) co_return renderer.notice("[copy error: " + copied.error().detail + "]\n");
+    const auto status =
+        ordinal == 1 ? std::string("Copied latest reply to clipboard") : "Copied reply " + std::to_string(ordinal) + " to clipboard";
+    co_return renderer.status(status);
+}
+
+Task<i32> copy_reply_loop(CopyRequests &requests, Agent &agent, ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure) {
+    while (true) {
+        co_await requests.next();
+        if (auto error = co_await copy_reply_with_feedback(agent, 1, renderer)) {
+            failure.record("cannot render clipboard status", error, control);
             co_return 1;
         }
     }
@@ -413,6 +453,16 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
         if (prompt == "/quit" || prompt == "/exit") {
             co_return 0;
         }
+        auto copy_command = parse_copy_command(prompt);
+        if (!copy_command) {
+            if (!rendered(renderer.notice("[copy error: " + copy_command.error().detail + "]\n"), "cannot render copy error")) co_return 1;
+            continue;
+        }
+        if (copy_command->has_value()) {
+            if (!rendered(co_await copy_reply_with_feedback(agent, **copy_command, renderer), "cannot render clipboard status"))
+                co_return 1;
+            continue;
+        }
         if (prompt == "/context") {
             auto manifest = agent.context_manifest();
             if (!manifest) {
@@ -578,17 +628,18 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
         } else if (interactive) {
             PromptQueue prompts;
             ExternalEditorRequests editor_requests;
+            CopyRequests copy_requests;
             PromptReader reader{.prompts = &prompts};
             lighter::Event render_requested;
             renderer.set_redraw_scheduler([&render_requested] { render_requested.set(); });
 #ifndef _WIN32
-            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
-                                          signal_monitor(interrupts, renderer, control, failure),
-                                          terminal_input_loop(terminal, renderer, prompts, editor_requests, control, failure),
-                                          render_monitor(render_requested, renderer, control, failure),
-                                          external_editor_loop(editor_requests, terminal, renderer, control, failure),
-                                          command_elapsed_monitor(renderer, control, failure),
-                                          suspend_monitor(suspend_controls, terminal, renderer, control, failure));
+            auto raced = co_await WhenAny(
+                repl_body(agent, reader, renderer, control, models, failure), signal_monitor(interrupts, renderer, control, failure),
+                terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, control, failure),
+                render_monitor(render_requested, renderer, control, failure),
+                external_editor_loop(editor_requests, terminal, renderer, control, failure),
+                copy_reply_loop(copy_requests, agent, renderer, control, failure), command_elapsed_monitor(renderer, control, failure),
+                suspend_monitor(suspend_controls, terminal, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
@@ -596,19 +647,21 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             if (raced.index() == 4) exit_code = std::get<4>(raced);
             if (raced.index() == 5) exit_code = std::get<5>(raced);
             if (raced.index() == 6) exit_code = std::get<6>(raced);
+            if (raced.index() == 7) exit_code = std::get<7>(raced);
 #else
-            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
-                                          signal_monitor(interrupts, renderer, control, failure),
-                                          terminal_input_loop(terminal, renderer, prompts, editor_requests, control, failure),
-                                          render_monitor(render_requested, renderer, control, failure),
-                                          external_editor_loop(editor_requests, terminal, renderer, control, failure),
-                                          command_elapsed_monitor(renderer, control, failure));
+            auto raced = co_await WhenAny(
+                repl_body(agent, reader, renderer, control, models, failure), signal_monitor(interrupts, renderer, control, failure),
+                terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, control, failure),
+                render_monitor(render_requested, renderer, control, failure),
+                external_editor_loop(editor_requests, terminal, renderer, control, failure),
+                copy_reply_loop(copy_requests, agent, renderer, control, failure), command_elapsed_monitor(renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
             if (raced.index() == 3) exit_code = std::get<3>(raced);
             if (raced.index() == 4) exit_code = std::get<4>(raced);
             if (raced.index() == 5) exit_code = std::get<5>(raced);
+            if (raced.index() == 6) exit_code = std::get<6>(raced);
 #endif
             renderer.set_redraw_scheduler({});
         } else {

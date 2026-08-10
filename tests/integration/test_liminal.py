@@ -599,6 +599,15 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
         base_url=base_url,
         api_key=mock_openai.API_KEY,
     )
+    clipboard_output = tmp_path / "clipboard.txt"
+    clipboard_helper = tmp_path / "wl-copy"
+    clipboard_helper.write_text(
+        '#!/bin/sh\ncat > "$LIMINAL_CLIPBOARD_TEST_OUTPUT"\n', encoding="utf-8"
+    )
+    clipboard_helper.chmod(0o700)
+    env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+    env["WAYLAND_DISPLAY"] = "liminal-test"
+    env["LIMINAL_CLIPBOARD_TEST_OUTPUT"] = str(clipboard_output)
 
     process = subprocess.Popen(
         [str(BINARY)],
@@ -728,7 +737,23 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             output.extend(os.read(master, 4096))
         assert b"Context " in output
 
-        os.write(master, b"\x7f\x7f\x7f\x7f\x7f\x7f/quit\r")
+        os.write(master, b"\x0f")
+        read_pty_until_fresh(master, output, b"Copied latest reply to clipboard", 5)
+        copied_reply = clipboard_output.read_text(encoding="utf-8")
+        assert "Let me inspect the repository." in copied_reply
+        assert "The working directory is the liminal repository." in copied_reply
+
+        # Ctrl+O must not consume the queued draft. Submitting it creates a
+        # second reply, after which /copy 2 selects the original tool round.
+        os.write(master, b"\r")
+        read_pty_until_fresh(
+            master, output, b"The working directory is the liminal repository.", 10
+        )
+        os.write(master, b"/copy 2\r")
+        read_pty_until_fresh(master, output, b"Copied reply 2 to clipboard", 5)
+        assert clipboard_output.read_text(encoding="utf-8") == copied_reply
+
+        os.write(master, b"/quit\r")
         assert process.wait(timeout=10) == 0
         while True:
             readable, _, _ = select.select([master], [], [], 0.1)

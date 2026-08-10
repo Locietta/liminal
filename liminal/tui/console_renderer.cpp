@@ -106,6 +106,12 @@ lighter::Error ConsoleRenderer::prompt(std::string_view model, const std::option
 
 lighter::Error ConsoleRenderer::notice(std::string_view text) { return render(SessionNotice{.text = std::string(text)}); }
 
+lighter::Error ConsoleRenderer::status(std::string_view text) {
+    if (!terminal) return write_stdout("[" + plain_text(text) + "]\n");
+    screen.show_status(std::string(text));
+    return redraw();
+}
+
 lighter::Error ConsoleRenderer::insert(std::string_view text) {
     screen.insert(text);
     return redraw();

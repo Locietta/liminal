@@ -24,6 +24,7 @@ struct ConsoleRenderer {
     lighter::Error banner(std::string_view model, const std::optional<std::string> &effort, const SessionFooter &footer);
     lighter::Error prompt(std::string_view model, const std::optional<std::string> &effort, const SessionFooter &footer);
     lighter::Error notice(std::string_view text);
+    lighter::Error status(std::string_view text);
 
     lighter::Error insert(std::string_view text);
     lighter::Error backspace();

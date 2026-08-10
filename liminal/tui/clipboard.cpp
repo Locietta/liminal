@@ -1,6 +1,8 @@
 #include "clipboard.h"
 
 #include <algorithm>
+#include <charconv>
+#include <cctype>
 #include <cstdlib>
 #include <limits>
 #include <span>
@@ -19,6 +21,8 @@
 #endif
 
 #include <lighter/async/runtime/task.h>
+
+#include <liminal/session/session.h>
 
 namespace liminal::tui {
 
@@ -115,6 +119,25 @@ std::vector<ClipboardCommand> clipboard_commands() {
 
 } // namespace
 
+Result<std::optional<usize>> parse_copy_command(std::string_view prompt) {
+    constexpr std::string_view prefix = "/copy";
+    if (!prompt.starts_with(prefix)) return std::optional<usize>{};
+    prompt.remove_prefix(prefix.size());
+    if (!prompt.empty() && std::isspace(static_cast<unsigned char>(prompt.front())) == 0) return std::optional<usize>{};
+
+    while (!prompt.empty() && std::isspace(static_cast<unsigned char>(prompt.front())) != 0) prompt.remove_prefix(1);
+    if (prompt.empty()) return std::optional<usize>{1};
+
+    usize ordinal = 0;
+    const auto parsed = std::from_chars(prompt.data(), prompt.data() + prompt.size(), ordinal);
+    auto remainder = std::string_view(parsed.ptr, static_cast<usize>(prompt.data() + prompt.size() - parsed.ptr));
+    while (!remainder.empty() && std::isspace(static_cast<unsigned char>(remainder.front())) != 0) remainder.remove_prefix(1);
+    if (parsed.ec != std::errc{} || ordinal == 0 || !remainder.empty()) {
+        return lighter::outcome_error(Error::protocol("usage: /copy [positive reply number]"));
+    }
+    return std::optional<usize>{ordinal};
+}
+
 Task<void, Error> copy_to_clipboard(std::string text) {
 #ifdef _WIN32
     auto copied = copy_native(text);
@@ -125,6 +148,16 @@ Task<void, Error> copy_to_clipboard(std::string text) {
     }
     co_await fail(Error::tool("no working clipboard helper found (install wl-clipboard, xclip, or xsel)"));
 #endif
+}
+
+Task<void, Error> copy_session_reply(const session::Session &session, usize ordinal) {
+    auto reply = session.reply_from_latest(ordinal);
+    if (!reply) {
+        const auto message =
+            ordinal == 1 ? std::string("no model reply is available") : "model reply " + std::to_string(ordinal) + " is not available";
+        co_await fail(Error::protocol(message));
+    }
+    co_await copy_to_clipboard(*std::move(reply));
 }
 
 } // namespace liminal::tui
