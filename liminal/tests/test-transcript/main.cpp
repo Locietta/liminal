@@ -69,7 +69,7 @@ void check_cancelled_partial_output() {
     tui::Transcript transcript;
     transcript.apply(AssistantTextDelta{.text = "partial"});
     transcript.apply(AssistantSegmentCompleted{});
-    transcript.apply(ToolStarted{.call_id = "call-1", .name = "run_command"});
+    transcript.apply(ToolStarted{.call_id = "call-1", .name = "exec_command"});
     transcript.apply(TurnCancelled{});
 
     require(transcript.blocks.size() == 3, "cancellation must preserve partial output, tool state, and a notice");

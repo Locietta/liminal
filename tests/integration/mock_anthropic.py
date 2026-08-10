@@ -258,7 +258,7 @@ def make_server(port=0):
                             "content_block": {
                                 "type": "tool_use",
                                 "id": "toolu_1",
-                                "name": "run_command",
+                                "name": "exec_command",
                                 "input": {},
                             },
                         },
@@ -270,7 +270,7 @@ def make_server(port=0):
                             "index": 2,
                             "delta": {
                                 "type": "input_json_delta",
-                                "partial_json": '{"comm',
+                                "partial_json": '{"c',
                             },
                         },
                     ),
@@ -281,7 +281,7 @@ def make_server(port=0):
                             "index": 2,
                             "delta": {
                                 "type": "input_json_delta",
-                                "partial_json": 'and": "p',
+                                "partial_json": 'md": "p',
                             },
                         },
                     ),
@@ -351,7 +351,7 @@ def make_server(port=0):
                 and cmd_result["tool_use_id"] == "toolu_1"
             )
             assert "exit_code: 0" in cmd_result["content"], (
-                "run_command result missing exit code"
+                "exec_command result missing exit code"
             )
             assert not cmd_result["is_error"]
             assert (

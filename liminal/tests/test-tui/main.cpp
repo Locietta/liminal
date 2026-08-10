@@ -419,7 +419,7 @@ diff --git a/file.cpp b/file.cpp
 #else
     const auto command = std::string(R"(rg -n "needle" . --glob '!build/**' | head -n 10)");
 #endif
-    tools.apply(ToolStarted{.call_id = "two", .name = "run_command", .command = command});
+    tools.apply(ToolStarted{.call_id = "two", .name = "exec_command", .command = command});
     tools.apply(ToolCompleted{
         .call_id = "one",
         .name = "read_file",
@@ -463,7 +463,7 @@ diff --git a/file.cpp b/file.cpp
 
     tools.apply(ToolCompleted{
         .call_id = "two",
-        .name = "run_command",
+        .name = "exec_command",
         .command = command,
         .summary = "exit 0 · stdout 2 lines\nstdout:\n2 tests passed",
     });
@@ -649,7 +649,7 @@ void check_headless_virtual_time_and_snapshots() {
 
     tui::HeadlessSession command_session(80, 8);
     require(
-        command_session.apply({.type = "tool_started", .call_id = "command", .name = "run_command", .command = "echo ready"}).has_value(),
+        command_session.apply({.type = "tool_started", .call_id = "command", .name = "exec_command", .command = "echo ready"}).has_value(),
         "headless command start must apply");
     require(command_session.apply({.type = "advance_time", .milliseconds = 9'999}).has_value(),
             "headless command time must advance below the elapsed threshold");

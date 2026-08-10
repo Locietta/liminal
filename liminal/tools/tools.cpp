@@ -1,10 +1,10 @@
 #include "tools.h"
 
 #include "apply_patch.h"
+#include "exec.h"
 
 #include <algorithm>
 #include <charconv>
-#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -14,9 +14,6 @@
 #include <string_view>
 #include <utility>
 
-#include <lighter/async/io/process.h>
-#include <lighter/async/runtime/timeout.h>
-#include <lighter/async/runtime/when.h>
 #include <lighter/codec/json/json.h>
 #include <lighter/utils/panic.h>
 
@@ -26,18 +23,11 @@ namespace json = lighter::codec::json;
 using lighter::fail;
 using lighter::or_fail;
 using lighter::outcome_error;
-using lighter::Process;
-using lighter::Stream;
 using lighter::Task;
-using lighter::WhenAll;
 
 namespace {
 
 constexpr usize k_file_limit = 128 * 1024;
-constexpr usize k_capture_head = 32 * 1024;
-constexpr usize k_capture_tail = 32 * 1024;
-constexpr i64 k_min_command_timeout_ms = 1;
-constexpr i64 k_max_command_timeout_ms = 60 * 60 * 1000;
 constexpr usize k_max_parallel_call_limit = 32;
 constexpr usize k_max_turn_call_limit = 256;
 constexpr usize k_max_call_summary_bytes = 2 * 1024;
@@ -52,29 +42,11 @@ struct ReadFileInput {
     std::optional<usize> line_end;
 };
 
-struct RunCommandInput {
-    std::string command;
-};
-
 std::string bounded_text(std::string_view text, usize limit) {
     if (text.size() <= limit) return std::string(text);
     auto end = limit;
     while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xc0) == 0x80) --end;
     return std::string(text.substr(0, end)) + "…";
-}
-
-std::string normalize_newlines(std::string_view text) {
-    std::string result;
-    result.reserve(text.size());
-    for (usize index = 0; index < text.size(); ++index) {
-        if (text[index] == '\r') {
-            if (index + 1 < text.size() && text[index + 1] == '\n') ++index;
-            result += '\n';
-        } else {
-            result += text[index];
-        }
-    }
-    return result;
 }
 
 std::vector<std::string> content_lines(std::string_view text) {
@@ -101,15 +73,6 @@ std::vector<std::string> preview_lines(const std::vector<std::string> &lines) {
     };
 }
 
-std::string append_preview(std::string summary, std::string_view label, const std::vector<std::string> &lines) {
-    if (lines.empty()) return summary;
-    summary += "\n";
-    summary += label;
-    summary += ":";
-    for (const auto &line : preview_lines(lines)) summary += "\n" + line;
-    return summary;
-}
-
 std::string line_count(usize count, std::string_view stream = {}) {
     std::string result;
     if (!stream.empty()) result = std::string(stream) + " ";
@@ -132,42 +95,6 @@ std::string generic_result_summary(const provider::ToolResult &result) {
     std::string summary = result.is_error ? "Error" : line_count(lines.size());
     for (const auto &line : preview_lines(lines)) summary += "\n" + line;
     return summary;
-}
-
-std::string command_result_summary(const provider::ToolResult &result) {
-    constexpr std::string_view stdout_marker = "\n\nstdout:\n";
-    constexpr std::string_view stderr_marker = "\n\nstderr:\n";
-    const auto stdout_at = result.content.find(stdout_marker);
-    const auto stderr_at = result.content.find(stderr_marker);
-    if (stdout_at == std::string_view::npos || stderr_at == std::string_view::npos || stderr_at < stdout_at) {
-        return generic_result_summary(result);
-    }
-
-    const auto header = std::string_view(result.content).substr(0, stdout_at);
-    const auto stdout_text =
-        std::string_view(result.content).substr(stdout_at + stdout_marker.size(), stderr_at - stdout_at - stdout_marker.size());
-    const auto stderr_text = std::string_view(result.content).substr(stderr_at + stderr_marker.size());
-    const auto stdout_lines = content_lines(stdout_text);
-    const auto stderr_lines = content_lines(stderr_text);
-
-    std::string summary;
-    const auto header_lines = content_lines(header);
-    if (!header_lines.empty() && header_lines.front().starts_with("exit_code: ")) {
-        summary = "exit " + header_lines.front().substr(std::string_view("exit_code: ").size());
-    } else {
-        summary = result.is_error ? "failed" : "completed";
-    }
-    if (header_lines.size() > 1 && header_lines[1].starts_with("term_signal: ")) {
-        summary += " · signal " + header_lines[1].substr(std::string_view("term_signal: ").size());
-    }
-    if (stdout_lines.empty() && stderr_lines.empty()) {
-        summary += " · no output";
-    } else {
-        if (!stdout_lines.empty()) summary += " · " + line_count(stdout_lines.size(), "stdout");
-        if (!stderr_lines.empty()) summary += " · " + line_count(stderr_lines.size(), "stderr");
-    }
-    summary = append_preview(std::move(summary), "stdout", stdout_lines);
-    return append_preview(std::move(summary), "stderr", stderr_lines);
 }
 
 /// Decode a tool_use input (already validated as a JSON object) into the
@@ -311,146 +238,6 @@ std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input) {
     return *std::move(content);
 }
 
-/// Bounded head/tail capture: keeps the first/last N bytes but always drains
-/// the pipe fully so the child never blocks on a full pipe buffer.
-struct BoundedCapture {
-    std::string head;
-    std::string tail;
-    usize dropped = 0;
-
-    void append(std::string_view data) {
-        if (head.size() < k_capture_head) {
-            auto take = std::min(data.size(), k_capture_head - head.size());
-            head.append(data.data(), take);
-            data.remove_prefix(take);
-        }
-        if (data.empty()) {
-            return;
-        }
-        tail.append(data);
-        if (tail.size() > k_capture_tail) {
-            auto excess = tail.size() - k_capture_tail;
-            dropped += excess;
-            tail.erase(0, excess);
-        }
-    }
-
-    std::string text() && {
-        if (dropped == 0 && tail.empty()) {
-            return sanitize(std::move(head));
-        }
-        return sanitize(std::move(head) + "\n... [" + std::to_string(dropped) + " bytes omitted] ...\n" + tail);
-    }
-
-private:
-    /// Command output is arbitrary bytes; ANSI styling and raw control
-    /// characters are noise to the model (and unescaped control bytes are
-    /// not even valid inside JSON strings). Strip both.
-    static std::string sanitize(std::string raw) {
-        std::string out;
-        out.reserve(raw.size());
-        for (usize i = 0; i < raw.size(); ++i) {
-            unsigned char c = raw[i];
-            bool control = c < 0x20 && c != '\n' && c != '\r' && c != '\t';
-            if (control) {
-                // A control byte introducing '[' is (mangled) CSI; skip the
-                // whole sequence through its final byte in [0x40, 0x7e].
-                if (i + 1 < raw.size() && raw[i + 1] == '[') {
-                    i += 2;
-                    while (i < raw.size() && (static_cast<unsigned char>(raw[i]) < 0x40 || static_cast<unsigned char>(raw[i]) > 0x7e)) {
-                        ++i;
-                    }
-                }
-                continue;
-            }
-            out.push_back(static_cast<char>(c));
-        }
-        return out;
-    }
-};
-
-Task<BoundedCapture, lighter::Error> drain(Stream &stream) {
-    BoundedCapture capture;
-    while (true) {
-        auto chunk = co_await stream.read_chunk();
-        if (!chunk) {
-            // Pipe EOF is reported on the error channel, not as an empty chunk.
-            if (chunk.error() == lighter::Error::k_end_of_file) {
-                co_return capture;
-            }
-            co_await fail(std::move(chunk).error());
-        }
-        if (chunk->empty()) {
-            co_return capture;
-        }
-        capture.append(std::string_view(chunk->data(), chunk->size()));
-        stream.consume(chunk->size());
-    }
-}
-
-struct CommandCompletion {
-    BoundedCapture stdout_capture;
-    BoundedCapture stderr_capture;
-    Process::ExitStatus exit_status;
-};
-
-Task<CommandCompletion, lighter::Error> collect_command(Process::SpawnResult &child) {
-    auto joined = co_await WhenAll(drain(child.stdout_pipe), drain(child.stderr_pipe), child.proc.wait());
-    if (!joined) co_await fail(std::move(joined).error());
-    auto [captured_stdout, captured_stderr, exit_status] = *std::move(joined);
-    co_return CommandCompletion{
-        .stdout_capture = std::move(captured_stdout),
-        .stderr_capture = std::move(captured_stderr),
-        .exit_status = exit_status,
-    };
-}
-
-Task<std::string, Error> tool_run_command(const ToolSet &tools, RunCommandInput input) {
-#ifdef _WIN32
-    Process::Options options{
-        .file = "pwsh",
-        .args = {"pwsh", "-NoProfile", "-NonInteractive", "-Command", std::move(input.command)},
-        .cwd = tools.working_directory.string(),
-        .streams = {Process::Stdio::ignore(), Process::Stdio::pipe(false, true), Process::Stdio::pipe(false, true)},
-    };
-#else
-    Process::Options options{
-        .file = "/bin/sh",
-        .args = {"sh", "-lc", std::move(input.command)},
-        .cwd = tools.working_directory.string(),
-        .streams = {Process::Stdio::ignore(), Process::Stdio::pipe(false, true), Process::Stdio::pipe(false, true)},
-    };
-#endif
-
-    auto spawned = Process::spawn(options);
-    if (!spawned) {
-        co_await fail(Error::tool("failed to spawn command shell: " + std::string(spawned.error().message())));
-    }
-    auto child = *std::move(spawned);
-
-    // Drain both pipes while waiting; reading only after exit can deadlock
-    // once a pipe buffer fills. Cancellation of wait() kills the child.
-    auto completed = co_await lighter::with_timeout(collect_command(child), tools.policy.command_timeout);
-    if (completed.has_error()) {
-        if (completed.error() == lighter::Error::k_connection_timed_out) {
-            co_await fail(Error::tool("command exceeded " + std::to_string(tools.policy.command_timeout.count()) + " ms timeout"));
-        }
-        co_await fail(Error::tool("i/o failure while running command: " + std::string(completed.error().message())));
-    }
-    if (completed.has_value()) {
-        auto [captured_stdout, captured_stderr, exit_status] = *std::move(completed);
-
-        std::string result = "exit_code: " + std::to_string(exit_status.status);
-        if (exit_status.term_signal != 0) {
-            result += "\nterm_signal: " + std::to_string(exit_status.term_signal);
-        }
-        result += "\n\nstdout:\n" + std::move(captured_stdout).text();
-        result += "\n\nstderr:\n" + std::move(captured_stderr).text();
-        co_return result;
-    }
-    co_await lighter::cancel();
-}
-
 } // namespace
 
 namespace {
@@ -469,12 +256,6 @@ ToolCallPresentation describe_read_file(const provider::ToolCall &call) {
     return {.description = std::move(description)};
 }
 
-ToolCallPresentation describe_run_command(const provider::ToolCall &call) {
-    const auto input = parse_input<RunCommandInput>(call.input);
-    if (input) return {.command = bounded_text(normalize_newlines(input->command), k_max_call_summary_bytes)};
-    return {.description = "Run command"};
-}
-
 std::string summarize_read_file(const provider::ToolCall &, const provider::ToolResult &result) {
     if (result.is_error) return generic_result_summary(result);
     usize lines = 0;
@@ -486,8 +267,6 @@ std::string summarize_read_file(const provider::ToolCall &, const provider::Tool
     if (result.content.contains("... [truncated ")) summary += " · truncated";
     return summary;
 }
-
-std::string summarize_run_command(const provider::ToolCall &, const provider::ToolResult &result) { return command_result_summary(result); }
 
 ToolRegistration read_file_registration() {
     return {
@@ -522,41 +301,6 @@ ToolRegistration read_file_registration() {
     };
 }
 
-ToolRegistration run_command_registration() {
-    return {
-        .definition =
-            {
-                .name = "run_command",
-#ifdef _WIN32
-                .description =
-                    "Run a PowerShell (pwsh) command in the working directory. Use this to inspect the environment, build, test, "
-                    "or perform actions.",
-                .input_schema = {.properties = {{"command",
-                                                 {.type = "string",
-                                                  .description =
-                                                      "PowerShell command text, passed as a single argument to pwsh -Command."}}},
-                                 .required = {"command"}},
-#else
-                .description = "Run a POSIX sh command in the working directory. Use this to inspect the environment, build, test, or "
-                               "perform actions.",
-                .input_schema = {.properties = {{"command",
-                                                 {.type = "string",
-                                                  .description = "POSIX shell command text, passed as a single argument to /bin/sh -lc."}}},
-                                 .required = {"command"}},
-#endif
-            },
-        .execute = [](const ToolSet &tools, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
-            auto input = co_await or_fail(parse_input<RunCommandInput>(call.input));
-            provider::ToolResult result{.call_id = call.id};
-            result.content = co_await tool_run_command(tools, std::move(input)).or_fail();
-            result.is_error = !result.content.starts_with("exit_code: 0\n");
-            co_return result;
-        },
-        .describe = describe_run_command,
-        .summarize = summarize_run_command,
-    };
-}
-
 const ToolRegistration *find_registration(const std::vector<ToolRegistration> &registrations, std::string_view name) {
     const auto found = std::ranges::find(registrations, name, [](const auto &tool) { return std::string_view(tool.definition.name); });
     return found == registrations.end() ? nullptr : &*found;
@@ -573,11 +317,6 @@ ToolCallPresentation fallback_description(const provider::ToolCall &call) {
 
 Result<ToolPolicy> load_tool_policy() {
     ToolPolicy policy;
-    auto timeout = parse_bounded_environment<i64>("LIMINAL_COMMAND_TIMEOUT_MS", policy.command_timeout.count(), k_min_command_timeout_ms,
-                                                  k_max_command_timeout_ms);
-    if (!timeout) return outcome_error(std::move(timeout).error());
-    policy.command_timeout = std::chrono::milliseconds(*timeout);
-
     auto parallel = parse_bounded_environment<usize>("LIMINAL_MAX_PARALLEL_TOOLS", policy.max_parallel_calls, 1, k_max_parallel_call_limit);
     if (!parallel) return outcome_error(std::move(parallel).error());
     policy.max_parallel_calls = *parallel;
@@ -589,11 +328,15 @@ Result<ToolPolicy> load_tool_policy() {
 }
 
 ToolSet::ToolSet(std::filesystem::path working_directory, ToolPolicy policy)
-    : working_directory(std::move(working_directory)), policy(policy) {
+    : working_directory(std::move(working_directory)), policy(policy), exec_sessions(make_exec_session_manager(this->working_directory)) {
     lighter::check(static_cast<bool>(register_tool(read_file_registration())), "failed to register read_file");
     lighter::check(static_cast<bool>(register_tool(make_apply_patch_tool())), "failed to register apply_patch");
-    lighter::check(static_cast<bool>(register_tool(run_command_registration())), "failed to register run_command");
+    for (auto &tool : make_exec_tools(*exec_sessions)) {
+        lighter::check(static_cast<bool>(register_tool(std::move(tool))), "failed to register exec tool");
+    }
 }
+
+ToolSet::~ToolSet() = default;
 
 Result<void> ToolSet::register_tool(ToolRegistration tool) {
     if (tool.definition.name.empty()) return outcome_error(Error::config("tool name cannot be empty"));

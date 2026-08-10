@@ -247,8 +247,8 @@ def make_server(port=0, compact_404=False, chunk_delay=0):
                     "type": "function_call",
                     "id": "fc_1",
                     "call_id": "call_1",
-                    "name": "run_command",
-                    "arguments": '{"command":"pwd"}',
+                    "name": "exec_command",
+                    "arguments": '{"cmd":"pwd"}',
                     "status": "completed",
                 }
                 readme = {
@@ -310,7 +310,7 @@ def make_server(port=0, compact_404=False, chunk_delay=0):
             assert [item["call_id"] for item in outputs][-2:] == ["call_1", "call_2"]
             outputs = outputs[-2:]
             assert "exit_code: 0" in outputs[0]["output"], (
-                "run_command output missing exit code"
+                "exec_command output missing exit code"
             )
             assert "Liminal" in outputs[1]["output"], (
                 "read_file output missing README content"

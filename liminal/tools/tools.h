@@ -1,8 +1,8 @@
 #pragma once
 
-#include <chrono>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -14,8 +14,15 @@
 
 namespace liminal {
 
+struct ExecSessionManager;
+
+struct ExecSessionManagerDeleter {
+    void operator()(ExecSessionManager *sessions) const;
+};
+
+using ExecSessionManagerPtr = std::unique_ptr<ExecSessionManager, ExecSessionManagerDeleter>;
+
 struct ToolPolicy {
-    std::chrono::milliseconds command_timeout{120'000};
     lighter::usize max_parallel_calls = 4;
     lighter::usize max_calls_per_turn = 32;
 };
@@ -44,6 +51,12 @@ struct ToolRegistration {
 
 struct ToolSet {
     explicit ToolSet(std::filesystem::path working_directory, ToolPolicy policy = {});
+    ~ToolSet();
+
+    ToolSet(const ToolSet &) = delete;
+    ToolSet &operator=(const ToolSet &) = delete;
+    ToolSet(ToolSet &&) = delete;
+    ToolSet &operator=(ToolSet &&) = delete;
 
     /// Adds a tool to this agent. Duplicate or incomplete registrations are
     /// rejected instead of silently shadowing an existing tool.
@@ -63,6 +76,7 @@ struct ToolSet {
     ToolPolicy policy;
 
 private:
+    ExecSessionManagerPtr exec_sessions;
     std::vector<ToolRegistration> registrations;
 };
 

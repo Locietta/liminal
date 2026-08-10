@@ -4,6 +4,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 #include <glaze/json.hpp>
@@ -18,8 +19,6 @@ namespace {
 
 using namespace lighter::types;
 using namespace liminal;
-using namespace std::chrono_literals;
-
 void require(bool condition, std::string message) {
     if (!condition) {
         throw std::runtime_error(std::move(message));
@@ -48,18 +47,18 @@ Result<provider::ToolResult> execute(ToolSet &tools, provider::ToolCall call) {
 void test_tools_are_available_by_default() {
     ToolSet tools(std::filesystem::current_path() / "liminal");
     auto definitions = tools.definitions();
-    require(definitions.size() == 3 && definitions[0].name == "read_file" && definitions[1].name == "apply_patch" &&
-                definitions[2].name == "run_command",
-            "default tools must include file reading, patch editing, and shell execution");
+    require(definitions.size() == 4 && definitions[0].name == "read_file" && definitions[1].name == "apply_patch" &&
+                definitions[2].name == "exec_command" && definitions[3].name == "write_stdin",
+            "default tools must include file reading, patch editing, and interactive shell execution");
 
     auto readme = execute(tools, make_call("read", "read_file", R"({"path":"../README.md"})"));
     require(readme.has_value() && !readme->is_error && readme->content.contains("Liminal"),
             "read_file must allow paths outside the working directory");
 
-    auto command = execute(tools, make_call("command", "run_command", R"({"command":"pwd"})"));
+    auto command = execute(tools, make_call("command", "exec_command", R"({"cmd":"pwd"})"));
     require(command.has_value() && command->call_id == "command" && !command->is_error && command->content.contains("exit_code: 0") &&
-                command->content.contains("stdout:\n"),
-            "run_command must execute without an opt-in mode");
+                command->content.contains("output:\n"),
+            "exec_command must execute a short command without an opt-in mode");
 }
 
 void test_tool_registry_dispatches_extensions() {
@@ -94,19 +93,18 @@ void test_tool_presentations_are_specific_and_bounded() {
     require(tools.summarize(read, read_result) == "2 lines · 13 bytes",
             "read_file completion must summarize line and byte counts without echoing file contents");
 
-    const auto command = make_call("command", "run_command", R"({"command":"pixi run build\npixi run test-unit"})");
+    const auto command = make_call("command", "exec_command", R"({"cmd":"pixi run build\npixi run test-unit"})");
     const auto presentation = tools.describe(command);
     require(presentation.description.empty() && presentation.command == "pixi run build\npixi run test-unit",
-            "run_command presentation must retain the exact multiline command as semantic data");
+            "exec_command presentation must retain the exact multiline command as semantic data");
     const provider::ToolResult command_result{
         .call_id = "command",
-        .content = "exit_code: 7\n\nstdout:\nconfigured\nbuilt\n\nstderr:\none test failed\n",
+        .content = "session_id: 2\nstatus: exited\nexit_code: 7\n\noutput:\nconfigured\nbuilt\none test failed\n",
         .is_error = true,
     };
     const auto summary = tools.summarize(command, command_result);
-    require(summary.contains("exit 7") && summary.contains("stdout 2 lines") && summary.contains("stderr 1 line") &&
-                summary.contains("configured") && summary.contains("one test failed"),
-            "run_command completion must expose exit status, stream counts, and a bounded output preview");
+    require(summary.contains("session 2 · exit 7") && summary.contains("configured") && summary.contains("one test failed"),
+            "exec_command completion must expose session state and a bounded output preview");
 }
 
 void test_read_file_is_bounded_and_regular() {
@@ -216,34 +214,45 @@ void test_apply_patch_operations_are_validated_before_writes() {
     std::filesystem::remove_all(directory, remove_error);
 }
 
-void test_command_timeout() {
-    ToolPolicy policy{
-        .command_timeout = 25ms,
-    };
-    ToolSet tools(std::filesystem::current_path(), policy);
+lighter::Task<> exercise_interactive_session(ToolSet &tools) {
 #ifdef _WIN32
-    constexpr std::string_view command = R"({"command":"Start-Sleep -Seconds 5"})";
+    constexpr std::string_view command = R"({"cmd":"$line = [Console]::In.ReadLine(); Write-Output \"got:$line\"","yield_time_ms":25})";
 #else
-    constexpr std::string_view command = R"({"command":"sleep 5"})";
+    constexpr std::string_view command = R"({"cmd":"IFS= read -r line; printf 'got:%s\\n' \"$line\"","yield_time_ms":25})";
 #endif
+    auto started = co_await tools.execute(make_call("start", "exec_command", command));
+    require(started.has_value() && !started->is_error && started->content.contains("session_id: 1") &&
+                started->content.contains("status: running"),
+            "exec_command must return a session ID for a command awaiting input");
 
-    const auto started = std::chrono::steady_clock::now();
-    auto outcome = execute(tools, make_call("timeout", "run_command", command));
-    const auto elapsed = std::chrono::steady_clock::now() - started;
-    require(outcome.has_error() && outcome.error().kind == ErrorKind::TOOL && outcome.error().detail.contains("exceeded 25 ms"),
-            "a command deadline must surface as a tool error");
-    require(elapsed < 2s, "a timed-out command must be killed promptly");
+    auto written =
+        co_await tools.execute(make_call("write", "write_stdin", R"({"session_id":"1","chars":"hello\n","yield_time_ms":3000})"));
+    require(written.has_value() && written->content.contains("got:hello"), "write_stdin must deliver characters to the running process");
+
+    auto finished = co_await tools.execute(make_call("poll", "write_stdin", R"({"session_id":"1","chars":"","yield_time_ms":3000})"));
+    require(finished.has_value() && !finished->is_error && finished->content.contains("status: exited") &&
+                finished->content.contains("exit_code: 0"),
+            "write_stdin must poll a session through process completion");
+}
+
+void test_interactive_session() {
+    lighter::EventLoop loop;
+    ToolSet tools(std::filesystem::current_path());
+    auto task = exercise_interactive_session(tools);
+    loop.schedule(task);
+    loop.run();
+    std::ignore = task.result();
 }
 
 void test_nonzero_command_is_an_error_result() {
     ToolSet tools(std::filesystem::current_path());
 #ifdef _WIN32
-    auto call = make_call("nonzero", "run_command", R"({"command":"Write-Error 'failed'; exit 7"})");
+    auto call = make_call("nonzero", "exec_command", R"({"cmd":"Write-Error 'failed'; exit 7"})");
 #else
-    auto call = make_call("nonzero", "run_command", R"({"command":"printf 'failed\\n' >&2; exit 7"})");
+    auto call = make_call("nonzero", "exec_command", R"({"cmd":"printf 'failed\\n' >&2; exit 7"})");
 #endif
     auto outcome = execute(tools, std::move(call));
-    require(outcome.has_value() && outcome->is_error && outcome->content.starts_with("exit_code: 7"),
+    require(outcome.has_value() && outcome->is_error && outcome->content.contains("exit_code: 7"),
             "a nonzero shell exit must remain a tool result while entering the failed UI state");
 }
 
@@ -253,7 +262,7 @@ i32 run_all() {
     test_tool_presentations_are_specific_and_bounded();
     test_read_file_is_bounded_and_regular();
     test_apply_patch_operations_are_validated_before_writes();
-    test_command_timeout();
+    test_interactive_session();
     test_nonzero_command_is_an_error_result();
     return 0;
 }
