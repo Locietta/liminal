@@ -755,19 +755,17 @@ void SessionScreen::move_word_right() {
 }
 
 void SessionScreen::move_up() {
-    if (composer.move_up()) {
-        mark_editing();
-        return;
-    }
-    scroll(-1);
+    if (prompt_history.index || !composer.move_up()) prompt_history.previous(composer);
+    mark_editing();
 }
 
 void SessionScreen::move_down() {
-    if (composer.move_down()) {
-        mark_editing();
-        return;
+    if (prompt_history.index) {
+        prompt_history.next(composer);
+    } else {
+        composer.move_down();
     }
-    scroll(1);
+    mark_editing();
 }
 
 void SessionScreen::previous_prompt() {

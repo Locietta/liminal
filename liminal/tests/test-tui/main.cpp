@@ -226,16 +226,25 @@ void check_multiline_navigation_history_and_projection() {
     screen.set_model("test", std::nullopt);
     screen.insert("first");
     require(screen.take_prompt() == "first", "submission must return the current prompt");
-    screen.insert("second");
-    require(screen.take_prompt() == "second", "later submissions must remain independent");
+    screen.insert("second\nline");
+    require(screen.take_prompt() == "second\nline", "later submissions must remain independent");
     screen.insert("scratch");
-    screen.previous_prompt();
-    require(screen.composer.text == "second", "explicit previous-prompt navigation must recall the newest prompt");
-    screen.previous_prompt();
-    require(screen.composer.text == "first", "repeated previous-prompt navigation must walk older history");
-    screen.next_prompt();
-    screen.next_prompt();
-    require(screen.composer.text == "scratch", "next-prompt navigation past the newest entry must restore the original draft");
+    screen.move_up();
+    require(screen.composer.text == "second\nline", "Up at a draft boundary must recall the newest prompt");
+    screen.move_up();
+    require(screen.composer.text == "first", "repeated Up must walk older history instead of moving inside a recalled prompt");
+    screen.move_down();
+    require(screen.composer.text == "second\nline", "Down while browsing history must walk toward newer prompts");
+    screen.move_down();
+    require(screen.composer.text == "scratch", "Down past the newest history entry must restore the original draft");
+
+    screen.replace_prompt("top\nbottom");
+    screen.move_up();
+    require(screen.composer.text == "top\nbottom" && screen.composer.cursor == 3,
+            "Up must retain natural cursor movement when a multiline draft has an adjacent line");
+    screen.move_down();
+    require(screen.composer.cursor == screen.composer.text.size(),
+            "Down must retain natural cursor movement when a multiline draft has an adjacent line");
 
     tui::SessionScreen visual;
     visual.resize({40, 10});
@@ -516,9 +525,9 @@ void check_scroll_resize_and_unread_state() {
     require(tail.surface.row_text(0) == "liminal", "the header must retain concise product identity");
 
     screen.move_up();
-    require(screen.anchor.has_value(), "Up at a composer boundary must scroll the transcript by one row");
+    require(!screen.anchor.has_value(), "Up at a composer boundary must not scroll the transcript");
     screen.move_down();
-    require(!screen.anchor.has_value(), "Down at a composer boundary must return a one-row scroll to the transcript tail");
+    require(!screen.anchor.has_value(), "Down at a composer boundary must not scroll the transcript");
 
     screen.page(-1);
     require(screen.anchor.has_value(), "PageUp must establish a semantic viewport anchor");

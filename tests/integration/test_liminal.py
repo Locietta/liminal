@@ -244,9 +244,9 @@ def check_conpty_terminal_session(tmp_path, base_url):
         read_conpty_until_fresh(process, output, PROMPT_MARKER, 5)
 
         process.write(b"\x1b[A")
-        read_conpty_until(process, output, b"history", 5)
+        read_conpty_until_fresh(process, output, PROMPT_MARKER + b" /model", 5)
         process.write(b"\x1b[B")
-        read_conpty_until_fresh(process, output, b"test-model", 5)
+        read_conpty_until_fresh(process, output, PROMPT_MARKER, 5)
         process.write(b"\x1b[<64;1;1M")
         read_conpty_until_fresh(process, output, b"history", 5)
         process.write(b"\x1b[<65;1;1M")
@@ -674,9 +674,9 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
         read_pty_frame_without(master, output, PROMPT_MARKER + b" /model", 5)
 
         os.write(master, b"\x1b[A")
-        read_pty_until_fresh(master, output, b"history", 5)
+        read_pty_until_fresh(master, output, PROMPT_MARKER + b" /model", 5)
         os.write(master, b"\x1b[B")
-        read_pty_until_fresh(master, output, b"test-model", 5)
+        read_pty_until_fresh(master, output, PROMPT_MARKER, 5)
         os.write(master, b"\x1b[<64;1;1M")
         read_pty_until_fresh(master, output, b"history", 5)
         os.write(master, b"\x1b[<65;1;1M")

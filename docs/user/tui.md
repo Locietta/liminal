@@ -44,12 +44,12 @@ The action and exact path or command stay bright, while completion metadata and 
 
 ## Keyboard shortcuts
 
-| Shortcut             | Action                                                       |
-| -------------------- | ------------------------------------------------------------ |
-| Enter                | Send the current prompt                                      |
-| Ctrl+J / Shift+Enter | Insert a newline                                             |
-| Ctrl+G               | Edit the current draft in `VISUAL` or `EDITOR`               |
-| Up / Down            | Move within a multiline draft, then scroll at its boundaries |
-| Ctrl+Up / Ctrl+Down  | Recall older or newer prompts                                |
-| PageUp / PageDown    | Scroll the transcript by one viewport                        |
-| Mouse wheel          | Scroll the transcript                                        |
+| Shortcut             | Action                                                               |
+| -------------------- | -------------------------------------------------------------------- |
+| Enter                | Send the current prompt                                              |
+| Ctrl+J / Shift+Enter | Insert a newline                                                     |
+| Ctrl+G               | Edit the current draft in `VISUAL` or `EDITOR`                       |
+| Up / Down            | Move within a multiline draft, then recall prompts at its boundaries |
+| Ctrl+Up / Ctrl+Down  | Recall older or newer prompts directly                               |
+| PageUp / PageDown    | Scroll the transcript by one viewport                                |
+| Mouse wheel          | Scroll the transcript                                                |
