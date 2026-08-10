@@ -1,5 +1,7 @@
 #include "tools.h"
 
+#include "apply_patch.h"
+
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -589,6 +591,7 @@ Result<ToolPolicy> load_tool_policy() {
 ToolSet::ToolSet(std::filesystem::path working_directory, ToolPolicy policy)
     : working_directory(std::move(working_directory)), policy(policy) {
     lighter::check(static_cast<bool>(register_tool(read_file_registration())), "failed to register read_file");
+    lighter::check(static_cast<bool>(register_tool(make_apply_patch_tool())), "failed to register apply_patch");
     lighter::check(static_cast<bool>(register_tool(run_command_registration())), "failed to register run_command");
 }
 

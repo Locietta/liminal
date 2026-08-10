@@ -48,8 +48,9 @@ Result<provider::ToolResult> execute(ToolSet &tools, provider::ToolCall call) {
 void test_tools_are_available_by_default() {
     ToolSet tools(std::filesystem::current_path() / "liminal");
     auto definitions = tools.definitions();
-    require(definitions.size() == 2 && definitions[0].name == "read_file" && definitions[1].name == "run_command",
-            "default tools must include file reading and shell execution");
+    require(definitions.size() == 3 && definitions[0].name == "read_file" && definitions[1].name == "apply_patch" &&
+                definitions[2].name == "run_command",
+            "default tools must include file reading, patch editing, and shell execution");
 
     auto readme = execute(tools, make_call("read", "read_file", R"({"path":"../README.md"})"));
     require(readme.has_value() && !readme->is_error && readme->content.contains("Liminal"),
@@ -153,6 +154,68 @@ void test_read_file_is_bounded_and_regular() {
     std::filesystem::remove_all(directory, remove_error);
 }
 
+void test_apply_patch_operations_are_validated_before_writes() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto directory = std::filesystem::temp_directory_path() / ("liminal-patch-" + std::to_string(nonce));
+    std::filesystem::create_directories(directory);
+    {
+        std::ofstream output(directory / "source.txt", std::ios::binary);
+        output << "alpha\r\nbeta\r\ngamma\r\n";
+    }
+    ToolSet tools(directory);
+    auto changed = execute(
+        tools,
+        make_call(
+            "patch", "apply_patch",
+            R"json({"patch":"*** Begin Patch\n*** Add File: added.txt\n+created\n*** Update File: source.txt\n@@ missing context\n-beta\n+changed\n*** End Patch"})json"));
+    require(changed.has_value() && changed->is_error && changed->content.contains("context not found"),
+            "apply_patch must validate every file hunk before writing any operation");
+    require(!std::filesystem::exists(directory / "added.txt"), "apply_patch wrote an earlier operation before validation completed");
+
+    auto applied = execute(
+        tools,
+        make_call(
+            "patch", "apply_patch",
+            R"json({"patch":"*** Begin Patch\n*** Add File: added.txt\n+created\n*** Update File: source.txt\n@@ alpha\n-beta\n+changed\n*** End Patch"})json"));
+    require(applied.has_value() && !applied->is_error && applied->content.contains("Added: added.txt") &&
+                applied->content.contains("Updated: source.txt"),
+            "apply_patch did not report added and updated files");
+
+    std::ifstream source(directory / "source.txt", std::ios::binary);
+    const std::string source_text((std::istreambuf_iterator<char>(source)), std::istreambuf_iterator<char>());
+    require(source_text == "alpha\r\nchanged\r\ngamma\r\n", "apply_patch must preserve the updated file's CRLF convention");
+
+    {
+        std::ofstream output(directory / "fuzzy.txt", std::ios::binary);
+        output << "start\n  repeated  \nold\n  repeated  \nold\n";
+    }
+    auto fuzzy = execute(
+        tools,
+        make_call(
+            "fuzzy", "apply_patch",
+            R"json({"patch":"*** Begin Patch\n*** Update File: fuzzy.txt\n@@\n repeated\n-old\n+last\n*** End of File\n*** End Patch"})json"));
+    require(fuzzy.has_value() && !fuzzy->is_error, "apply_patch must tolerate surrounding whitespace in hunk matches");
+    std::ifstream fuzzy_file(directory / "fuzzy.txt", std::ios::binary);
+    const std::string fuzzy_text((std::istreambuf_iterator<char>(fuzzy_file)), std::istreambuf_iterator<char>());
+    require(fuzzy_text == "start\n  repeated  \nold\n  repeated  \nlast\n",
+            "apply_patch must preserve context whitespace and honor end-of-file matching");
+
+    auto moved = execute(
+        tools, make_call("move", "apply_patch",
+                         R"json({"patch":"*** Begin Patch\n*** Update File: added.txt\n*** Move to: moved.txt\n*** End Patch"})json"));
+    require(moved.has_value() && !moved->is_error && !std::filesystem::exists(directory / "added.txt") &&
+                std::filesystem::exists(directory / "moved.txt"),
+            "apply_patch must support move-only updates");
+
+    auto removed = execute(
+        tools, make_call("delete", "apply_patch", R"json({"patch":"*** Begin Patch\n*** Delete File: moved.txt\n*** End Patch"})json"));
+    require(removed.has_value() && !removed->is_error && !std::filesystem::exists(directory / "moved.txt"),
+            "apply_patch must delete existing files");
+
+    std::error_code remove_error;
+    std::filesystem::remove_all(directory, remove_error);
+}
+
 void test_command_timeout() {
     ToolPolicy policy{
         .command_timeout = 25ms,
@@ -189,6 +252,7 @@ i32 run_all() {
     test_tool_registry_dispatches_extensions();
     test_tool_presentations_are_specific_and_bounded();
     test_read_file_is_bounded_and_regular();
+    test_apply_patch_operations_are_validated_before_writes();
     test_command_timeout();
     test_nonzero_command_is_an_error_result();
     return 0;
