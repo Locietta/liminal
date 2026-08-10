@@ -73,8 +73,8 @@ struct TerminalSession::Self {
     }
 
     Error write_native(std::string_view bytes);
-    Error apply_terminal_state();
-    Error restore_terminal_state();
+    Error apply_terminal_state(bool enter_alternate_screen = true);
+    Error restore_terminal_state(bool leave_alternate_screen = true);
     Error start_worker();
     void stop_worker() noexcept;
     void shutdown() noexcept;
@@ -107,10 +107,11 @@ TerminalEvent text_event(std::string text) { return TerminalEvent{.kind = Termin
 
 TerminalEvent resize_event(TerminalSize size) { return TerminalEvent{.kind = TerminalEventKind::RESIZE, .size = size}; }
 
-std::string terminal_features(const TerminalSession::Options &options, bool enable, bool virtual_input) {
+std::string terminal_features(const TerminalSession::Options &options, bool enable, bool virtual_input, bool alternate_screen) {
     std::string result;
     if (!enable) {
-        result += "\x1b[0m\x1b[?25h\x1b[?1049l";
+        result += "\x1b[0m\x1b[?25h";
+        if (alternate_screen) result += "\x1b[?1049l";
     }
     if (virtual_input) {
         if (enable) {
@@ -131,7 +132,7 @@ std::string terminal_features(const TerminalSession::Options &options, bool enab
             result += "\x1b[?2004l";
         }
     }
-    if (enable) {
+    if (enable && alternate_screen) {
         result += "\x1b[?1049h";
     }
     return result;
@@ -655,6 +656,28 @@ Error TerminalSession::resume() {
     return {};
 }
 
+Error TerminalSession::handoff() {
+    if (!self || self->lifecycle != Self::Lifecycle::RUNNING) {
+        return Error::k_invalid_argument;
+    }
+    self->stop_worker();
+    return self->restore_terminal_state(false);
+}
+
+Error TerminalSession::reclaim() {
+    if (!self || self->lifecycle != Self::Lifecycle::CAPTURED) {
+        return Error::k_invalid_argument;
+    }
+    if (auto err = self->apply_terminal_state(false)) {
+        return err;
+    }
+    if (auto err = self->start_worker()) {
+        self->restore_terminal_state(false);
+        return err;
+    }
+    return {};
+}
+
 bool TerminalSession::active() const noexcept { return self && self->lifecycle == Self::Lifecycle::RUNNING; }
 
 Error TerminalSession::Self::write_native(std::string_view bytes) {
@@ -688,7 +711,7 @@ Error TerminalSession::Self::write_native(std::string_view bytes) {
     return {};
 }
 
-Error TerminalSession::Self::apply_terminal_state() {
+Error TerminalSession::Self::apply_terminal_state(bool enter_alternate_screen) {
     if (lifecycle != Lifecycle::CAPTURED) {
         return Error::k_invalid_argument;
     }
@@ -740,17 +763,17 @@ Error TerminalSession::Self::apply_terminal_state() {
     }
 #endif
     lifecycle = Lifecycle::ACTIVE;
-    return write_native(terminal_features(options, true, virtual_input));
+    return write_native(terminal_features(options, true, virtual_input, enter_alternate_screen));
 }
 
-Error TerminalSession::Self::restore_terminal_state() {
+Error TerminalSession::Self::restore_terminal_state(bool leave_alternate_screen) {
     if (lifecycle == Lifecycle::EMPTY || lifecycle == Lifecycle::CAPTURED) {
         return {};
     }
     if (lifecycle != Lifecycle::ACTIVE) {
         return Error::k_invalid_argument;
     }
-    const auto sequence_error = write_native(terminal_features(options, false, virtual_input));
+    const auto sequence_error = write_native(terminal_features(options, false, virtual_input, leave_alternate_screen));
 #ifdef _WIN32
     const bool modes_ok = SetConsoleMode(input, original_input_mode) && SetConsoleMode(output, original_output_mode);
     const bool codepages_ok = SetConsoleCP(original_input_codepage) && SetConsoleOutputCP(original_output_codepage);

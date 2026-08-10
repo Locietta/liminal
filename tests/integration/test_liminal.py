@@ -12,6 +12,7 @@ import errno
 import json
 import os
 import select
+import shlex
 import stat
 import subprocess
 import sys
@@ -122,6 +123,18 @@ def terminal_test_environment(
     env["LIMINAL_MODEL"] = "test-model"
     env["LIMINAL_SYSTEM_PROMPT"] = "Test system policy."
     env["LIMINAL_DEVELOPER_PROMPT"] = "Test developer policy."
+    editor = tmp_path / "external_editor.py"
+    editor.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path(sys.argv[-1]).write_text('edited externally')\n"
+    )
+    editor_command = [sys.executable, str(editor)]
+    env["VISUAL"] = (
+        subprocess.list2cmdline(editor_command)
+        if os.name == "nt"
+        else shlex.join(editor_command)
+    )
     return env
 
 
@@ -217,7 +230,12 @@ def check_conpty_terminal_session(tmp_path, base_url):
         assert output.index(b"\x1b[?2004h") < output.index(b"\x1b[?1049h")
         assert b"\x1b[?1000h\x1b[?1006h" in output
 
-        process.write(b"/model\r")
+        process.write(b"\x07")
+        read_conpty_until(process, output, PROMPT_MARKER + b" edited externally", 10)
+        assert output.count(b"\x1b[?1049h") == 1
+        assert output.count(b"\x1b[?1049l") == 0
+
+        process.write(b"\x7f" * len("edited externally") + b"/model\r")
         read_conpty_until(process, output, b"select with /model", 5)
 
         process.write(b"\x1b[1;5A")
@@ -272,7 +290,7 @@ def check_conpty_terminal_session(tmp_path, base_url):
             output.extend(chunk)
         assert output.count(b"\x1b[?1049l") == 1
         assert output.index(b"\x1b[?1049h") < output.index(b"\x1b[?1049l")
-        assert output.index(b"\x1b[?1049l") < output.index(b"\x1b[?2004l")
+        assert output.rindex(b"\x1b[?1049l") < output.rindex(b"\x1b[?2004l")
     finally:
         if process.poll() is None:
             process.kill()
@@ -634,7 +652,12 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             assert readable, f"resume produced no terminal redraw: {output!r}"
             output.extend(os.read(master, 4096))
 
-        os.write(master, b"/model\r")
+        os.write(master, b"\x07")
+        read_pty_until(master, output, PROMPT_MARKER + b" edited externally", 10)
+        assert output.count(b"\x1b[?1049h") == 2
+        assert output.count(b"\x1b[?1049l") == 1
+
+        os.write(master, b"\x7f" * len("edited externally") + b"/model\r")
         deadline = time.monotonic() + 5
         while b"select with /model" not in output:
             remaining = deadline - time.monotonic()
@@ -721,7 +744,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             output.extend(chunk)
         assert output.count(b"\x1b[?1049l") == 2
         assert output.index(b"\x1b[?1049h") < output.index(b"\x1b[?1049l")
-        assert output.index(b"\x1b[?1049l") < output.index(b"\x1b[?2004l")
+        assert output.rindex(b"\x1b[?1049l") < output.rindex(b"\x1b[?2004l")
         assert termios.tcgetattr(slave) == original
     finally:
         if process.poll() is None:

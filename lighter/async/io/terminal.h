@@ -141,6 +141,15 @@ struct TerminalSession {
     /// input delivery.
     Error resume();
 
+    /// Restores the captured terminal modes and pauses input delivery while
+    /// keeping the current alternate-screen contents visible for a child
+    /// process such as an external editor.
+    Error handoff();
+
+    /// Reapplies requested modes and resumes input delivery without entering
+    /// a new alternate screen. Must follow handoff().
+    Error reclaim();
+
     bool active() const noexcept;
 
 private:

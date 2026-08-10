@@ -244,7 +244,7 @@ Task<i32> external_editor_loop(ExternalEditorRequests &requests, TerminalSession
             co_return 1;
         }
         renderer.pause_rendering();
-        if (auto error = terminal.suspend()) {
+        if (auto error = terminal.handoff()) {
             renderer.set_external_editor_active(false);
             renderer.resume_rendering();
             failure.record("cannot restore terminal for external editor", error, control);
@@ -252,7 +252,7 @@ Task<i32> external_editor_loop(ExternalEditorRequests &requests, TerminalSession
         }
 
         auto edited = co_await run_external_editor(seed, *command);
-        if (auto error = terminal.resume()) {
+        if (auto error = terminal.reclaim()) {
             failure.record("cannot resume terminal after external editor", error, control);
             co_return 1;
         }

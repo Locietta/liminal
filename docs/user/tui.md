@@ -30,7 +30,7 @@ export VISUAL='code --wait'
 
 Terminal editors can be configured directly, for example `VISUAL=nvim`. Graphical editors must include their wait option—such as `code --wait`—so Liminal knows when editing is finished. Editor commands may contain quoted arguments. Restart Liminal after changing a persistent environment variable.
 
-Liminal temporarily restores the terminal before launching the editor. The editor inherits standard input, output, error, and the current working directory. If configuration, launch, or editor exit fails, Liminal shows an error and preserves the original draft.
+Liminal keeps its current frame visible while temporarily restoring normal terminal input for the editor. The editor inherits standard input, output, error, and the current working directory. Terminal editors may draw over the frame while active; graphical editors leave it undisturbed. When the editor exits, Liminal redraws the frame and returns the edited draft to the composer. If configuration, launch, or editor exit fails, Liminal shows an error and preserves the original draft.
 
 ## Tool activity
 
