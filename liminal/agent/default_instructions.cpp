@@ -6,14 +6,14 @@
 
 namespace liminal {
 
-namespace {
-
 extern "C" {
 extern const std::byte _binary_runtime_tools_md_start[];
 extern const std::byte _binary_runtime_tools_md_end[];
 extern const std::byte _binary_default_agent_md_start[];
 extern const std::byte _binary_default_agent_md_end[];
 }
+
+namespace {
 
 std::string embedded_prompt(const std::byte *begin, const std::byte *end) {
     const auto content = std::span(begin, end);
