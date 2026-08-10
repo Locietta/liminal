@@ -50,8 +50,8 @@ case "$mode" in
         # Sanitizer compiles use substantially more memory than normal builds.
         # Keep the disposable WSL validation lane within typical laptop and CI
         # runner memory limits.
-        pixi run xmake build -j 2 -y
-        pixi run xmake test -v
+        pixi run xmake build -y
+        pixi run xmake test -vvvD
         ;;
     *)
         echo "unknown test mode: $mode" >&2

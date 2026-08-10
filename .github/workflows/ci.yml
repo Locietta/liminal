@@ -63,8 +63,8 @@ jobs:
             cache: ~/.xmake/packages
             cache-write: false
             configure: xmake f -m releasedbg --sanitizers=y -y
-            build: xmake build -j 2 -y
-            test: xmake test -j 2
+            build: xmake build -y
+            test: xmake test -vvvD
     steps:
       # xmake/ is a submodule holding the pinned package recipes, the custom
       # package managers and the build rules; without it xmake cannot configure.
