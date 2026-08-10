@@ -73,12 +73,13 @@ lighter::Error ConsoleRenderer::render(const Event &event) {
     return render_plain(event);
 }
 
-lighter::Error ConsoleRenderer::banner(std::string_view model, const std::optional<std::string> &effort) {
+lighter::Error ConsoleRenderer::banner(std::string_view model, const std::optional<std::string> &effort, const SessionFooter &footer) {
     if (terminal) {
         auto current_size = terminal->size();
         if (!current_size) return current_size.error();
         screen.resize(*current_size);
         screen.set_model(model, effort);
+        screen.set_footer(footer);
         if (auto error = redraw()) return error;
         if (!mirror_plain_output) return {};
     }
@@ -89,9 +90,10 @@ lighter::Error ConsoleRenderer::banner(std::string_view model, const std::option
     return write_stdout("liminal - model: " + selection + " (tools run unsandboxed with your privileges)\n");
 }
 
-lighter::Error ConsoleRenderer::prompt(std::string_view model, const std::optional<std::string> &effort) {
+lighter::Error ConsoleRenderer::prompt(std::string_view model, const std::optional<std::string> &effort, const SessionFooter &footer) {
     if (terminal) {
         screen.set_model(model, effort);
+        screen.set_footer(footer);
         if (auto error = redraw()) return error;
         if (!mirror_plain_output) return {};
     }

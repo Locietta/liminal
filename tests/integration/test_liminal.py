@@ -96,9 +96,19 @@ def terminal_test_environment(
                         "openai-responses",
                         base_url,
                         api_key,
-                        [{"id": "test-model"}]
+                        [
+                            {
+                                "id": "test-model",
+                                "context_window": 128_000,
+                                "max_output_tokens": 8_192,
+                            }
+                        ]
                         + [
-                            {"id": f"extra-model-{index}"}
+                            {
+                                "id": f"extra-model-{index}",
+                                "context_window": 128_000,
+                                "max_output_tokens": 8_192,
+                            }
                             for index in range(model_count - 1)
                         ],
                     )
@@ -218,11 +228,11 @@ def check_conpty_terminal_session(tmp_path, base_url):
         process.write(b"\x1b[A")
         read_conpty_until(process, output, b"history", 5)
         process.write(b"\x1b[B")
-        read_conpty_until_fresh(process, output, b"Enter send", 5)
+        read_conpty_until_fresh(process, output, b"test-model", 5)
         process.write(b"\x1b[<64;1;1M")
         read_conpty_until_fresh(process, output, b"history", 5)
         process.write(b"\x1b[<65;1;1M")
-        read_conpty_until_fresh(process, output, b"Enter send", 5)
+        read_conpty_until_fresh(process, output, b"test-model", 5)
 
         process.write(b"\x1b[200~a\nb\x1b[201~")
         read_conpty_until(process, output, PROMPT_MARKER + b" a", 5)
@@ -254,6 +264,7 @@ def check_conpty_terminal_session(tmp_path, base_url):
         read_conpty_until(
             process, output, b"The working directory is the liminal repository.", 10
         )
+        assert b"Context " in output
 
         process.write(b"\x7f\x7f\x7f\x7f\x7f\x7f/quit\r")
         assert process.wait(10) == 0
@@ -642,11 +653,11 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
         os.write(master, b"\x1b[A")
         read_pty_until_fresh(master, output, b"history", 5)
         os.write(master, b"\x1b[B")
-        read_pty_until_fresh(master, output, b"Enter send", 5)
+        read_pty_until_fresh(master, output, b"test-model", 5)
         os.write(master, b"\x1b[<64;1;1M")
         read_pty_until_fresh(master, output, b"history", 5)
         os.write(master, b"\x1b[<65;1;1M")
-        read_pty_until_fresh(master, output, b"Enter send", 5)
+        read_pty_until_fresh(master, output, b"test-model", 5)
 
         os.write(master, b"\x1b[200~a\nb\x1b[201~")
         read_pty_until(master, output, PROMPT_MARKER + b" a", 5)
@@ -692,6 +703,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             readable, _, _ = select.select([master], [], [], remaining)
             assert readable, f"slow turn stopped producing output: {output!r}"
             output.extend(os.read(master, 4096))
+        assert b"Context " in output
 
         os.write(master, b"\x7f\x7f\x7f\x7f\x7f\x7f/quit\r")
         assert process.wait(timeout=10) == 0

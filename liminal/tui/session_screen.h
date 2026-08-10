@@ -94,6 +94,12 @@ struct CachedBlockLayout {
     std::vector<LayoutRow> rows;
 };
 
+struct SessionFooter {
+    std::string workspace_path = ".";
+    std::optional<u32> context_left_percent;
+    u64 tokens_used = 0;
+};
+
 enum struct SessionState {
     EDITING,
     WAITING,
@@ -111,6 +117,7 @@ struct SessionScreen {
 
     void resize(lighter::TerminalSize next) noexcept;
     void set_model(std::string_view name, const std::optional<std::string> &effort);
+    void set_footer(SessionFooter next);
     void apply(const Event &event);
     void add_notice(std::string text);
 
@@ -151,6 +158,7 @@ struct SessionScreen {
     PromptHistory prompt_history;
     std::string model;
     std::optional<std::string> effort;
+    SessionFooter footer;
     std::optional<ViewportAnchor> anchor;
     bool unread = false;
     bool external_editor_active = false;

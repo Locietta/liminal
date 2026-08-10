@@ -4,7 +4,7 @@ Liminal's interactive terminal interface keeps the transcript and prompt compose
 
 ## Prompt composer
 
-The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline text aligns with the draft instead of the marker and remains vertically windowed around the cursor when it grows. The footer beneath the composer shows the selected model and interaction hints; browsing and external-editor states replace those hints when they need attention. On short terminals, decorative padding is removed before transcript or editing space.
+The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline text aligns with the draft instead of the marker and remains vertically windowed around the cursor when it grows. The footer beneath the composer shows the selected model and effort, workspace path, remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan; browsing and external-editor states replace it when they need attention. On short terminals, decorative padding is removed before transcript or editing space.
 
 ## External prompt editor
 

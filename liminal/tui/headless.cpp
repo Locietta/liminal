@@ -64,6 +64,10 @@ std::string_view name(Style style) {
         case Style::DIFF_HUNK: return "diff_hunk";
         case Style::FAILURE: return "failure";
         case Style::COMPOSER: return "composer";
+        case Style::FOOTER_MODEL: return "footer_model";
+        case Style::FOOTER_WORKSPACE: return "footer_workspace";
+        case Style::FOOTER_CONTEXT: return "footer_context";
+        case Style::FOOTER_TOKENS: return "footer_tokens";
     }
     return "normal";
 }

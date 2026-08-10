@@ -42,6 +42,10 @@ std::string_view style_sequence(Style style) {
         case Style::DIFF_HUNK: return "\x1b[1;36m";
         case Style::FAILURE: return "\x1b[31m";
         case Style::COMPOSER: return "\x1b[22;39;48;2;38;38;38m";
+        case Style::FOOTER_MODEL: return "\x1b[22;38;2;255;229;154m";
+        case Style::FOOTER_WORKSPACE: return "\x1b[22;38;2;183;244;173m";
+        case Style::FOOTER_CONTEXT: return "\x1b[22;38;2;255;210;138m";
+        case Style::FOOTER_TOKENS: return "\x1b[22;38;2;169;204;255m";
     }
     return "\x1b[0m";
 }

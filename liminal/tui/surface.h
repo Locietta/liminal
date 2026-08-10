@@ -33,6 +33,10 @@ enum struct Style {
     DIFF_HUNK,
     FAILURE,
     COMPOSER,
+    FOOTER_MODEL,
+    FOOTER_WORKSPACE,
+    FOOTER_CONTEXT,
+    FOOTER_TOKENS,
 };
 
 struct StyledSpan {

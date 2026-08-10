@@ -57,6 +57,23 @@ struct SessionFailure {
     }
 };
 
+SessionFooter session_footer(const Agent &agent) {
+    SessionFooter footer{
+        .workspace_path = agent.tools->working_directory.string(),
+        .tokens_used = agent.session.tokens_used(),
+    };
+    const auto manifest = agent.context_manifest();
+    if (!manifest || !manifest->usage.input_budget_tokens || !manifest->usage.remaining_input_tokens ||
+        *manifest->usage.input_budget_tokens == 0) {
+        return footer;
+    }
+
+    const auto budget = static_cast<i64>(*manifest->usage.input_budget_tokens);
+    const auto remaining = std::clamp(*manifest->usage.remaining_input_tokens, i64{0}, budget);
+    footer.context_left_percent = static_cast<u32>(remaining * 100 / budget);
+    return footer;
+}
+
 struct PromptQueue {
     void push(std::string prompt) {
         pending.push_back(std::move(prompt));
@@ -378,7 +395,8 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
     };
 
     while (true) {
-        if (!rendered(renderer.prompt(agent.model.entry.id, agent.model.reasoning_effort), "cannot render prompt")) co_return 1;
+        if (!rendered(renderer.prompt(agent.model.entry.id, agent.model.reasoning_effort, session_footer(agent)), "cannot render prompt"))
+            co_return 1;
 
         auto line = co_await reader.next();
         if (!line) {
@@ -554,7 +572,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
 #endif
 
     if (exit_code == 0) {
-        if (auto error = renderer.banner(agent.model.entry.id, agent.model.reasoning_effort)) {
+        if (auto error = renderer.banner(agent.model.entry.id, agent.model.reasoning_effort, session_footer(agent))) {
             failure.record("cannot render banner", error, control);
             exit_code = 1;
         } else if (interactive) {

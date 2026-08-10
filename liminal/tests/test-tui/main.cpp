@@ -130,6 +130,21 @@ void check_surface_cells_and_encoding() {
     require(!encoded_palette.contains("\x1b[2m") && !encoded_palette.contains("\x1b[90m"),
             "syntax highlighting must not dim text or use a dark comment color");
 
+    tui::Frame footer_palette{.surface = tui::Surface(4, 1)};
+    constexpr tui::Style footer_styles[] = {
+        tui::Style::FOOTER_MODEL,
+        tui::Style::FOOTER_WORKSPACE,
+        tui::Style::FOOTER_CONTEXT,
+        tui::Style::FOOTER_TOKENS,
+    };
+    for (usize index = 0; index < std::size(footer_styles); ++index) {
+        footer_palette.surface.write(0, static_cast<i32>(index), "F", footer_styles[index]);
+    }
+    const auto encoded_footer = tui::encode_frame(footer_palette);
+    require(encoded_footer.contains("\x1b[22;38;2;255;229;154mF") && encoded_footer.contains("\x1b[22;38;2;183;244;173mF") &&
+                encoded_footer.contains("\x1b[22;38;2;255;210;138mF") && encoded_footer.contains("\x1b[22;38;2;169;204;255mF"),
+            "footer metadata fields must encode four distinct high-luminance colors");
+
     tui::Frame composer{.surface = tui::Surface(4, 1)};
     composer.surface.fill_row(0, tui::Style::COMPOSER);
     composer.surface.write(0, 0, ">", tui::Style::COMPOSER);
@@ -225,6 +240,7 @@ void check_multiline_navigation_history_and_projection() {
     tui::SessionScreen visual;
     visual.resize({40, 10});
     visual.set_model("test-model", std::optional<std::string>("high"));
+    visual.set_footer({.workspace_path = "D:\\code\\liminal", .context_left_percent = 54, .tokens_used = 1'184'000});
     const auto empty = visual.frame();
     const auto row_uses_style = [&empty](i32 row, tui::Style style) {
         const auto begin = empty.surface.cells.begin() + static_cast<isize>(row * empty.surface.columns);
@@ -236,9 +252,24 @@ void check_multiline_navigation_history_and_projection() {
                 row_uses_style(8, tui::Style::COMPOSER),
             "an empty composer must render as a padded three-row input surface");
     require(empty.cursor.row == 7 && empty.cursor.column == 2, "the composer cursor must begin after its concise prompt marker");
-    require(empty.surface.row_text(9).starts_with("test-model high · Enter send") &&
-                empty.surface.cells[static_cast<usize>(9 * empty.surface.columns)].style == tui::Style::CODE,
-            "the footer must place model metadata below the composer before interaction hints");
+    require(empty.surface.row_text(9) == "test-model high · D:\\code\\liminal · Cont" &&
+                empty.surface.cells[static_cast<usize>(9 * empty.surface.columns)].style == tui::Style::FOOTER_MODEL,
+            "the footer must place model, workspace, context, and usage metadata below the composer");
+
+    visual.resize({80, 10});
+    const auto wide_footer = visual.frame();
+    const auto footer_row = static_cast<usize>(9 * wide_footer.surface.columns);
+    const auto footer_style = [&wide_footer, footer_row](std::string_view text, tui::Style style) {
+        const auto row = wide_footer.surface.row_text(9);
+        const auto byte_offset = row.find(text);
+        if (byte_offset == std::string::npos) return false;
+        return wide_footer.surface.cells[footer_row + static_cast<usize>(tui::text_width(row.substr(0, byte_offset)))].style == style;
+    };
+    require(wide_footer.surface.row_text(9) == "test-model high · D:\\code\\liminal · Context 54% left · 1.18M used",
+            "the footer must format all four session metadata items compactly");
+    require(footer_style("test-model high", tui::Style::FOOTER_MODEL) && footer_style("D:\\code\\liminal", tui::Style::FOOTER_WORKSPACE) &&
+                footer_style("Context 54% left", tui::Style::FOOTER_CONTEXT) && footer_style("1.18M used", tui::Style::FOOTER_TOKENS),
+            "each footer metadata item must use its own semantic color");
 
     screen.clear_prompt();
     screen.insert("one\ntwo\nthree\nfour");

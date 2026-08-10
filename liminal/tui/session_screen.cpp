@@ -480,6 +480,31 @@ std::string model_selection(const SessionScreen &screen) {
     return selection;
 }
 
+std::string compact_tokens(u64 tokens) {
+    constexpr u64 k_thousand = 1'000;
+    constexpr u64 k_million = 1'000'000;
+    if (tokens < k_thousand) return std::to_string(tokens);
+
+    const auto divisor = tokens < k_million ? k_thousand : k_million;
+    const auto suffix = tokens < k_million ? 'K' : 'M';
+    auto whole = tokens / divisor;
+    auto hundredths = ((tokens % divisor) * 100 + divisor / 2) / divisor;
+    if (hundredths == 100) {
+        ++whole;
+        hundredths = 0;
+    }
+
+    auto result = std::to_string(whole);
+    if (hundredths != 0) {
+        result += '.';
+        if (hundredths < 10) result += '0';
+        result += std::to_string(hundredths);
+        while (result.ends_with('0')) result.pop_back();
+    }
+    result += suffix;
+    return result;
+}
+
 std::string trim_notice(std::string text) {
     while (!text.empty() && (text.back() == '\r' || text.back() == '\n')) text.pop_back();
     return text;
@@ -653,6 +678,8 @@ void SessionScreen::set_model(std::string_view name, const std::optional<std::st
     model = name;
     effort = next_effort;
 }
+
+void SessionScreen::set_footer(SessionFooter next) { footer = std::move(next); }
 
 void SessionScreen::apply(const Event &event) {
     if (const auto *notice = std::get_if<SessionNotice>(&event)) {
@@ -893,10 +920,10 @@ Frame SessionScreen::frame() const {
     if (size.rows <= 0 || size.columns <= 0) return result;
 
     const bool header = size.rows >= 2;
-    const bool footer = size.rows >= 3;
+    const bool has_footer = size.rows >= 3;
     const auto projected_composer = project_composer(*this);
     const auto composer = composer_layout(*this, projected_composer);
-    const auto prompt_row = size.rows - (footer ? 1 : 0) - composer.rows();
+    const auto prompt_row = size.rows - (has_footer ? 1 : 0) - composer.rows();
     if (header) {
         result.surface.write(0, 0, "liminal", Style::EMPHASIS);
     }
@@ -913,22 +940,26 @@ Frame SessionScreen::frame() const {
         for (const auto &span : row.spans) column = result.surface.write(target_row, column, span.text, span.style);
     }
 
-    if (footer) {
+    if (has_footer) {
         std::string status_text;
         if (external_editor_active) {
             status_text = "Save and close external editor to continue";
         } else if (anchor) {
             status_text = "history";
             if (unread) status_text += " · new output";
-        } else {
-            status_text = "Enter send · Ctrl+J newline · Ctrl+G editor · Up/Down scroll · Ctrl+Up/Down prompts";
         }
         if (external_editor_active || anchor) {
             result.surface.write(size.rows - 1, 0, status_text, Style::MUTED);
         } else {
-            auto column = result.surface.write(size.rows - 1, 0, model_selection(*this), Style::CODE);
-            if (column > 0) column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
-            result.surface.write(size.rows - 1, column, status_text, Style::MUTED);
+            auto column = result.surface.write(size.rows - 1, 0, model_selection(*this), Style::FOOTER_MODEL);
+            column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
+            column = result.surface.write(size.rows - 1, column, footer.workspace_path, Style::FOOTER_WORKSPACE);
+            column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
+            const auto context = footer.context_left_percent ? "Context " + std::to_string(*footer.context_left_percent) + "% left" :
+                                                               std::string("Context n/a");
+            column = result.surface.write(size.rows - 1, column, context, Style::FOOTER_CONTEXT);
+            column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
+            result.surface.write(size.rows - 1, column, compact_tokens(footer.tokens_used) + " used", Style::FOOTER_TOKENS);
         }
     }
 
