@@ -63,9 +63,22 @@ void test_checkpoint_projection() {
             "checkpoint items were lowered with incorrect provider roles");
 }
 
+void test_cumulative_token_usage() {
+    session::Session log({.value = 12});
+    const auto first = log.append(session::AgentOutput{.usage = {.input_tokens = 30, .output_tokens = 5, .context_tokens = 40}});
+    log.append(session::UserMessage{.text = "continue"});
+    log.append(session::AgentOutput{.usage = {.input_tokens = 50, .output_tokens = 7}});
+
+    require(log.tokens_used() == 97, "session token usage did not prefer normalized response totals");
+
+    auto selected = log.select_leaf(first);
+    require(selected.has_value() && log.tokens_used() == 97, "branch selection changed tokens already consumed by the session");
+}
+
 i32 run_all() {
     test_append_only_branching();
     test_checkpoint_projection();
+    test_cumulative_token_usage();
     return 0;
 }
 

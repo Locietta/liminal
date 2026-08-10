@@ -76,6 +76,7 @@ struct Session {
 
     const SessionEntry *find(EntryId id) const noexcept;
     std::vector<const SessionEntry *> active_branch() const;
+    u64 tokens_used() const noexcept;
 
     SessionId id;
     std::vector<SessionEntry> entries;

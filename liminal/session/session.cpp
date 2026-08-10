@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <utility>
 
 #include <lighter/async/vocab/outcome.h>
@@ -58,6 +59,20 @@ std::vector<const SessionEntry *> Session::active_branch() const {
     }
     std::ranges::reverse(branch);
     return branch;
+}
+
+u64 Session::tokens_used() const noexcept {
+    u64 total = 0;
+    for (const auto &entry : entries) {
+        const auto *output = std::get_if<AgentOutput>(&entry.payload);
+        if (!output) continue;
+        const auto uncached_tokens = output->usage.output_tokens > std::numeric_limits<u64>::max() - output->usage.input_tokens ?
+                                         std::numeric_limits<u64>::max() :
+                                         output->usage.input_tokens + output->usage.output_tokens;
+        const auto response_tokens = output->usage.context_tokens != 0 ? output->usage.context_tokens : uncached_tokens;
+        total = response_tokens > std::numeric_limits<u64>::max() - total ? std::numeric_limits<u64>::max() : total + response_tokens;
+    }
+    return total;
 }
 
 } // namespace liminal::session
