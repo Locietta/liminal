@@ -196,11 +196,17 @@ def make_server(port=0, compact_404=False, chunk_delay=0):
                 state["log"].append("post-compact")
                 return
 
-            assert all(tool["type"] == "function" for tool in body.get("tools", []))
-            assert all(tool["strict"] is True for tool in body.get("tools", []))
+            assert all(
+                tool["type"] in {"function", "web_search"}
+                for tool in body.get("tools", [])
+            )
+            functions = [
+                tool for tool in body.get("tools", []) if tool["type"] == "function"
+            ]
+            assert all(tool["strict"] is True for tool in functions)
             assert all(
                 tool["parameters"]["additionalProperties"] is False
-                for tool in body.get("tools", [])
+                for tool in functions
             )
 
             if state["calls"] == 1:

@@ -76,6 +76,17 @@ Reasoning metadata must be configured explicitly because standard Models APIs do
 supported effort values. OpenAI Responses providers receive `reasoning.effort`; Anthropic Messages
 providers receive adaptive thinking plus `output_config.effort`.
 
+## Hosted web tools
+
+Normal agent turns offer hosted web access to the selected provider. OpenAI receives its
+`web_search` Responses tool, which handles both searching and opening pages. Anthropic receives
+the `web_search_20250305` and `web_fetch_20250910` server tools. Liminal preserves provider server-tool
+state for stateless replay and appends URL citations to both live and persisted assistant text.
+
+The selected model and endpoint must support these provider-native tools. An incompatible
+OpenAI-compatible gateway or Anthropic model reports its normal API error; Liminal does not silently
+replace hosted search with a local scraper.
+
 Context capabilities are likewise explicit because standard model discovery does not reliably
 report them. `context_window` is the total token window, `max_output_tokens` is both the request
 limit and reserved output budget, and `context_safety_margin_tokens` leaves extra headroom for

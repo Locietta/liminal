@@ -77,6 +77,8 @@ void test_request_encoding() {
                 .required = {"path"},
             },
     }};
+    tools.push_back({.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search"});
+    tools.push_back({.kind = provider::ToolKind::WEB_FETCH, .name = "web_fetch"});
 
     auto encoded = openai::protocol::encode_complete_request(history, tools, options());
     require(encoded.has_value(), "failed to encode OpenAI request");
@@ -92,8 +94,46 @@ void test_request_encoding() {
     require(encoded->contains(R"("type":"function_call_output","call_id":"call_1","output":"Liminal")"), "tool result was not replayed");
     require(encoded->contains(R"("strict":true)"), "tool schema must be strict");
     require(encoded->contains(R"("additionalProperties":false)"), "tool schema must reject extra properties");
+    require(encoded->contains(R"("type":"web_search")"), "hosted web search tool was not encoded");
+    require(!encoded->contains(R"("name":"web_fetch")"), "OpenAI must not receive a redundant standalone web fetch tool");
     require(encoded->contains(R"("reasoning":{"effort":"high"})"), "reasoning effort was not encoded");
     require(encoded->contains(R"("max_output_tokens":4096)"), "output token limit was not encoded");
+}
+
+void test_web_search_decoding_citations_and_replay() {
+    using lighter::http::sse::Event;
+    std::vector<Event> events{
+        {.event = "response.created", .data = R"({"response":{"id":"resp_web","model":"manual-model","status":"in_progress"}})"},
+        {.event = "response.output_item.done",
+         .data =
+             R"({"output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"Liminal CLI"}}})"},
+        {.event = "response.output_text.delta", .data = R"({"delta":"Liminal is documented online."})"},
+        {.event = "response.output_text.annotation.added",
+         .data =
+             R"({"annotation":{"type":"url_citation","start_index":0,"end_index":7,"url":"https://example.com/liminal","title":"Liminal docs"}})"},
+        {.event = "response.output_item.done",
+         .data =
+             R"({"output_index":1,"item":{"type":"message","id":"msg_web","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Liminal is documented online.","annotations":[{"type":"url_citation","start_index":0,"end_index":7,"url":"https://example.com/liminal","title":"Liminal docs"}]}]}})"},
+        {.event = "response.completed",
+         .data =
+             R"({"response":{"id":"resp_web","model":"manual-model","status":"completed","usage":{"input_tokens":8,"output_tokens":6}}})"},
+    };
+    std::string streamed;
+    auto decoded =
+        openai::protocol::decode_stream(events, {.on_text_delta = [&streamed](std::string_view text) { streamed += text; }}, "req_web");
+    require(decoded && decoded->stop == provider::StopKind::DONE && decoded->parts.size() == 2,
+            "OpenAI hosted web search response did not decode as a completed turn");
+    const auto *search = std::get_if<provider::OpaquePart>(&decoded->parts[0]);
+    const auto *text = std::get_if<provider::TextPart>(&decoded->parts[1]);
+    require(search && search->payload.contains("Liminal CLI"), "web search call was not retained for replay");
+    require(text && text->text.contains("[Liminal docs](https://example.com/liminal)"), "URL citation was not retained in text");
+    require(streamed.contains("Source: [Liminal docs](https://example.com/liminal)"), "streamed citation was not surfaced live");
+
+    auto history = base_history();
+    provider::append_response(history, *decoded);
+    auto replayed = openai::protocol::encode_complete_request(history, {}, options());
+    require(replayed && replayed->contains(R"("type":"web_search_call")") && replayed->contains("Liminal CLI"),
+            "web search call did not replay into the next request");
 }
 
 void test_stream_decoding_and_replay() {
@@ -280,6 +320,7 @@ void test_native_compaction_retries_and_replaces_conversation() {
 int main() {
     test_request_encoding();
     test_stream_decoding_and_replay();
+    test_web_search_decoding_citations_and_replay();
     test_invalid_event_order();
     test_invalid_instruction_order();
     test_completion_retry_is_scriptable();

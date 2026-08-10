@@ -350,8 +350,10 @@ Result<void> ToolSet::register_tool(ToolRegistration tool) {
 
 std::vector<provider::ToolDefinition> ToolSet::definitions() const {
     std::vector<provider::ToolDefinition> result;
-    result.reserve(registrations.size());
+    result.reserve(registrations.size() + 2);
     for (const auto &tool : registrations) result.push_back(tool.definition);
+    result.push_back({.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search", .description = "Search the public web."});
+    result.push_back({.kind = provider::ToolKind::WEB_FETCH, .name = "web_fetch", .description = "Fetch a public web page."});
     return result;
 }
 

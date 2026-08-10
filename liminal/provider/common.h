@@ -42,7 +42,14 @@ struct InputSchema {
     bool additional_properties = false;
 };
 
+enum struct ToolKind {
+    FUNCTION,
+    WEB_SEARCH,
+    WEB_FETCH,
+};
+
 struct ToolDefinition {
+    ToolKind kind = ToolKind::FUNCTION;
     std::string name;
     std::string description;
     InputSchema input_schema;

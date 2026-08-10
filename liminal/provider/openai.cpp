@@ -34,6 +34,7 @@ struct InputText {
 
 struct OutputText {
     std::string text;
+    std::optional<std::vector<glz::generic>> annotations;
 };
 
 struct Refusal {
@@ -88,7 +89,13 @@ struct CompactionItem {
     std::optional<std::string> created_by;
 };
 
-using ResponseItem = std::variant<MessageItem, FunctionCallItem, FunctionCallOutputItem, ReasoningItem, CompactionItem>;
+struct WebSearchCallItem {
+    std::string id;
+    std::optional<std::string> status;
+    std::optional<glz::generic> action;
+};
+
+using ResponseItem = std::variant<MessageItem, FunctionCallItem, FunctionCallOutputItem, ReasoningItem, CompactionItem, WebSearchCallItem>;
 
 struct FunctionTool {
     std::string name;
@@ -97,7 +104,9 @@ struct FunctionTool {
     bool strict = true;
 };
 
-using Tool = std::variant<FunctionTool>;
+struct WebSearchTool {};
+
+using Tool = std::variant<FunctionTool, WebSearchTool>;
 
 struct Reasoning {
     std::string effort;
@@ -132,6 +141,12 @@ struct ModelsResponse {
     std::vector<Model> models;
 };
 
+struct UrlCitation {
+    std::string type;
+    std::string url;
+    std::optional<std::string> title;
+};
+
 } // namespace liminal::openai::wire
 
 template <>
@@ -143,13 +158,14 @@ struct glz::meta<liminal::openai::wire::MessageContent> {
 template <>
 struct glz::meta<liminal::openai::wire::ResponseItem> {
     static constexpr std::string_view tag = "type";
-    static constexpr auto ids = std::array{"message", "function_call", "function_call_output", "reasoning", "compaction"};
+    static constexpr auto ids =
+        std::array{"message", "function_call", "function_call_output", "reasoning", "compaction", "web_search_call"};
 };
 
 template <>
 struct glz::meta<liminal::openai::wire::Tool> {
     static constexpr std::string_view tag = "type";
-    static constexpr auto ids = std::array{"function"};
+    static constexpr auto ids = std::array{"function", "web_search"};
 };
 
 namespace liminal::openai {
@@ -172,6 +188,29 @@ Result<T> parse_wire(std::string_view text, std::string_view context) {
         return outcome_error(Error::json({.code = ctx.ec, .detail = glz::format_error(ctx, text)}, std::string(context)));
     }
     return value;
+}
+
+std::optional<std::string> citation_markdown(const glz::generic &annotation) {
+    auto encoded = json::to_string(annotation);
+    if (!encoded) return std::nullopt;
+    auto citation = parse_wire<wire::UrlCitation>(*encoded, "URL citation");
+    if (!citation || citation->type != "url_citation" || citation->url.empty()) return std::nullopt;
+    const auto label = citation->title && !citation->title->empty() ? *citation->title : citation->url;
+    return "[" + label + "](" + citation->url + ")";
+}
+
+std::string cited_text(wire::OutputText text) {
+    if (!text.annotations || text.annotations->empty()) return std::move(text.text);
+    std::vector<std::string> citations;
+    for (const auto &annotation : *text.annotations) {
+        auto citation = citation_markdown(annotation);
+        if (citation && std::ranges::find(citations, *citation) == citations.end()) citations.push_back(*std::move(citation));
+    }
+    if (!citations.empty()) {
+        text.text += "\n\nSources:";
+        for (const auto &citation : citations) text.text += "\n- " + citation;
+    }
+    return std::move(text.text);
 }
 
 /// OpenAI error codes/types that indicate a transient upstream condition.
@@ -279,7 +318,7 @@ Result<void> to_parts(std::vector<wire::ResponseItem> output, provider::TurnResp
         if (auto *message = std::get_if<wire::MessageItem>(&item)) {
             for (auto &content : message->content) {
                 if (auto *text = std::get_if<wire::OutputText>(&content)) {
-                    response.parts.push_back(provider::TextPart{.text = std::move(text->text)});
+                    response.parts.push_back(provider::TextPart{.text = cited_text(std::move(*text))});
                 } else if (auto *refusal = std::get_if<wire::Refusal>(&content)) {
                     refused = true;
                     response.parts.push_back(provider::TextPart{.text = std::move(refusal->refusal)});
@@ -301,7 +340,8 @@ Result<void> to_parts(std::vector<wire::ResponseItem> output, provider::TurnResp
                 .name = std::move(function->name),
                 .input = *std::move(input),
             });
-        } else if (std::holds_alternative<wire::ReasoningItem>(item) || std::holds_alternative<wire::CompactionItem>(item)) {
+        } else if (std::holds_alternative<wire::ReasoningItem>(item) || std::holds_alternative<wire::CompactionItem>(item) ||
+                   std::holds_alternative<wire::WebSearchCallItem>(item)) {
             auto payload = encode_opaque(item);
             if (!payload) {
                 return outcome_error(std::move(payload).error());
@@ -330,6 +370,10 @@ struct OutputItemDoneEvent {
 
 struct TextDeltaEvent {
     std::string delta;
+};
+
+struct AnnotationAddedEvent {
+    glz::generic annotation;
 };
 
 struct WireInputTokenDetails {
@@ -461,6 +505,13 @@ struct StreamAccumulator {
             if (callbacks.on_text_delta && !parsed->delta.empty()) {
                 callbacks.on_text_delta(parsed->delta);
             }
+            return {};
+        }
+        if (name == "response.output_text.annotation.added") {
+            auto parsed = parse_wire<AnnotationAddedEvent>(event.data, name);
+            if (!parsed) return outcome_error(std::move(parsed).error());
+            auto citation = citation_markdown(parsed->annotation);
+            if (citation && callbacks.on_text_delta) callbacks.on_text_delta("\n\nSource: " + *citation);
             return {};
         }
         if (name == "response.output_item.done") {
@@ -671,13 +722,22 @@ std::optional<std::vector<wire::Tool>> make_tools(const std::vector<provider::To
     std::vector<wire::Tool> tools;
     tools.reserve(definitions.size());
     for (const auto &definition : definitions) {
-        tools.push_back(wire::FunctionTool{
-            .name = definition.name,
-            .description = definition.description,
-            .parameters = definition.input_schema,
-        });
+        switch (definition.kind) {
+            case provider::ToolKind::FUNCTION:
+                tools.push_back(wire::FunctionTool{
+                    .name = definition.name,
+                    .description = definition.description,
+                    .parameters = definition.input_schema,
+                });
+                break;
+            case provider::ToolKind::WEB_SEARCH: tools.push_back(wire::WebSearchTool{}); break;
+            case provider::ToolKind::WEB_FETCH:
+                // The Responses API's web_search tool performs both search
+                // and page opening, so it has no separate fetch declaration.
+                break;
+        }
     }
-    return tools;
+    return tools.empty() ? std::nullopt : std::optional(std::move(tools));
 }
 
 // --- remote compaction ---------------------------------------------------

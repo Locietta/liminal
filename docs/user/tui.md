@@ -39,6 +39,7 @@ Built-in tools show the consequential details in the transcript:
 - `read_file` names the requested path, then reports line and byte counts.
 - `apply_patch` reports the patch operation and a bounded list of changed paths.
 - `exec_command` shows the command and returns either its exit status or a persistent session ID. `write_stdin` sends characters to that session or polls it for incremental, bounded output. Commands are highlighted as PowerShell on Windows and Bash on Linux, with executables and options visually separated from ordinary arguments; after ten seconds, a running command also shows live elapsed time.
+- Web search and page fetching run as hosted provider tools. Source links are surfaced while the answer streams and retained in the saved assistant text.
 
 Large results stay bounded, and separate parallel calls keep independent running and completion states.
 The action and exact path or command stay bright, while completion metadata and output previews are dimmed for quick scanning.

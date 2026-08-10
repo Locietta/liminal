@@ -47,9 +47,10 @@ Result<provider::ToolResult> execute(ToolSet &tools, provider::ToolCall call) {
 void test_tools_are_available_by_default() {
     ToolSet tools(std::filesystem::current_path() / "liminal");
     auto definitions = tools.definitions();
-    require(definitions.size() == 4 && definitions[0].name == "read_file" && definitions[1].name == "apply_patch" &&
-                definitions[2].name == "exec_command" && definitions[3].name == "write_stdin",
-            "default tools must include file reading, patch editing, and interactive shell execution");
+    require(definitions.size() == 6 && definitions[0].name == "read_file" && definitions[1].name == "apply_patch" &&
+                definitions[2].name == "exec_command" && definitions[3].name == "write_stdin" &&
+                definitions[4].kind == provider::ToolKind::WEB_SEARCH && definitions[5].kind == provider::ToolKind::WEB_FETCH,
+            "default tools must include file reading, patch editing, interactive shell execution, and hosted web access");
 
     auto readme = execute(tools, make_call("read", "read_file", R"({"path":"../README.md"})"));
     require(readme.has_value() && !readme->is_error && readme->content.contains("Liminal"),

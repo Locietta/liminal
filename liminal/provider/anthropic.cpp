@@ -1,5 +1,6 @@
 #include "anthropic.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <optional>
 #include <string>
@@ -25,6 +26,12 @@ namespace liminal::anthropic::wire {
 
 struct TextBlock {
     std::string text;
+    struct Citation {
+        std::string type;
+        std::string url;
+        std::optional<std::string> title;
+    };
+    std::optional<std::vector<Citation>> citations;
 };
 
 // Neutral ToolCall's fields (id/name/input) already spell the Anthropic wire
@@ -48,7 +55,31 @@ struct RedactedThinkingBlock {
     std::string data;
 };
 
-using ContentBlock = std::variant<TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock, RedactedThinkingBlock>;
+struct ServerToolUseBlock {
+    std::string id;
+    std::string name;
+    glz::generic input;
+};
+
+struct WebSearchToolResultBlock {
+    std::string tool_use_id;
+    glz::generic content;
+};
+
+struct WebFetchToolResultBlock {
+    std::string tool_use_id;
+    glz::generic content;
+};
+
+using ContentBlock = std::variant<TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock, RedactedThinkingBlock, ServerToolUseBlock,
+                                  WebSearchToolResultBlock, WebFetchToolResultBlock>;
+
+struct Tool {
+    std::optional<std::string> type;
+    std::string name;
+    std::optional<std::string> description;
+    std::optional<provider::InputSchema> input_schema;
+};
 
 struct Message {
     std::string role; // "user" / "assistant"
@@ -68,7 +99,7 @@ struct MessageRequest {
     u32 max_tokens = 8192;
     std::optional<std::string> system;
     std::vector<Message> messages;
-    std::optional<std::vector<provider::ToolDefinition>> tools; // omitted when nullopt
+    std::optional<std::vector<Tool>> tools; // omitted when nullopt
     bool stream = true;
     std::optional<Thinking> thinking;
     std::optional<OutputConfig> output_config;
@@ -107,7 +138,14 @@ struct AssistantMessage {
 template <>
 struct glz::meta<liminal::anthropic::wire::ContentBlock> {
     static constexpr std::string_view tag = "type";
-    static constexpr auto ids = std::array{"text", "tool_use", "tool_result", "thinking", "redacted_thinking"};
+    static constexpr auto ids = std::array{"text",
+                                           "tool_use",
+                                           "tool_result",
+                                           "thinking",
+                                           "redacted_thinking",
+                                           "server_tool_use",
+                                           "web_search_tool_result",
+                                           "web_fetch_tool_result"};
 };
 
 namespace liminal::anthropic {
@@ -131,6 +169,26 @@ Result<T> parse_wire(std::string_view text, std::string_view context) {
         return outcome_error(Error::json({.code = ctx.ec, .detail = glz::format_error(ctx, text)}, std::string(context)));
     }
     return value;
+}
+
+std::optional<std::string> citation_markdown(const wire::TextBlock::Citation &citation) {
+    if (citation.url.empty()) return std::nullopt;
+    const auto label = citation.title && !citation.title->empty() ? *citation.title : citation.url;
+    return "[" + label + "](" + citation.url + ")";
+}
+
+std::string cited_text(wire::TextBlock text) {
+    if (!text.citations || text.citations->empty()) return std::move(text.text);
+    std::vector<std::string> citations;
+    for (const auto &value : *text.citations) {
+        auto citation = citation_markdown(value);
+        if (citation && std::ranges::find(citations, *citation) == citations.end()) citations.push_back(*std::move(citation));
+    }
+    if (!citations.empty()) {
+        text.text += "\n\nSources:";
+        for (const auto &citation : citations) text.text += "\n- " + citation;
+    }
+    return std::move(text.text);
 }
 
 /// Anthropic envelope types that indicate a transient upstream condition.
@@ -263,7 +321,7 @@ Result<provider::TurnResponse> to_turn_response(wire::AssistantMessage message) 
 
     for (auto &block : message.content) {
         if (auto *text = std::get_if<wire::TextBlock>(&block)) {
-            response.parts.push_back(provider::TextPart{.text = std::move(text->text)});
+            response.parts.push_back(provider::TextPart{.text = cited_text(std::move(*text))});
         } else if (auto *call = std::get_if<wire::ToolUseBlock>(&block)) {
             response.parts.push_back(std::move(*call));
         } else if (std::holds_alternative<wire::ThinkingBlock>(block) || std::holds_alternative<wire::RedactedThinkingBlock>(block)) {
@@ -271,6 +329,15 @@ Result<provider::TurnResponse> to_turn_response(wire::AssistantMessage message) 
             if (!payload) {
                 return outcome_error(std::move(payload).error());
             }
+            response.parts.push_back(provider::OpaquePart{
+                .provider_tag = std::string(k_provider_tag),
+                .payload = *std::move(payload),
+            });
+        } else if (std::holds_alternative<wire::ServerToolUseBlock>(block) ||
+                   std::holds_alternative<wire::WebSearchToolResultBlock>(block) ||
+                   std::holds_alternative<wire::WebFetchToolResultBlock>(block)) {
+            auto payload = encode_opaque(std::move(block));
+            if (!payload) return outcome_error(std::move(payload).error());
             response.parts.push_back(provider::OpaquePart{
                 .provider_tag = std::string(k_provider_tag),
                 .payload = *std::move(payload),
@@ -309,6 +376,9 @@ struct WireBlockProbe {
     std::optional<std::string> thinking;
     std::optional<std::string> signature;
     std::optional<std::string> data;
+    std::optional<std::string> tool_use_id;
+    std::optional<glz::generic> content;
+    std::optional<std::vector<wire::TextBlock::Citation>> citations;
 };
 
 struct ContentBlockStartEvent {
@@ -322,6 +392,7 @@ struct WireDeltaProbe {
     std::optional<std::string> partial_json;
     std::optional<std::string> thinking;
     std::optional<std::string> signature;
+    std::optional<wire::TextBlock::Citation> citation;
 };
 
 struct ContentBlockDeltaEvent {
@@ -362,6 +433,7 @@ struct ApiErrorEnvelope {
 
 struct PendingText {
     std::string text;
+    std::vector<wire::TextBlock::Citation> citations;
 };
 
 struct PendingToolUse {
@@ -375,7 +447,20 @@ struct PendingThinking {
     std::string signature;
 };
 
-using PendingBlock = std::variant<PendingText, PendingToolUse, PendingThinking, wire::RedactedThinkingBlock>;
+struct PendingServerToolUse {
+    std::string id;
+    std::string name;
+    std::string input_json;
+};
+
+struct PendingServerResult {
+    std::string type;
+    std::string tool_use_id;
+    glz::generic content;
+};
+
+using PendingBlock =
+    std::variant<PendingText, PendingToolUse, PendingThinking, wire::RedactedThinkingBlock, PendingServerToolUse, PendingServerResult>;
 
 struct StreamAccumulator {
     wire::AssistantMessage message;
@@ -420,9 +505,18 @@ Result<void> StreamAccumulator::on_block_start(const ContentBlockStartEvent &eve
 
     const auto &probe = event.content_block;
     if (probe.type == "text") {
-        pending[index] = PendingText{.text = probe.text.value_or("")};
+        pending[index] =
+            PendingText{.text = probe.text.value_or(""), .citations = probe.citations.value_or(std::vector<wire::TextBlock::Citation>{})};
     } else if (probe.type == "tool_use") {
         pending[index] = PendingToolUse{.id = probe.id.value_or(""), .name = probe.name.value_or("")};
+    } else if (probe.type == "server_tool_use") {
+        pending[index] = PendingServerToolUse{.id = probe.id.value_or(""), .name = probe.name.value_or("")};
+    } else if (probe.type == "web_search_tool_result" || probe.type == "web_fetch_tool_result") {
+        pending[index] = PendingServerResult{
+            .type = probe.type,
+            .tool_use_id = probe.tool_use_id.value_or(""),
+            .content = probe.content.value_or(glz::generic{}),
+        };
     } else if (probe.type == "thinking") {
         pending[index] = PendingThinking{.thinking = probe.thinking.value_or(""), .signature = probe.signature.value_or("")};
     } else if (probe.type == "redacted_thinking") {
@@ -453,11 +547,19 @@ Result<void> StreamAccumulator::on_block_delta(const ContentBlockDeltaEvent &eve
             callbacks.on_text_delta(piece);
         }
     } else if (delta.type == "input_json_delta") {
-        auto *tool = std::get_if<PendingToolUse>(&block);
-        if (!tool) {
+        if (auto *tool = std::get_if<PendingToolUse>(&block)) {
+            tool->input_json += delta.partial_json.value_or("");
+        } else if (auto *tool = std::get_if<PendingServerToolUse>(&block)) {
+            tool->input_json += delta.partial_json.value_or("");
+        } else {
             return outcome_error(Error::protocol("input_json_delta for a non-tool_use block"));
         }
-        tool->input_json += delta.partial_json.value_or("");
+    } else if (delta.type == "citations_delta") {
+        auto *text = std::get_if<PendingText>(&block);
+        if (!text || !delta.citation) return outcome_error(Error::protocol("citations_delta for a non-text block"));
+        text->citations.push_back(*delta.citation);
+        auto citation = citation_markdown(*delta.citation);
+        if (citation && callbacks.on_text_delta) callbacks.on_text_delta("\n\nSource: " + *citation);
     } else if (delta.type == "thinking_delta") {
         auto *thinking = std::get_if<PendingThinking>(&block);
         if (!thinking) {
@@ -486,7 +588,10 @@ Result<void> StreamAccumulator::on_block_stop(const ContentBlockStopEvent &event
     pending[index].reset();
 
     if (auto *text = std::get_if<PendingText>(&block)) {
-        completed[index] = wire::TextBlock{.text = std::move(text->text)};
+        completed[index] = wire::TextBlock{
+            .text = std::move(text->text),
+            .citations = text->citations.empty() ? std::nullopt : std::optional(std::move(text->citations)),
+        };
     } else if (auto *tool = std::get_if<PendingToolUse>(&block)) {
         std::string_view input_json = tool->input_json.empty() ? std::string_view("{}") : tool->input_json;
         auto input = parse_wire<glz::generic>(input_json, "tool_use input");
@@ -508,6 +613,24 @@ Result<void> StreamAccumulator::on_block_stop(const ContentBlockStopEvent &event
         };
     } else if (auto *redacted = std::get_if<wire::RedactedThinkingBlock>(&block)) {
         completed[index] = std::move(*redacted);
+    } else if (auto *tool = std::get_if<PendingServerToolUse>(&block)) {
+        std::string_view input_json = tool->input_json.empty() ? std::string_view("{}") : tool->input_json;
+        auto input = parse_wire<glz::generic>(input_json, "server_tool_use input");
+        if (!input) return outcome_error(std::move(input).error());
+        if (!input->is_object()) return outcome_error(Error::protocol("server_tool_use input is not a JSON object"));
+        completed[index] = wire::ServerToolUseBlock{
+            .id = std::move(tool->id),
+            .name = std::move(tool->name),
+            .input = *std::move(input),
+        };
+    } else if (auto *result = std::get_if<PendingServerResult>(&block)) {
+        if (result->type == "web_search_tool_result") {
+            completed[index] =
+                wire::WebSearchToolResultBlock{.tool_use_id = std::move(result->tool_use_id), .content = std::move(result->content)};
+        } else {
+            completed[index] =
+                wire::WebFetchToolResultBlock{.tool_use_id = std::move(result->tool_use_id), .content = std::move(result->content)};
+        }
     }
     return {};
 }
@@ -729,7 +852,22 @@ Result<std::string> encode_complete_request(const provider::History &history, co
         .messages = std::move(wire_history->messages),
     };
     if (!tools.empty()) {
-        request.tools = tools;
+        std::vector<wire::Tool> encoded_tools;
+        encoded_tools.reserve(tools.size());
+        for (const auto &tool : tools) {
+            switch (tool.kind) {
+                case provider::ToolKind::FUNCTION:
+                    encoded_tools.push_back({
+                        .name = tool.name,
+                        .description = tool.description,
+                        .input_schema = tool.input_schema,
+                    });
+                    break;
+                case provider::ToolKind::WEB_SEARCH: encoded_tools.push_back({.type = "web_search_20250305", .name = "web_search"}); break;
+                case provider::ToolKind::WEB_FETCH: encoded_tools.push_back({.type = "web_fetch_20250910", .name = "web_fetch"}); break;
+            }
+        }
+        request.tools = std::move(encoded_tools);
     }
     if (options.reasoning_effort) {
         request.thinking = wire::MessageRequest::Thinking{};
