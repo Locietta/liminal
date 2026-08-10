@@ -4,21 +4,14 @@
 #include <span>
 #include <string>
 
-namespace liminal {
+#include <xmake/bin2obj/default_agent_md.hpp>
+#include <xmake/bin2obj/runtime_tools_md.hpp>
 
-extern "C" {
-extern const std::byte _binary_runtime_tools_md_start[];
-extern const std::byte _binary_runtime_tools_md_end[];
-extern const std::byte _binary_default_agent_md_start[];
-extern const std::byte _binary_default_agent_md_end[];
-}
+namespace liminal {
 
 namespace {
 
-std::string embedded_prompt(const std::byte *begin, const std::byte *end) {
-    const auto content = std::span(begin, end);
-    return {reinterpret_cast<const char *>(content.data()), content.size()};
-}
+std::string embedded_prompt(std::span<const std::byte> content) { return {reinterpret_cast<const char *>(content.data()), content.size()}; }
 
 } // namespace
 
@@ -27,7 +20,7 @@ context::InstructionSource default_runtime_instruction() {
         .authority = context::InstructionAuthority::RUNTIME,
         .trust = context::InstructionTrust::PLATFORM,
         .origin = "builtin:runtime-tools",
-        .content = embedded_prompt(_binary_runtime_tools_md_start, _binary_runtime_tools_md_end),
+        .content = embedded_prompt(xmake::runtime_tools_md),
     };
 }
 
@@ -36,7 +29,7 @@ context::InstructionSource default_application_instruction() {
         .authority = context::InstructionAuthority::APPLICATION,
         .trust = context::InstructionTrust::PLATFORM,
         .origin = "builtin:default-agent",
-        .content = embedded_prompt(_binary_default_agent_md_start, _binary_default_agent_md_end),
+        .content = embedded_prompt(xmake::default_agent_md),
     };
 }
 
