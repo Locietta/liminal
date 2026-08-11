@@ -175,6 +175,7 @@ struct SessionScreen {
     bool has_elapsed_running_command() const;
     bool working() const noexcept;
     bool animating() const;
+    std::vector<LayoutRow> working_rows() const;
 
     lighter::TerminalSize size{80, 24};
     Transcript transcript;

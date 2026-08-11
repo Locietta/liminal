@@ -36,9 +36,8 @@ using StyledLine = std::vector<StyledSpan>;
 
 constexpr auto k_command_elapsed_threshold = std::chrono::seconds(10);
 
-constexpr std::string_view k_spinner_frames[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
-constexpr auto k_spinner_interval = std::chrono::milliseconds(100);
-constexpr auto k_working_pulse_interval = std::chrono::milliseconds(600);
+constexpr std::string_view k_spinner_frames[] = {"·", "✢", "✳", "✻", "✽", "✻", "✳", "✢"};
+constexpr auto k_spinner_interval = std::chrono::milliseconds(200);
 constexpr auto k_working_elapsed_threshold = std::chrono::seconds(3);
 
 std::string_view working_label(SessionState state) noexcept {
@@ -306,7 +305,15 @@ ViewportAnchor row_anchor(const LayoutRow &row) { return {.block_id = row.block_
 std::vector<LayoutRow> visible_rows(const SessionScreen &screen) {
     const auto visible = static_cast<usize>(std::max(screen.viewport_rows(), 0));
     if (visible == 0) return {};
-    if (!screen.anchor) return tail_rows(screen, visible);
+    if (!screen.anchor) {
+        // The working status lives in the transcript flow: it follows the
+        // newest output while tail-following and scrolls away while browsing.
+        auto working = screen.working_rows();
+        auto rows = tail_rows(screen, visible > working.size() ? visible - working.size() : 0);
+        rows.insert(rows.end(), std::make_move_iterator(working.begin()), std::make_move_iterator(working.end()));
+        if (rows.size() > visible) rows.erase(rows.begin(), rows.begin() + static_cast<isize>(rows.size() - visible));
+        return rows;
+    }
 
     auto rows = rows_from(screen, *screen.anchor, visible);
     if (rows.empty()) return tail_rows(screen, visible);
@@ -970,10 +977,7 @@ i32 SessionScreen::viewport_rows() const {
     const auto projection = project_composer(*this);
     const auto header = size.rows >= 2 ? 1 : 0;
     const auto footer = size.rows >= 3 ? 1 : 0;
-    const auto available = std::max(size.rows - header - footer - composer_layout(*this, projection).rows(), 0);
-    // The working indicator borrows one transcript row but never the last one.
-    if (working() && available >= 2) return available - 1;
-    return available;
+    return std::max(size.rows - header - footer - composer_layout(*this, projection).rows(), 0);
 }
 
 bool SessionScreen::working() const noexcept {
@@ -981,6 +985,24 @@ bool SessionScreen::working() const noexcept {
 }
 
 bool SessionScreen::animating() const { return working() || has_elapsed_running_command(); }
+
+std::vector<LayoutRow> SessionScreen::working_rows() const {
+    if (!working()) return {};
+    const auto now = monotonic_now();
+    const auto elapsed = now >= turn_started_at ? now - turn_started_at : std::chrono::steady_clock::duration{};
+    const auto frame_index = static_cast<usize>(elapsed / k_spinner_interval) % std::size(k_spinner_frames);
+
+    std::vector<LayoutRow> rows(2);
+    auto &status = rows[1];
+    append_span(status.spans, k_spinner_frames[frame_index], Style::ACCENT);
+    append_span(status.spans, " ", Style::NORMAL);
+    append_span(status.spans, working_label(state), Style::NORMAL);
+    if (elapsed >= k_working_elapsed_threshold) {
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
+        append_span(status.spans, " (" + elapsed_text(seconds) + ")", Style::MUTED);
+    }
+    return rows;
+}
 
 Frame SessionScreen::frame() const {
     Frame result{.surface = Surface(size.columns, size.rows)};
@@ -1005,21 +1027,6 @@ Frame SessionScreen::frame() const {
         }
         i32 column = 0;
         for (const auto &span : row.spans) column = result.surface.write(target_row, column, span.text, span.style);
-    }
-
-    if (working() && prompt_row - (header ? 1 : 0) > viewport_rows()) {
-        const auto indicator_row = prompt_row - 1;
-        const auto now = monotonic_now();
-        const auto elapsed = now >= turn_started_at ? now - turn_started_at : std::chrono::steady_clock::duration{};
-        const auto frame_index = static_cast<usize>(elapsed / k_spinner_interval) % std::size(k_spinner_frames);
-        const bool bright = (elapsed / k_working_pulse_interval) % 2 == 0;
-        auto column = result.surface.write(indicator_row, 0, k_spinner_frames[frame_index], Style::ACCENT);
-        column = result.surface.write(indicator_row, column, " ", Style::NORMAL);
-        column = result.surface.write(indicator_row, column, working_label(state), bright ? Style::NORMAL : Style::MUTED);
-        if (elapsed >= k_working_elapsed_threshold) {
-            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
-            result.surface.write(indicator_row, column, " (" + elapsed_text(seconds) + ")", Style::MUTED);
-        }
     }
 
     if (has_footer) {

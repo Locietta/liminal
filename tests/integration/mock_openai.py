@@ -153,15 +153,15 @@ def make_server(port=0, compact_404=False, chunk_delay=0):
             state["calls"] += 1
             assert body["store"] is False, "store must be false (stateless/ZDR)"
             assert "reasoning.encrypted_content" in body["include"]
-            assert "instructions" not in body, (
-                "agent instructions must be explicit developer messages"
+            assert body.get("instructions") == "Test system policy.", (
+                "system instructions must be lifted into the top-level field"
             )
-            system, developer = body["input"][:2]
-            assert system == {
-                "type": "message",
-                "role": "system",
-                "content": [{"type": "input_text", "text": "Test system policy."}],
-            }
+            assert not any(
+                item.get("role") == "system"
+                for item in body["input"]
+                if item["type"] == "message"
+            ), "the Codex backend rejects system-role input items"
+            developer = body["input"][0]
             assert developer == {
                 "type": "message",
                 "role": "developer",
@@ -203,7 +203,9 @@ def make_server(port=0, compact_404=False, chunk_delay=0):
             functions = [
                 tool for tool in body.get("tools", []) if tool["type"] == "function"
             ]
-            assert all(tool["strict"] is True for tool in functions)
+            assert all(tool["strict"] is False for tool in functions), (
+                "function tools must stay non-strict so optional parameters remain valid"
+            )
             assert all(
                 tool["parameters"]["additionalProperties"] is False
                 for tool in functions

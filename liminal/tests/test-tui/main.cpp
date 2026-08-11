@@ -651,41 +651,37 @@ void check_working_indicator() {
 
     screen.apply(PromptSubmitted{.text = "go"});
     require(screen.working() && screen.animating(), "a submitted prompt must enter the animated working state");
-    require(screen.viewport_rows() == idle_rows - 1, "the working indicator must reserve one transcript row above the composer");
+    require(screen.viewport_rows() == idle_rows, "the in-flow working status must not shrink the transcript viewport");
     const auto waiting = screen.frame();
-    require(waiting.surface.row_text(5).contains("Thinking…"), "a waiting turn must show the thinking indicator above the composer");
-    const auto spinner_before = waiting.surface.row_text(5);
-    now += std::chrono::milliseconds(100);
-    const auto spinner_after = screen.frame().surface.row_text(5);
+    require(waiting.surface.row_text(1) == "you: go" && waiting.surface.row_text(2).empty() &&
+                waiting.surface.row_text(3).contains("Thinking…"),
+            "a waiting turn must show the status one blank line below the newest output");
+    const auto spinner_before = waiting.surface.row_text(3);
+    now += std::chrono::milliseconds(200);
+    const auto spinner_after = screen.frame().surface.row_text(3);
     require(spinner_after != spinner_before && spinner_after.contains("Thinking…"),
-            "the spinner must advance with time without disturbing the state label");
-
-    const auto label_style = [&screen] {
-        const auto frame = screen.frame();
-        return frame.surface.cells[static_cast<usize>(5 * frame.surface.columns + 2)].style;
-    };
-    require(label_style() == tui::Style::NORMAL, "the working label must start at normal intensity");
-    now += std::chrono::milliseconds(600);
-    require(label_style() == tui::Style::MUTED, "the working label must pulse to muted intensity");
+            "the spinner glyph must advance with time without disturbing the state label");
     now += std::chrono::seconds(3);
     require(frame_text(screen.frame()).contains("(3s)"), "long waits must add a muted elapsed suffix");
 
     screen.apply(AssistantTextDelta{.text = "hi"});
-    require(frame_text(screen.frame()).contains("Writing…"), "streaming turns must show the writing indicator");
+    require(frame_text(screen.frame()).contains("Writing…"), "streaming turns must show the writing status");
     screen.apply(ToolStarted{.call_id = "tool", .name = "exec_command", .command = "echo hi"});
-    require(frame_text(screen.frame()).contains("Running tools…"), "running tools must show the tool indicator");
+    require(frame_text(screen.frame()).contains("Running tools…"), "running tools must show the tool status");
     screen.apply(ToolCompleted{.call_id = "tool", .name = "exec_command", .command = "echo hi", .summary = "exit 0"});
-    require(frame_text(screen.frame()).contains("Writing…"), "the indicator must settle back once every tool completes");
+    require(frame_text(screen.frame()).contains("Writing…"), "the status must settle back once every tool completes");
 
-    screen.resize({40, 4});
-    require(screen.viewport_rows() == 1 && !frame_text(screen.frame()).contains("Writing…"),
-            "short terminals must drop the indicator before the last transcript row");
-    screen.resize({40, 10});
+    for (i32 index = 0; index < 12; ++index) screen.apply(SessionNotice{.text = "line-" + std::to_string(index)});
+    require(frame_text(screen.frame()).contains("Writing…"), "a full viewport must keep the status at the transcript tail");
+    screen.page(-1);
+    require(screen.anchor.has_value() && !frame_text(screen.frame()).contains("Writing…"),
+            "browsing history must scroll the working status away with the flow");
+    screen.follow_tail();
+    require(frame_text(screen.frame()).contains("Writing…"), "returning to the tail must reveal the working status again");
 
     screen.apply(TurnCompleted{});
     require(!screen.working() && !screen.animating(), "a completed turn must leave the animated working state");
-    require(screen.viewport_rows() == idle_rows && !frame_text(screen.frame()).contains("Writing…"),
-            "a completed turn must release the indicator row");
+    require(!frame_text(screen.frame()).contains("Writing…"), "a completed turn must remove the working status");
 }
 
 void check_mouse_selection() {
