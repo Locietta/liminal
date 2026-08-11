@@ -164,6 +164,8 @@ struct SessionScreen {
 
     void begin_selection(i32 row, i32 column);
     bool extend_selection(i32 row, i32 column);
+    bool has_selection() const noexcept;
+    void clear_selection() noexcept;
     /// Returns the selected text and clears the selection. A click that never
     /// moved off its press cell returns an empty string.
     std::string take_selection();

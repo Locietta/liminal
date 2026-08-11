@@ -50,15 +50,17 @@ The action and exact path or command stay bright, while completion metadata and 
 
 ## Keyboard shortcuts
 
-| Shortcut             | Action                                                                   |
-| -------------------- | ------------------------------------------------------------------------ |
-| Enter                | Send the current prompt                                                  |
-| Ctrl+J / Shift+Enter | Insert a newline                                                         |
-| Ctrl+G               | Edit the current draft in `VISUAL` or `EDITOR`                           |
-| Up / Down            | Move within a multiline draft, then recall prompts at its boundaries     |
-| Ctrl+Up / Ctrl+Down  | Recall older or newer prompts directly                                   |
-| PageUp / PageDown    | Scroll the transcript by one viewport                                    |
-| Mouse wheel          | Scroll the transcript                                                    |
-| Mouse drag           | Select visible text; the selection is copied when the button is released |
+| Shortcut             | Action                                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------ |
+| Enter                | Send the current prompt                                                                    |
+| Ctrl+J / Shift+Enter | Insert a newline                                                                           |
+| Ctrl+G               | Edit the current draft in `VISUAL` or `EDITOR`                                             |
+| Up / Down            | Move within a multiline draft, then recall prompts at its boundaries                       |
+| Ctrl+Up / Ctrl+Down  | Recall older or newer prompts directly                                                     |
+| PageUp / PageDown    | Scroll the transcript by one viewport                                                      |
+| Mouse wheel          | Scroll the transcript                                                                      |
+| Mouse drag           | Select visible text                                                                        |
+| Ctrl+C               | Copy the selection when one is active; otherwise clear the draft, cancel the turn, or exit |
+| Ctrl+O               | Copy the selection when one is active; otherwise copy the latest reply                     |
 
-Drag selection highlights whole screen cells, so it works across the transcript, composer, and footer alike. Releasing the button copies the highlighted text to the clipboard and confirms in the footer; a plain click copies nothing. Terminal-native selection remains available through the terminal's usual modifier (typically Shift+drag).
+Drag selection highlights whole screen cells and persists after you release the button; nothing reaches the clipboard until you press Ctrl+C or Ctrl+O. In Windows Terminal, Ctrl+Shift+C also works because the terminal passes it through when it has no selection of its own. A plain click clears the selection, and it also clears when content changes, the transcript scrolls, or the terminal resizes, since the highlight is anchored to screen cells. Terminal-native selection remains available through the terminal's usual modifier (typically Shift+drag).

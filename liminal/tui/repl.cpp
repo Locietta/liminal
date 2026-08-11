@@ -245,11 +245,10 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             if (left && !was_left) return renderer.begin_selection(event.y, event.x);
             if (left && was_left) return renderer.extend_selection(event.y, event.x);
             if (!left && was_left) {
-                // Copy-on-release: a drag that moved off its press cell lands
-                // on the clipboard; a plain click just clears the selection.
-                auto text = renderer.take_selection();
-                if (!text.empty()) selection_copies.push(std::move(text));
-                return renderer.redraw();
+                // The selection persists after release for an explicit copy
+                // (Ctrl+C or Ctrl+O); a plain click just clears it.
+                if (!renderer.has_selection()) return renderer.clear_selection();
+                return {};
             }
             return {};
         }
@@ -286,9 +285,19 @@ Task<lighter::Error> copy_reply_with_feedback(Agent &agent, usize ordinal, Conso
     co_return renderer.status(status);
 }
 
-Task<i32> copy_reply_loop(CopyRequests &requests, Agent &agent, ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure) {
+Task<i32> copy_reply_loop(CopyRequests &requests, SelectionCopies &selection_copies, Agent &agent, ConsoleRenderer &renderer,
+                          TurnControl &control, SessionFailure &failure) {
     while (true) {
         co_await requests.next();
+        if (renderer.has_selection()) {
+            auto text = renderer.take_selection();
+            if (!text.empty()) selection_copies.push(std::move(text));
+            if (auto error = renderer.redraw()) {
+                failure.record("cannot clear selection", error, control);
+                co_return 1;
+            }
+            continue;
+        }
         if (auto error = co_await copy_reply_with_feedback(agent, 1, renderer)) {
             failure.record("cannot render clipboard status", error, control);
             co_return 1;
@@ -398,7 +407,8 @@ constexpr std::string_view k_default_compact_instructions =
     "Compact the conversation while preserving the user's goals, constraints, decisions, "
     "important tool results, modified files, unresolved issues, and the context needed to continue.";
 
-Task<i32> signal_monitor(InterruptSource &interrupts, ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure) {
+Task<i32> signal_monitor(InterruptSource &interrupts, ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure,
+                         SelectionCopies *selection_copies = nullptr) {
     while (true) {
         auto signal = co_await interrupts.next();
         if (!signal) {
@@ -407,8 +417,18 @@ Task<i32> signal_monitor(InterruptSource &interrupts, ConsoleRenderer &renderer,
         }
 
         if (*signal == lighter::ControlEventKind::INTERRUPT) {
-            // Match Codex's bottom-pane-first routing: local draft state owns
-            // the press before active work, and only an idle empty session exits.
+            // Windows-Terminal-like routing: an active selection turns the
+            // press into a copy, then local draft state owns it before active
+            // work, and only an idle empty session exits.
+            if (selection_copies && renderer.has_selection()) {
+                auto text = renderer.take_selection();
+                if (!text.empty()) selection_copies->push(std::move(text));
+                if (auto error = renderer.redraw()) {
+                    failure.record("cannot clear selection", error, control);
+                    co_return 1;
+                }
+                continue;
+            }
             if (!renderer.prompt_empty()) {
                 if (auto error = renderer.clear_prompt()) {
                     failure.record("cannot clear prompt", error, control);
@@ -683,11 +703,12 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             renderer.set_redraw_scheduler([&render_requested] { render_requested.set(); });
 #ifndef _WIN32
             auto raced = co_await WhenAny(
-                repl_body(agent, reader, renderer, control, models, failure), signal_monitor(interrupts, renderer, control, failure),
+                repl_body(agent, reader, renderer, control, models, failure),
+                signal_monitor(interrupts, renderer, control, failure, &selection_copies),
                 terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies, control, failure),
                 render_monitor(render_requested, renderer, control, failure),
                 external_editor_loop(editor_requests, terminal, renderer, control, failure),
-                copy_reply_loop(copy_requests, agent, renderer, control, failure),
+                copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
                 selection_copy_loop(selection_copies, renderer, control, failure), animation_monitor(renderer, control, failure),
                 suspend_monitor(suspend_controls, terminal, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
@@ -701,11 +722,12 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             if (raced.index() == 8) exit_code = std::get<8>(raced);
 #else
             auto raced = co_await WhenAny(
-                repl_body(agent, reader, renderer, control, models, failure), signal_monitor(interrupts, renderer, control, failure),
+                repl_body(agent, reader, renderer, control, models, failure),
+                signal_monitor(interrupts, renderer, control, failure, &selection_copies),
                 terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies, control, failure),
                 render_monitor(render_requested, renderer, control, failure),
                 external_editor_loop(editor_requests, terminal, renderer, control, failure),
-                copy_reply_loop(copy_requests, agent, renderer, control, failure),
+                copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
                 selection_copy_loop(selection_copies, renderer, control, failure), animation_monitor(renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);

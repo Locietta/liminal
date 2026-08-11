@@ -49,6 +49,8 @@ struct ConsoleRenderer {
     lighter::Error page(i32 direction);
     lighter::Error begin_selection(i32 row, i32 column);
     lighter::Error extend_selection(i32 row, i32 column);
+    bool has_selection() const noexcept;
+    lighter::Error clear_selection();
     std::string take_selection();
     lighter::Error resize(lighter::TerminalSize size);
     lighter::Error refresh_animation();

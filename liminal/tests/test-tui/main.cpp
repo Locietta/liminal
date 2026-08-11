@@ -709,11 +709,26 @@ void check_mouse_selection() {
     require(!screen.selection && screen.take_selection().empty(), "taking a selection must clear it");
 
     screen.begin_selection(1, 2);
-    require(screen.take_selection().empty(), "a click without a drag must not produce clipboard text");
+    require(!screen.has_selection() && screen.take_selection().empty(), "a click without a drag must not produce clipboard text");
 
     screen.begin_selection(2, 3);
     screen.extend_selection(1, 5);
+    require(screen.has_selection(), "a drag that moved off its press cell must report an active selection");
     require(screen.take_selection() == " beta\ngamm", "an upward drag must normalize into reading order");
+
+    screen.begin_selection(1, 0);
+    screen.extend_selection(1, 4);
+    screen.apply(SessionNotice{.text = "new content"});
+    require(!screen.has_selection(), "new transcript content must invalidate a cell-anchored selection");
+    screen.begin_selection(1, 0);
+    screen.extend_selection(1, 4);
+    screen.insert("draft");
+    require(!screen.has_selection(), "composer edits must invalidate the selection because rows may reflow");
+    screen.clear_prompt();
+    screen.begin_selection(1, 0);
+    screen.extend_selection(1, 4);
+    screen.scroll(-1);
+    require(!screen.has_selection(), "scrolling must invalidate the selection because content moves under it");
 
     tui::SessionScreen wide;
     wide.resize({10, 8});

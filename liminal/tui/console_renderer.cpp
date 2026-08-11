@@ -227,6 +227,13 @@ lighter::Error ConsoleRenderer::extend_selection(i32 row, i32 column) {
     return redraw();
 }
 
+bool ConsoleRenderer::has_selection() const noexcept { return screen.has_selection(); }
+
+lighter::Error ConsoleRenderer::clear_selection() {
+    screen.clear_selection();
+    return redraw();
+}
+
 std::string ConsoleRenderer::take_selection() { return screen.take_selection(); }
 
 lighter::Error ConsoleRenderer::resize(lighter::TerminalSize size) {

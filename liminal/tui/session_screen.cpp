@@ -693,6 +693,7 @@ SessionScreen::SessionScreen(MonotonicNow now) : monotonic_now(std::move(now)) {
 void SessionScreen::resize(lighter::TerminalSize next) noexcept {
     size.columns = std::max(next.columns, 1);
     size.rows = std::max(next.rows, 1);
+    clear_selection();
 }
 
 void SessionScreen::set_model(std::string_view name, const std::optional<std::string> &next_effort) {
@@ -707,6 +708,9 @@ void SessionScreen::show_status(std::string text) { transient_status = std::move
 void SessionScreen::apply(const Event &event) {
     const bool was_working = working();
     transient_status.reset();
+    // Cell-anchored selections cannot follow content, so any transcript
+    // change invalidates them rather than letting the highlight drift.
+    clear_selection();
     if (const auto *notice = std::get_if<SessionNotice>(&event)) {
         transcript.apply(SessionNotice{.text = trim_notice(notice->text)}, monotonic_now());
     } else {
@@ -845,6 +849,7 @@ std::string SessionScreen::take_prompt() {
 
 void SessionScreen::mark_editing() noexcept {
     transient_status.reset();
+    clear_selection();
     if (state != SessionState::WAITING && state != SessionState::STREAMING && state != SessionState::RUNNING_TOOLS) {
         state = SessionState::EDITING;
     }
@@ -896,6 +901,7 @@ bool SessionScreen::has_elapsed_running_command() const {
 
 void SessionScreen::scroll(i32 row_delta) {
     transient_status.reset();
+    clear_selection();
     if (row_delta == 0 || viewport_rows() <= 0) return;
     const auto current_rows = visible_rows(*this);
     if (current_rows.empty()) return;
@@ -945,6 +951,10 @@ bool SessionScreen::extend_selection(i32 row, i32 column) {
     selection->focus = focus;
     return true;
 }
+
+bool SessionScreen::has_selection() const noexcept { return selection && selection->anchor != selection->focus; }
+
+void SessionScreen::clear_selection() noexcept { selection.reset(); }
 
 std::string SessionScreen::take_selection() {
     if (!selection) return {};
