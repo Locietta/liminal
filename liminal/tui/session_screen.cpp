@@ -36,6 +36,20 @@ using StyledLine = std::vector<StyledSpan>;
 
 constexpr auto k_command_elapsed_threshold = std::chrono::seconds(10);
 
+constexpr std::string_view k_spinner_frames[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+constexpr auto k_spinner_interval = std::chrono::milliseconds(100);
+constexpr auto k_working_pulse_interval = std::chrono::milliseconds(600);
+constexpr auto k_working_elapsed_threshold = std::chrono::seconds(3);
+
+std::string_view working_label(SessionState state) noexcept {
+    switch (state) {
+        case SessionState::WAITING: return "Thinking…";
+        case SessionState::STREAMING: return "Writing…";
+        case SessionState::RUNNING_TOOLS: return "Running tools…";
+        default: return {};
+    }
+}
+
 void append_span(StyledLine &spans, std::string_view text, Style style) {
     if (text.empty()) return;
     if (!spans.empty() && spans.back().style == style) {
@@ -684,6 +698,7 @@ void SessionScreen::set_footer(SessionFooter next) { footer = std::move(next); }
 void SessionScreen::show_status(std::string text) { transient_status = std::move(text); }
 
 void SessionScreen::apply(const Event &event) {
+    const bool was_working = working();
     transient_status.reset();
     if (const auto *notice = std::get_if<SessionNotice>(&event)) {
         transcript.apply(SessionNotice{.text = trim_notice(notice->text)}, monotonic_now());
@@ -702,6 +717,7 @@ void SessionScreen::apply(const Event &event) {
     if (std::holds_alternative<TurnCompleted>(event)) state = SessionState::COMPLETED;
     if (std::holds_alternative<TurnCancelled>(event)) state = SessionState::CANCELLED;
     if (std::holds_alternative<TurnFailed>(event)) state = SessionState::FAILED;
+    if (!was_working && working()) turn_started_at = monotonic_now();
     if (anchor) unread = true;
 }
 
@@ -917,8 +933,17 @@ i32 SessionScreen::viewport_rows() const {
     const auto projection = project_composer(*this);
     const auto header = size.rows >= 2 ? 1 : 0;
     const auto footer = size.rows >= 3 ? 1 : 0;
-    return std::max(size.rows - header - footer - composer_layout(*this, projection).rows(), 0);
+    const auto available = std::max(size.rows - header - footer - composer_layout(*this, projection).rows(), 0);
+    // The working indicator borrows one transcript row but never the last one.
+    if (working() && available >= 2) return available - 1;
+    return available;
 }
+
+bool SessionScreen::working() const noexcept {
+    return state == SessionState::WAITING || state == SessionState::STREAMING || state == SessionState::RUNNING_TOOLS;
+}
+
+bool SessionScreen::animating() const { return working() || has_elapsed_running_command(); }
 
 Frame SessionScreen::frame() const {
     Frame result{.surface = Surface(size.columns, size.rows)};
@@ -943,6 +968,21 @@ Frame SessionScreen::frame() const {
         }
         i32 column = 0;
         for (const auto &span : row.spans) column = result.surface.write(target_row, column, span.text, span.style);
+    }
+
+    if (working() && prompt_row - (header ? 1 : 0) > viewport_rows()) {
+        const auto indicator_row = prompt_row - 1;
+        const auto now = monotonic_now();
+        const auto elapsed = now >= turn_started_at ? now - turn_started_at : std::chrono::steady_clock::duration{};
+        const auto frame_index = static_cast<usize>(elapsed / k_spinner_interval) % std::size(k_spinner_frames);
+        const bool bright = (elapsed / k_working_pulse_interval) % 2 == 0;
+        auto column = result.surface.write(indicator_row, 0, k_spinner_frames[frame_index], Style::ACCENT);
+        column = result.surface.write(indicator_row, column, " ", Style::NORMAL);
+        column = result.surface.write(indicator_row, column, working_label(state), bright ? Style::NORMAL : Style::MUTED);
+        if (elapsed >= k_working_elapsed_threshold) {
+            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
+            result.surface.write(indicator_row, column, " (" + elapsed_text(seconds) + ")", Style::MUTED);
+        }
     }
 
     if (has_footer) {

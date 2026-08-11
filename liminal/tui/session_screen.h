@@ -152,6 +152,8 @@ struct SessionScreen {
     std::vector<LayoutRow> layout_block(const Block &block) const;
     LayoutDiagnostics layout_diagnostics() const noexcept;
     bool has_elapsed_running_command() const;
+    bool working() const noexcept;
+    bool animating() const;
 
     lighter::TerminalSize size{80, 24};
     Transcript transcript;
@@ -165,6 +167,7 @@ struct SessionScreen {
     bool unread = false;
     bool external_editor_active = false;
     SessionState state = SessionState::EDITING;
+    std::chrono::steady_clock::time_point turn_started_at;
     mutable std::unordered_map<u64, CachedBlockLayout> layout_cache;
     mutable LayoutDiagnostics diagnostics;
 

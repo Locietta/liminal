@@ -630,6 +630,53 @@ void check_scroll_resize_and_unread_state() {
     require(frame_text(screen.frame()).contains("line-9"), "returning to tail must reveal the newest output");
 }
 
+void check_working_indicator() {
+    auto now = std::chrono::steady_clock::time_point{};
+    tui::SessionScreen screen([&now] { return now; });
+    screen.resize({40, 10});
+    screen.set_model("test-model", std::nullopt);
+    const auto idle_rows = screen.viewport_rows();
+    require(!screen.working() && !frame_text(screen.frame()).contains("Thinking"), "an idle session must not show the working indicator");
+
+    screen.apply(PromptSubmitted{.text = "go"});
+    require(screen.working() && screen.animating(), "a submitted prompt must enter the animated working state");
+    require(screen.viewport_rows() == idle_rows - 1, "the working indicator must reserve one transcript row above the composer");
+    const auto waiting = screen.frame();
+    require(waiting.surface.row_text(5).contains("Thinking…"), "a waiting turn must show the thinking indicator above the composer");
+    const auto spinner_before = waiting.surface.row_text(5);
+    now += std::chrono::milliseconds(100);
+    const auto spinner_after = screen.frame().surface.row_text(5);
+    require(spinner_after != spinner_before && spinner_after.contains("Thinking…"),
+            "the spinner must advance with time without disturbing the state label");
+
+    const auto label_style = [&screen] {
+        const auto frame = screen.frame();
+        return frame.surface.cells[static_cast<usize>(5 * frame.surface.columns + 2)].style;
+    };
+    require(label_style() == tui::Style::NORMAL, "the working label must start at normal intensity");
+    now += std::chrono::milliseconds(600);
+    require(label_style() == tui::Style::MUTED, "the working label must pulse to muted intensity");
+    now += std::chrono::seconds(3);
+    require(frame_text(screen.frame()).contains("(3s)"), "long waits must add a muted elapsed suffix");
+
+    screen.apply(AssistantTextDelta{.text = "hi"});
+    require(frame_text(screen.frame()).contains("Writing…"), "streaming turns must show the writing indicator");
+    screen.apply(ToolStarted{.call_id = "tool", .name = "exec_command", .command = "echo hi"});
+    require(frame_text(screen.frame()).contains("Running tools…"), "running tools must show the tool indicator");
+    screen.apply(ToolCompleted{.call_id = "tool", .name = "exec_command", .command = "echo hi", .summary = "exit 0"});
+    require(frame_text(screen.frame()).contains("Writing…"), "the indicator must settle back once every tool completes");
+
+    screen.resize({40, 4});
+    require(screen.viewport_rows() == 1 && !frame_text(screen.frame()).contains("Writing…"),
+            "short terminals must drop the indicator before the last transcript row");
+    screen.resize({40, 10});
+
+    screen.apply(TurnCompleted{});
+    require(!screen.working() && !screen.animating(), "a completed turn must leave the animated working state");
+    require(screen.viewport_rows() == idle_rows && !frame_text(screen.frame()).contains("Writing…"),
+            "a completed turn must release the indicator row");
+}
+
 void check_headless_virtual_time_and_snapshots() {
     tui::HeadlessSession session(24, 8, 100);
     require(session.render_count == 1, "headless creation must capture an initial frame");
@@ -656,7 +703,7 @@ void check_headless_virtual_time_and_snapshots() {
     auto command_snapshot = command_session.inspect();
     std::string command_text;
     for (const auto &line : command_snapshot.visible_text) command_text += line + "\n";
-    require(command_snapshot.blocks[0].command == "echo ready" && !command_text.contains("(9s)"),
+    require(command_snapshot.blocks[0].command == "echo ready" && !command_text.contains("echo ready (9s)"),
             "headless snapshots must retain command data without early elapsed copy");
     require(command_session.apply({.type = "advance_time", .milliseconds = 1}).has_value(),
             "headless command time must cross the elapsed threshold");
@@ -735,6 +782,7 @@ i32 run_all(std::string_view executable) {
     check_clipboard_helper();
     check_copy_command_and_status();
     check_scroll_resize_and_unread_state();
+    check_working_indicator();
     check_headless_virtual_time_and_snapshots();
     check_headless_resize_and_markup_stress();
     return 0;

@@ -2,6 +2,10 @@
 
 Liminal's interactive terminal interface keeps the transcript and prompt composer available at the same time. Tool activity updates in place, and long drafts can be handed to an external editor.
 
+## Turn activity
+
+While a turn is active, an animated status line sits directly above the composer: a spinner with `Thinking…`, `Writing…`, or `Running tools…` matching what the agent is doing, plus a muted elapsed time once the turn runs longer than a few seconds. The line disappears as soon as the turn settles.
+
 ## Prompt composer
 
 The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline text aligns with the draft instead of the marker and remains vertically windowed around the cursor when it grows. The footer beneath the composer shows the selected model and effort, workspace path, remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan; browsing and external-editor states replace it when they need attention. On short terminals, decorative padding is removed before transcript or editing space.

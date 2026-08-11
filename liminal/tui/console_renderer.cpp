@@ -222,8 +222,8 @@ lighter::Error ConsoleRenderer::resize(lighter::TerminalSize size) {
     return redraw();
 }
 
-lighter::Error ConsoleRenderer::refresh_elapsed_commands() {
-    if (!screen.has_elapsed_running_command()) return {};
+lighter::Error ConsoleRenderer::refresh_animation() {
+    if (!screen.animating()) return {};
     return redraw();
 }
 

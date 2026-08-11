@@ -203,12 +203,8 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "advance_time") {
         if (action.milliseconds < 0) return std::unexpected("virtual time cannot move backwards");
         now_ms += action.milliseconds;
-        if (screen.has_elapsed_running_command()) {
-            invalidate();
-            flush();
-        } else if (render_pending && now_ms >= render_at_ms) {
-            flush();
-        }
+        if (screen.animating()) invalidate();
+        if (render_pending && now_ms >= render_at_ms) flush();
         return {};
     } else if (action.type == "flush") {
         flush();
