@@ -655,20 +655,20 @@ void check_working_indicator() {
     screen.resize({40, 10});
     screen.set_model("test-model", std::nullopt);
     const auto idle_rows = screen.viewport_rows();
-    require(!screen.working() && !frame_text(screen.frame()).contains("Thinking"), "an idle session must not show the working indicator");
+    require(!screen.working() && !frame_text(screen.frame()).contains("Working"), "an idle session must not show the working indicator");
 
     screen.apply(PromptSubmitted{.text = "go"});
     require(screen.working() && screen.animating(), "a submitted prompt must enter the animated working state");
     require(screen.viewport_rows() == idle_rows, "the in-flow working status must not shrink the transcript viewport");
     const auto waiting = screen.frame();
-    require(waiting.surface.row_text(1) == "you: go" && waiting.surface.row_text(2).empty() &&
-                waiting.surface.row_text(3).contains("Thinking…"),
-            "a waiting turn must show the status one blank line below the newest output");
+    require(waiting.surface.row_text(1) == "you: go" && waiting.surface.row_text(2).contains("Working…") &&
+                waiting.surface.row_text(3).empty(),
+            "a waiting turn must show the status directly below the newest output and leave space before the composer");
     const auto status_styles = [&screen] {
         const auto frame = screen.frame();
         std::vector<tui::Style> styles;
-        for (i32 column = 0; column < tui::text_width("• Thinking…"); ++column) {
-            styles.push_back(frame.surface.cells[static_cast<usize>(3 * frame.surface.columns + column)].style);
+        for (i32 column = 0; column < tui::text_width("• Working…"); ++column) {
+            styles.push_back(frame.surface.cells[static_cast<usize>(2 * frame.surface.columns + column)].style);
         }
         return styles;
     };
@@ -683,26 +683,54 @@ void check_working_indicator() {
     now += std::chrono::milliseconds(100);
     require(status_styles() != highlighted_styles, "the full-label shimmer must advance on each 100ms animation frame");
     now += std::chrono::seconds(2);
-    require(frame_text(screen.frame()).contains("(3s)"), "long waits must add a muted elapsed suffix");
+    const auto timed = screen.frame();
+    require(frame_text(timed).contains("(3s)"), "long waits must add an elapsed suffix");
+    const auto timer_column = tui::text_width("• Working…");
+    const auto timer_width = tui::text_width(" (3s)");
+    for (i32 column = timer_column; column < timer_column + timer_width; ++column) {
+        require(timed.surface.cells[static_cast<usize>(2 * timed.surface.columns + column)].style == tui::Style::MUTED,
+                "every elapsed suffix cell must stay muted instead of joining the shimmer");
+    }
 
     screen.apply(AssistantTextDelta{.text = "hi"});
-    require(frame_text(screen.frame()).contains("Writing…"), "streaming turns must show the writing status");
+    require(frame_text(screen.frame()).contains("Working…"), "streaming turns must keep the unified working status");
     screen.apply(ToolStarted{.call_id = "tool", .name = "exec_command", .command = "echo hi"});
-    require(frame_text(screen.frame()).contains("Running tools…"), "running tools must show the tool status");
+    require(frame_text(screen.frame()).contains("Working…"), "running tools must keep the unified working status");
     screen.apply(ToolCompleted{.call_id = "tool", .name = "exec_command", .command = "echo hi", .summary = "exit 0"});
-    require(frame_text(screen.frame()).contains("Writing…"), "the status must settle back once every tool completes");
+    require(frame_text(screen.frame()).contains("Working…"), "completed tools must keep the unified working status");
 
     for (i32 index = 0; index < 12; ++index) screen.apply(SessionNotice{.text = "line-" + std::to_string(index)});
-    require(frame_text(screen.frame()).contains("Writing…"), "a full viewport must keep the status at the transcript tail");
+    require(frame_text(screen.frame()).contains("Working…"), "a full viewport must keep the status at the transcript tail");
     screen.page(-1);
-    require(screen.anchor.has_value() && !frame_text(screen.frame()).contains("Writing…"),
+    require(screen.anchor.has_value() && !frame_text(screen.frame()).contains("Working…"),
             "browsing history must scroll the working status away with the flow");
     screen.follow_tail();
-    require(frame_text(screen.frame()).contains("Writing…"), "returning to the tail must reveal the working status again");
+    require(frame_text(screen.frame()).contains("Working…"), "returning to the tail must reveal the working status again");
 
     screen.apply(TurnCompleted{});
     require(!screen.working() && !screen.animating(), "a completed turn must leave the animated working state");
-    require(!frame_text(screen.frame()).contains("Writing…"), "a completed turn must remove the working status");
+    const auto completed = screen.frame();
+    require(frame_text(completed).contains("Finished (3s)"), "a completed turn must retain its final elapsed status");
+    i32 finished_row = -1;
+    for (i32 row = 0; row < completed.surface.rows; ++row) {
+        if (completed.surface.row_text(row).contains("Finished")) finished_row = row;
+    }
+    require(finished_row >= 0, "the completed frame must contain a finished status row");
+    require(completed.surface.cells[static_cast<usize>(finished_row * completed.surface.columns)].style == tui::Style::MUTED,
+            "the finished status must use the same muted color as tool output details");
+    require(finished_row + 1 < completed.surface.rows && completed.surface.row_text(finished_row + 1).empty(),
+            "the finished status must leave space before the composer");
+    screen.insert("next");
+    require(frame_text(screen.frame()).contains("Finished (3s)"), "editing the next prompt must preserve the finished status");
+    screen.apply(PromptSubmitted{.text = "next"});
+    require(!frame_text(screen.frame()).contains("Finished") && frame_text(screen.frame()).contains("Working…"),
+            "a new turn must replace the finished status with the working status");
+
+    tui::SessionScreen compact([&now] { return now; });
+    compact.resize({40, 4});
+    compact.apply(PromptSubmitted{.text = "go"});
+    require(frame_text(compact.frame()).contains("Working…"),
+            "a one-row transcript viewport must drop the separator instead of the working status");
 }
 
 void check_mouse_selection() {

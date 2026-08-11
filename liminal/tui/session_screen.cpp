@@ -46,15 +46,6 @@ constexpr Style k_shimmer_styles[] = {
     Style::WORKING_BASE, Style::WORKING_LOW, Style::WORKING_MEDIUM, Style::WORKING_HIGH, Style::WORKING_BRIGHT, Style::WORKING_PEAK,
 };
 
-std::string_view working_label(SessionState state) noexcept {
-    switch (state) {
-        case SessionState::WAITING: return "Thinking…";
-        case SessionState::STREAMING: return "Writing…";
-        case SessionState::RUNNING_TOOLS: return "Running tools…";
-        default: return {};
-    }
-}
-
 void append_span(StyledLine &spans, std::string_view text, Style style) {
     if (text.empty()) return;
     if (!spans.empty() && spans.back().style == style) {
@@ -347,11 +338,14 @@ std::vector<LayoutRow> visible_rows(const SessionScreen &screen) {
     const auto visible = static_cast<usize>(std::max(screen.viewport_rows(), 0));
     if (visible == 0) return {};
     if (!screen.anchor) {
-        // The working status lives in the transcript flow: it follows the
-        // newest output while tail-following and scrolls away while browsing.
-        auto working = screen.working_rows();
-        auto rows = tail_rows(screen, visible > working.size() ? visible - working.size() : 0);
-        rows.insert(rows.end(), std::make_move_iterator(working.begin()), std::make_move_iterator(working.end()));
+        // Turn activity lives in the transcript flow: it follows the newest
+        // output while tail-following and scrolls away while browsing.
+        auto activity = screen.activity_rows();
+        // Prefer the status over its trailing separator when the transcript
+        // viewport is only one row tall.
+        if (activity.size() > visible) activity.resize(visible);
+        auto rows = tail_rows(screen, visible > activity.size() ? visible - activity.size() : 0);
+        rows.insert(rows.end(), std::make_move_iterator(activity.begin()), std::make_move_iterator(activity.end()));
         if (rows.size() > visible) rows.erase(rows.begin(), rows.begin() + static_cast<isize>(rows.size() - visible));
         return rows;
     }
@@ -748,17 +742,21 @@ void SessionScreen::show_status(std::string text) { transient_status = std::move
 
 void SessionScreen::apply(const Event &event) {
     const bool was_working = working();
+    const auto now = monotonic_now();
     transient_status.reset();
     // Cell-anchored selections cannot follow content, so any transcript
     // change invalidates them rather than letting the highlight drift.
     clear_selection();
     if (const auto *notice = std::get_if<SessionNotice>(&event)) {
-        transcript.apply(SessionNotice{.text = trim_notice(notice->text)}, monotonic_now());
+        transcript.apply(SessionNotice{.text = trim_notice(notice->text)}, now);
     } else {
-        transcript.apply(event, monotonic_now());
+        transcript.apply(event, now);
     }
     if (const auto *selected = std::get_if<ModelSelected>(&event)) set_model(selected->name, selected->effort);
-    if (std::holds_alternative<PromptSubmitted>(event)) state = SessionState::WAITING;
+    if (std::holds_alternative<PromptSubmitted>(event)) {
+        completed_turn_elapsed.reset();
+        state = SessionState::WAITING;
+    }
     if (std::holds_alternative<AssistantTextDelta>(event)) state = SessionState::STREAMING;
     if (std::holds_alternative<ToolStarted>(event)) state = SessionState::RUNNING_TOOLS;
     if (std::holds_alternative<ToolCompleted>(event)) {
@@ -766,10 +764,19 @@ void SessionScreen::apply(const Event &event) {
             transcript.blocks, [](const Block &block) { return block.kind == BlockKind::TOOL && block.state == BlockState::RUNNING; });
         state = running ? SessionState::RUNNING_TOOLS : SessionState::STREAMING;
     }
-    if (std::holds_alternative<TurnCompleted>(event)) state = SessionState::COMPLETED;
-    if (std::holds_alternative<TurnCancelled>(event)) state = SessionState::CANCELLED;
-    if (std::holds_alternative<TurnFailed>(event)) state = SessionState::FAILED;
-    if (!was_working && working()) turn_started_at = monotonic_now();
+    if (std::holds_alternative<TurnCompleted>(event)) {
+        completed_turn_elapsed = was_working && now >= turn_started_at ? now - turn_started_at : std::chrono::steady_clock::duration{};
+        state = SessionState::COMPLETED;
+    }
+    if (std::holds_alternative<TurnCancelled>(event)) {
+        completed_turn_elapsed.reset();
+        state = SessionState::CANCELLED;
+    }
+    if (std::holds_alternative<TurnFailed>(event)) {
+        completed_turn_elapsed.reset();
+        state = SessionState::FAILED;
+    }
+    if (!was_working && working()) turn_started_at = now;
 }
 
 void SessionScreen::add_notice(std::string text) { apply(SessionNotice{.text = trim_notice(std::move(text))}); }
@@ -1035,19 +1042,23 @@ bool SessionScreen::working() const noexcept {
 
 bool SessionScreen::animating() const { return working() || has_elapsed_running_command(); }
 
-std::vector<LayoutRow> SessionScreen::working_rows() const {
-    if (!working()) return {};
-    const auto now = monotonic_now();
-    const auto elapsed = now >= turn_started_at ? now - turn_started_at : std::chrono::steady_clock::duration{};
+std::vector<LayoutRow> SessionScreen::activity_rows() const {
+    if (working()) {
+        const auto now = monotonic_now();
+        const auto elapsed = now >= turn_started_at ? now - turn_started_at : std::chrono::steady_clock::duration{};
+        std::vector<LayoutRow> rows(2);
+        append_shimmer(rows.front().spans, "• Working…", elapsed);
+        if (elapsed >= k_working_elapsed_threshold) {
+            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
+            append_span(rows.front().spans, " (" + elapsed_text(seconds) + ")", Style::MUTED);
+        }
+        return rows;
+    }
+    if (!completed_turn_elapsed) return {};
 
     std::vector<LayoutRow> rows(2);
-    auto &status = rows[1];
-    const auto label = "• " + std::string(working_label(state));
-    append_shimmer(status.spans, label, elapsed);
-    if (elapsed >= k_working_elapsed_threshold) {
-        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
-        append_span(status.spans, " (" + elapsed_text(seconds) + ")", Style::MUTED);
-    }
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(*completed_turn_elapsed);
+    append_span(rows.front().spans, "Finished (" + elapsed_text(seconds) + ")", Style::MUTED);
     return rows;
 }
 

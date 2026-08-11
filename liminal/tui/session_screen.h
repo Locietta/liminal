@@ -177,7 +177,7 @@ struct SessionScreen {
     bool has_elapsed_running_command() const;
     bool working() const noexcept;
     bool animating() const;
-    std::vector<LayoutRow> working_rows() const;
+    std::vector<LayoutRow> activity_rows() const;
 
     lighter::TerminalSize size{80, 24};
     Transcript transcript;
@@ -192,6 +192,7 @@ struct SessionScreen {
     bool external_editor_active = false;
     SessionState state = SessionState::EDITING;
     std::chrono::steady_clock::time_point turn_started_at;
+    std::optional<std::chrono::steady_clock::duration> completed_turn_elapsed;
     mutable std::unordered_map<u64, CachedBlockLayout> layout_cache;
     mutable LayoutDiagnostics diagnostics;
 

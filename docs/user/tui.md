@@ -4,7 +4,7 @@ Liminal's interactive terminal interface keeps the transcript and prompt compose
 
 ## Turn activity
 
-While a turn is active, an animated status line follows the newest output in the transcript, one blank line below it: a soft highlight shimmers across `• Thinking…`, `• Writing…`, or `• Running tools…` to match what the agent is doing, plus a muted elapsed time once the turn runs longer than a few seconds. It scrolls away naturally while browsing history and disappears as soon as the turn settles. Scrolling does not replace the footer's model, workspace, context, and token metadata.
+While a turn is active, `• Working…` follows the newest output directly in the transcript, with one blank line after it separating turn activity from the prompt composer. A soft highlight shimmers across the label while its elapsed timer remains muted. When the turn completes, the line becomes a persistent muted `Finished (3s)` summary until the next turn begins and keeps the same trailing separation. It scrolls away naturally while browsing history. Scrolling does not replace the footer's model, workspace, context, and token metadata. Very short terminals drop the blank separator before hiding the activity itself.
 
 ## Prompt composer
 
