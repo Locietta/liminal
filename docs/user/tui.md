@@ -60,6 +60,7 @@ The action and exact path or command stay bright, while completion metadata and 
 | PageUp / PageDown    | Scroll the transcript by one viewport                                                      |
 | Mouse wheel          | Scroll the transcript                                                                      |
 | Mouse drag           | Select visible text                                                                        |
+| Esc                  | Cancel the active turn while preserving the current draft                                  |
 | Ctrl+C               | Copy the selection when one is active; otherwise clear the draft, cancel the turn, or exit |
 | Ctrl+O               | Copy the selection when one is active; otherwise copy the latest reply                     |
 

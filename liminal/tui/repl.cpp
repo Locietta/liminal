@@ -191,7 +191,7 @@ struct PromptReader {
 
 lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, ConsoleRenderer &renderer, PromptQueue &prompts,
                                     ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
-                                    i32 &held_mouse_buttons) {
+                                    TurnControl &turn_control, i32 &held_mouse_buttons) {
     switch (event.kind) {
         case TerminalEventKind::TEXT:
         case TerminalEventKind::PASTE: return renderer.insert(event.text);
@@ -200,6 +200,10 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             const bool control = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::CONTROL);
             const bool shift = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::SHIFT);
             const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
+            if (event.key == TerminalKey::ESCAPE) {
+                if (turn_control.active_turn) turn_control.active_turn->cancel();
+                return {};
+            }
             if (event.key == TerminalKey::CHARACTER && control && !alt_gr && event.text == "g") {
                 editor_requests.request();
                 return {};
@@ -269,8 +273,8 @@ Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &render
             co_return 1;
         }
         if (event->kind == TerminalEventKind::CLOSED) co_return 0;
-        if (auto error =
-                apply_terminal_event(*event, renderer, prompts, editor_requests, copy_requests, selection_copies, held_mouse_buttons)) {
+        if (auto error = apply_terminal_event(*event, renderer, prompts, editor_requests, copy_requests, selection_copies, control,
+                                              held_mouse_buttons)) {
             failure.record("cannot render terminal input", error, control);
             co_return 1;
         }

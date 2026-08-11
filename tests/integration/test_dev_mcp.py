@@ -367,6 +367,89 @@ def test_live_session_operates_real_liminal_process(openai_mock, tmp_path):
     assert responses["close"]["result"]["structuredContent"]["closed"] is True
 
 
+def test_escape_cancels_active_turn(slow_openai_mock, tmp_path):
+    base_url, state = slow_openai_mock
+    messages = [
+        request(
+            "create",
+            "tools/call",
+            {
+                "name": "session_create",
+                "arguments": {
+                    "driver": "liminal.pty",
+                    "columns": 60,
+                    "rows": 12,
+                    "cwd": str(REPO_ROOT),
+                },
+            },
+        ),
+        request(
+            "prompt",
+            "tools/call",
+            {
+                "name": "session_apply",
+                "arguments": {
+                    "session_id": "session-1",
+                    "actions": [
+                        {"type": "wait", "milliseconds": 500},
+                        {"type": "prompt", "text": "inspect"},
+                        {"type": "wait", "milliseconds": 150},
+                    ],
+                },
+            },
+        ),
+        request(
+            "cancel",
+            "tools/call",
+            {
+                "name": "session_apply",
+                "arguments": {
+                    "session_id": "session-1",
+                    "actions": [
+                        {"type": "key", "key": "escape"},
+                        {"type": "wait", "milliseconds": 1000},
+                    ],
+                },
+            },
+        ),
+        request(
+            "quit",
+            "tools/call",
+            {
+                "name": "session_apply",
+                "arguments": {
+                    "session_id": "session-1",
+                    "actions": [
+                        {"type": "prompt", "text": "/quit"},
+                        {"type": "wait", "milliseconds": 1000},
+                    ],
+                },
+            },
+        ),
+        request(
+            "close",
+            "tools/call",
+            {"name": "session_close", "arguments": {"session_id": "session-1"}},
+        ),
+    ]
+    responses = run_server(
+        messages,
+        environment=live_environment(tmp_path, base_url),
+        timeout=30,
+    )
+
+    prompt = responses["prompt"]["result"]["structuredContent"]["snapshot"]
+    assert prompt["running"] is True
+    cancelled = responses["cancel"]["result"]["structuredContent"]["snapshot"]
+    assert cancelled["running"] is True
+    assert "Turn cancelled" in cancelled["output"]
+    assert (
+        responses["quit"]["result"]["structuredContent"]["snapshot"]["exit_code"] == 0
+    )
+    assert state["errors"] == []
+    assert responses["close"]["result"]["structuredContent"]["closed"] is True
+
+
 def test_live_session_bounds_are_preflighted_and_closed_processes_are_reaped(
     openai_mock, tmp_path
 ):
