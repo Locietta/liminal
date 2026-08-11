@@ -97,11 +97,14 @@ struct WebSearchCallItem {
 
 using ResponseItem = std::variant<MessageItem, FunctionCallItem, FunctionCallOutputItem, ReasoningItem, CompactionItem, WebSearchCallItem>;
 
+/// Non-strict like Codex CLI: strict mode requires every property in
+/// `required` (optionals as nullable unions), which our tool schemas with
+/// genuinely optional parameters deliberately do not satisfy.
 struct FunctionTool {
     std::string name;
     std::string description;
     provider::InputSchema parameters;
-    bool strict = true;
+    bool strict = false;
 };
 
 struct WebSearchTool {};
@@ -114,6 +117,7 @@ struct Reasoning {
 
 struct ResponseRequest {
     std::string model;
+    std::optional<std::string> instructions;
     std::optional<u32> max_output_tokens;
     std::vector<ResponseItem> input;
     std::optional<std::vector<Tool>> tools;
@@ -247,13 +251,22 @@ std::string_view role_name(provider::Role role) {
     std::unreachable();
 }
 
+struct WireInput {
+    std::vector<wire::ResponseItem> items;
+    std::optional<std::string> instructions;
+};
+
 /// History -> Responses input items. One neutral item may fan out into
 /// several wire items: contiguous text parts form one message; every tool
 /// call/result and replayed opaque is its own top-level item. Opaque parts
 /// carrying our tag (reasoning with encrypted content, compaction items) are
-/// replayed verbatim; foreign-tagged parts are dropped.
-Result<std::vector<wire::ResponseItem>> to_wire(const provider::History &history) {
-    std::vector<wire::ResponseItem> items;
+/// replayed verbatim; foreign-tagged parts are dropped. System instructions
+/// are lifted into the top-level `instructions` field: the Codex backend
+/// rejects system-role input items, and the standard Responses API treats the
+/// field as the same authority tier.
+Result<WireInput> to_wire(const provider::History &history) {
+    WireInput result;
+    auto &items = result.items;
     items.reserve(history.size());
     bool conversation_started = false;
 
@@ -263,6 +276,16 @@ Result<std::vector<wire::ResponseItem>> to_wire(const provider::History &history
             return outcome_error(Error::protocol("system and developer instructions must precede conversation messages"));
         }
         conversation_started = conversation_started || !instruction;
+        if (item.role == provider::Role::SYSTEM) {
+            for (const auto &part : item.parts) {
+                const auto *text = std::get_if<provider::TextPart>(&part);
+                if (!text) return outcome_error(Error::protocol("instruction messages may contain only text"));
+                if (!result.instructions) result.instructions.emplace();
+                if (!result.instructions->empty()) *result.instructions += "\n\n";
+                *result.instructions += text->text;
+            }
+            continue;
+        }
         const bool assistant = item.role == provider::Role::ASSISTANT;
         const auto role = std::string(role_name(item.role));
         wire::MessageItem message{.role = role};
@@ -307,7 +330,7 @@ Result<std::vector<wire::ResponseItem>> to_wire(const provider::History &history
         }
         flush_message();
     }
-    return items;
+    return result;
 }
 
 /// Wire output items -> neutral parts of one assistant response. Reasoning
@@ -661,12 +684,20 @@ Task<provider::ResolvedAuth, Error> resolve_auth(const ClientOptions &options) {
     co_return co_await options.auth().or_fail();
 }
 
+/// The Codex backend reports request validation failures as a bare
+/// `{"detail": "..."}` object instead of the standard error envelope.
+struct DetailErrorEnvelope {
+    std::optional<std::string> detail;
+};
+
 Error parse_status_error(int status, std::string_view body, std::string request_id, std::optional<std::chrono::milliseconds> retry_after) {
     std::string api_type;
     std::string detail(body);
-    if (auto envelope = parse_wire<ApiErrorEnvelope>(body, "error body")) {
+    if (auto envelope = parse_wire<ApiErrorEnvelope>(body, "error body"); envelope && !envelope->error.message.empty()) {
         api_type = envelope->error.code.value_or(envelope->error.type.value_or(""));
         detail = std::move(envelope->error.message);
+    } else if (auto bare = parse_wire<DetailErrorEnvelope>(body, "error body"); bare && bare->detail && !bare->detail->empty()) {
+        detail = *std::move(bare->detail);
     }
     return Error::http_status(status, std::move(api_type), std::move(detail), std::move(request_id), retry_after);
 }
@@ -794,8 +825,9 @@ Result<std::string> encode_complete_request(const provider::History &history, co
     }
     wire::ResponseRequest request{
         .model = options.model,
+        .instructions = std::move(input->instructions),
         .max_output_tokens = options.max_output_tokens,
-        .input = *std::move(input),
+        .input = std::move(input->items),
         .tools = make_tools(tools),
     };
     if (options.reasoning_effort) {
@@ -817,7 +849,7 @@ Result<std::string> encode_compact_request(const provider::History &conversation
     }
     wire::CompactRequest request{
         .model = options.model,
-        .input = *std::move(input),
+        .input = std::move(input->items),
         .instructions = std::string(instructions),
     };
     auto encoded = json::to_string(request);

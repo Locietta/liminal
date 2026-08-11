@@ -84,15 +84,16 @@ void test_request_encoding() {
     require(encoded.has_value(), "failed to encode OpenAI request");
     require(encoded->contains(R"("store":false)"), "request must disable storage");
     require(encoded->contains(R"("reasoning.encrypted_content")"), "request must include encrypted reasoning");
-    require(encoded->contains(R"("role":"system")") && encoded->contains("Test system policy."),
-            "system instruction was not encoded explicitly");
+    require(encoded->contains(R"("instructions":"Test system policy.")") && !encoded->contains(R"("role":"system")"),
+            "system instructions must be lifted into the top-level field the Codex backend accepts");
     require(encoded->contains(R"("role":"developer")") && encoded->contains("Test developer policy."),
             "developer instruction was not encoded explicitly");
     require(encoded->contains(R"("role":"assistant","content":[{"type":"output_text","text":"I will inspect."}])"),
             "generated text was not encoded as assistant output");
     require(encoded->contains(R"("encrypted_content":"encrypted-reasoning")"), "encrypted reasoning was not replayed");
     require(encoded->contains(R"("type":"function_call_output","call_id":"call_1","output":"Liminal")"), "tool result was not replayed");
-    require(encoded->contains(R"("strict":true)"), "tool schema must be strict");
+    require(encoded->contains(R"("strict":false)"),
+            "tool schemas must stay non-strict so optional parameters survive Responses schema validation");
     require(encoded->contains(R"("additionalProperties":false)"), "tool schema must reject extra properties");
     require(encoded->contains(R"("type":"web_search")"), "hosted web search tool was not encoded");
     require(!encoded->contains(R"("name":"web_fetch")"), "OpenAI must not receive a redundant standalone web fetch tool");
