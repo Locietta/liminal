@@ -4,8 +4,6 @@
 #include "exec.h"
 
 #include <algorithm>
-#include <charconv>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -28,7 +26,6 @@ using lighter::Task;
 namespace {
 
 constexpr usize k_file_limit = 128 * 1024;
-constexpr usize k_max_parallel_call_limit = 32;
 constexpr usize k_max_call_summary_bytes = 2 * 1024;
 constexpr usize k_max_preview_line_bytes = 240;
 constexpr usize k_max_preview_lines = 4;
@@ -110,24 +107,6 @@ Result<T> parse_input(const glz::generic &input) {
         return outcome_error(Error::json(std::move(typed).error(), "tool input"));
     }
     return *std::move(typed);
-}
-
-template <typename T>
-Result<T> parse_bounded_environment(std::string_view name, T fallback, T minimum, T maximum) {
-    const auto variable = std::string(name);
-    const char *raw = std::getenv(variable.c_str());
-    if (!raw || !*raw) {
-        return fallback;
-    }
-
-    T value{};
-    const std::string_view text(raw);
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (error != std::errc{} || end != text.data() + text.size() || value < minimum || value > maximum) {
-        return outcome_error(
-            Error::config(variable + " must be an integer from " + std::to_string(minimum) + " to " + std::to_string(maximum)));
-    }
-    return value;
 }
 
 Result<std::filesystem::path> resolve_read_path(const ToolSet &tools, const ReadFileInput &input) {
@@ -288,6 +267,7 @@ ToolRegistration read_file_registration() {
                         .required = {"path"},
                     },
             },
+        .execution_mode = ToolExecutionMode::PARALLEL,
         .execute = [](const ToolSet &tools, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<ReadFileInput>(call.input));
             provider::ToolResult result{.call_id = call.id};
@@ -314,16 +294,8 @@ ToolCallPresentation fallback_description(const provider::ToolCall &call) {
 
 } // namespace
 
-Result<ToolPolicy> load_tool_policy() {
-    ToolPolicy policy;
-    auto parallel = parse_bounded_environment<usize>("LIMINAL_MAX_PARALLEL_TOOLS", policy.max_parallel_calls, 1, k_max_parallel_call_limit);
-    if (!parallel) return outcome_error(std::move(parallel).error());
-    policy.max_parallel_calls = *parallel;
-    return policy;
-}
-
-ToolSet::ToolSet(std::filesystem::path working_directory, ToolPolicy policy)
-    : working_directory(std::move(working_directory)), policy(policy), exec_sessions(make_exec_session_manager(this->working_directory)) {
+ToolSet::ToolSet(std::filesystem::path working_directory)
+    : working_directory(std::move(working_directory)), exec_sessions(make_exec_session_manager(this->working_directory)) {
     lighter::check(static_cast<bool>(register_tool(read_file_registration())), "failed to register read_file");
     lighter::check(static_cast<bool>(register_tool(make_apply_patch_tool())), "failed to register apply_patch");
     for (auto &tool : make_exec_tools(*exec_sessions)) {
@@ -357,6 +329,11 @@ Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &cal
         co_return co_await tool->execute(*this, call).or_fail();
     }
     co_await fail(Error::tool("unknown tool: " + call.name));
+}
+
+ToolExecutionMode ToolSet::execution_mode(std::string_view name) const {
+    const auto *tool = find_registration(registrations, name);
+    return tool ? tool->execution_mode : ToolExecutionMode::EXCLUSIVE;
 }
 
 ToolCallPresentation ToolSet::describe(const provider::ToolCall &call) const {

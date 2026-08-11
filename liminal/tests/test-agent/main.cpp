@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <memory>
@@ -21,6 +22,7 @@ namespace {
 
 using namespace lighter::types;
 using namespace liminal;
+using namespace std::chrono_literals;
 
 void require(bool condition, std::string message) {
     if (!condition) {
@@ -202,6 +204,86 @@ void test_long_tool_loop() {
     require(task.result().has_value(), "a productive tool loop longer than 32 iterations failed");
     require(*tool_executions == k_tool_calls, "the long-running turn did not execute every requested tool");
     require(agent.session.entries.size() == 2 * k_tool_calls + 2, "the long-running turn did not commit its complete history");
+    provider_mock.verify();
+}
+
+struct ToolSchedulingProbe {
+    usize running = 0;
+    usize max_running = 0;
+    bool exclusive_overlapped = false;
+    bool exclusive_finished = false;
+    bool trailing_started_early = false;
+};
+
+void test_tool_execution_semantics() {
+    constexpr usize k_parallel_calls = 40;
+    ToolSet tools(std::filesystem::current_path());
+    auto probe = std::make_shared<ToolSchedulingProbe>();
+    auto parallel = tools.register_tool({
+        .definition = {.name = "test_parallel", .description = "Test parallel scheduling"},
+        .execution_mode = ToolExecutionMode::PARALLEL,
+        .execute = [probe](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
+            if (call.id == "trailing" && !probe->exclusive_finished) probe->trailing_started_early = true;
+            ++probe->running;
+            probe->max_running = std::max(probe->max_running, probe->running);
+            co_await lighter::sleep(5ms);
+            --probe->running;
+            co_return provider::ToolResult{.call_id = call.id, .content = "parallel"};
+        },
+    });
+    require(parallel.has_value(), "failed to register the parallel scheduling test tool");
+    auto exclusive = tools.register_tool({
+        .definition = {.name = "test_exclusive", .description = "Test exclusive scheduling"},
+        .execute = [probe](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
+            probe->exclusive_overlapped = probe->running != 0;
+            co_await lighter::sleep(1ms);
+            probe->exclusive_finished = true;
+            co_return provider::ToolResult{.call_id = call.id, .content = "exclusive"};
+        },
+    });
+    require(exclusive.has_value(), "failed to register the exclusive scheduling test tool");
+
+    auto completions = std::make_shared<usize>(0);
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([completions](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                             const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+            if ((*completions)++ != 0) {
+                co_return provider::TurnResponse{.parts = {provider::TextPart{.text = "done"}}, .stop = provider::StopKind::DONE};
+            }
+            provider::TurnResponse response{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+            for (usize index = 0; index < k_parallel_calls; ++index) {
+                response.parts.push_back(provider::ToolCall{
+                    .id = "parallel-" + std::to_string(index),
+                    .name = "test_parallel",
+                });
+            }
+            response.parts.push_back(provider::ToolCall{.id = "exclusive", .name = "test_exclusive"});
+            response.parts.push_back(provider::ToolCall{.id = "trailing", .name = "test_parallel"});
+            co_return response;
+        })
+        .times(2);
+    provider_mock.expect<provider::CompactDispatch>().never();
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test"},
+    };
+    Agent agent(std::move(choice), tools);
+
+    lighter::EventLoop loop;
+    auto task = agent.run_turn("schedule tools", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "tool scheduling turn failed");
+    require(probe->max_running == k_parallel_calls, "parallel-safe tool calls were subject to a numeric concurrency cap");
+    require(!probe->exclusive_overlapped, "an exclusive tool overlapped the preceding parallel wave");
+    require(!probe->trailing_started_early, "a parallel tool crossed an exclusive ordering barrier");
+    const auto &results = std::get<session::ToolResults>(agent.session.entries[2].payload).results;
+    require(results.size() == k_parallel_calls + 2 && results.front().call_id == "parallel-0" &&
+                results[k_parallel_calls - 1].call_id == "parallel-39" && results[k_parallel_calls].call_id == "exclusive" &&
+                results.back().call_id == "trailing",
+            "concurrent tool execution did not preserve model call order");
     provider_mock.verify();
 }
 
@@ -423,6 +505,7 @@ void test_context_manifest() {
 i32 run_all() {
     test_successful_turn();
     test_long_tool_loop();
+    test_tool_execution_semantics();
     test_automatic_compaction();
     test_multiple_automatic_compactions_in_one_turn();
     test_proactive_compaction_uses_reported_context();

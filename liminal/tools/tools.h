@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <lighter/async/async.h>
@@ -22,12 +23,10 @@ struct ExecSessionManagerDeleter {
 
 using ExecSessionManagerPtr = std::unique_ptr<ExecSessionManager, ExecSessionManagerDeleter>;
 
-struct ToolPolicy {
-    lighter::usize max_parallel_calls = 4;
+enum struct ToolExecutionMode {
+    EXCLUSIVE,
+    PARALLEL,
 };
-
-/// Load the concurrency policy for built-in tools.
-Result<ToolPolicy> load_tool_policy();
 
 /// Bounded, user-facing data for the built-in tool lifecycle. Commands remain
 /// separate so renderers can apply state copy and platform shell highlighting.
@@ -43,13 +42,17 @@ struct ToolSet;
 /// dispatch path.
 struct ToolRegistration {
     provider::ToolDefinition definition;
+    /// Parallel tools may overlap with adjacent parallel calls. Exclusive
+    /// tools form an ordering barrier and are the conservative default for
+    /// extensions that may touch shared state.
+    ToolExecutionMode execution_mode = ToolExecutionMode::EXCLUSIVE;
     std::move_only_function<lighter::Task<provider::ToolResult, Error>(const ToolSet &, const provider::ToolCall &) const> execute;
     std::move_only_function<ToolCallPresentation(const provider::ToolCall &) const> describe;
     std::move_only_function<std::string(const provider::ToolCall &, const provider::ToolResult &) const> summarize;
 };
 
 struct ToolSet {
-    explicit ToolSet(std::filesystem::path working_directory, ToolPolicy policy = {});
+    explicit ToolSet(std::filesystem::path working_directory);
     ~ToolSet();
 
     ToolSet(const ToolSet &) = delete;
@@ -68,11 +71,11 @@ struct ToolSet {
     /// failures (unknown tool, malformed input, spawn error) use the error
     /// channel - the agent layer converts those into is_error results.
     lighter::Task<provider::ToolResult, Error> execute(const provider::ToolCall &call) const;
+    ToolExecutionMode execution_mode(std::string_view name) const;
     ToolCallPresentation describe(const provider::ToolCall &call) const;
     std::string summarize(const provider::ToolCall &call, const provider::ToolResult &result) const;
 
     std::filesystem::path working_directory;
-    ToolPolicy policy;
 
 private:
     ExecSessionManagerPtr exec_sessions;

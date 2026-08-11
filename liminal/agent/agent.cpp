@@ -7,7 +7,6 @@
 #include <vector>
 
 #include <lighter/async/runtime/when.h>
-#include <lighter/async/runtime/sync.h>
 
 namespace liminal {
 
@@ -61,16 +60,7 @@ bool needs_automatic_compaction(const context::ContextManifest &manifest) {
 /// Runs one tool call, converting infrastructure failures into is_error
 /// results so one bad call never aborts its siblings. Cancellation still
 /// unwinds normally.
-struct ToolPermit {
-    lighter::Semaphore *slots;
-
-    ~ToolPermit() { slots->release(); }
-};
-
-Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::ToolCall &call, const EventSink &events,
-                                       lighter::Semaphore &slots) {
-    co_await slots.acquire();
-    ToolPermit permit{&slots};
+Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::ToolCall &call, const EventSink &events) {
     auto outcome = co_await tools.execute(call);
     provider::ToolResult result;
     if (!outcome) {
@@ -92,6 +82,44 @@ Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::Too
                      .is_error = result.is_error,
                  });
     co_return result;
+}
+
+void emit_tool_started(const ToolSet &tools, const provider::ToolCall &call, const EventSink &events) {
+    const auto presentation = tools.describe(call);
+    emit(events, ToolStarted{
+                     .call_id = call.id,
+                     .name = call.name,
+                     .description = presentation.description,
+                     .command = presentation.command,
+                 });
+}
+
+/// Preserve model order while allowing adjacent, explicitly parallel-safe
+/// calls to overlap. Exclusive calls are barriers before and after themselves.
+Task<std::vector<provider::ToolResult>> execute_tools(const ToolSet &tools, const std::vector<const provider::ToolCall *> &calls,
+                                                      const EventSink &events) {
+    std::vector<provider::ToolResult> results;
+    results.reserve(calls.size());
+
+    usize next = 0;
+    while (next < calls.size()) {
+        if (tools.execution_mode(calls[next]->name) == ToolExecutionMode::EXCLUSIVE) {
+            emit_tool_started(tools, *calls[next], events);
+            results.push_back(co_await execute_one(tools, *calls[next], events));
+            ++next;
+            continue;
+        }
+
+        std::vector<Task<provider::ToolResult>> pending;
+        while (next < calls.size() && tools.execution_mode(calls[next]->name) == ToolExecutionMode::PARALLEL) {
+            emit_tool_started(tools, *calls[next], events);
+            pending.push_back(execute_one(tools, *calls[next], events));
+            ++next;
+        }
+        auto joined = co_await WhenAll(std::move(pending));
+        for (auto &result : joined) results.push_back(std::move(result));
+    }
+    co_return results;
 }
 
 } // namespace
@@ -117,7 +145,6 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
     };
 
     bool automatically_compacted = false;
-    lighter::Semaphore tool_slots(static_cast<isize>(tools->policy.max_parallel_calls));
     while (true) {
         context::ContextBuilder builder;
         auto built = builder.build(instructions, staged, context_budget(model.entry));
@@ -174,26 +201,8 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
             co_await fail(Error::protocol("provider requested tool results without any tool calls"));
         }
 
-        std::vector<Task<provider::ToolResult>> pending;
-        pending.reserve(calls.size());
-        for (const auto *call : calls) {
-            const auto presentation = tools->describe(*call);
-            emit(events, ToolStarted{
-                             .call_id = call->id,
-                             .name = call->name,
-                             .description = presentation.description,
-                             .command = presentation.command,
-                         });
-            pending.push_back(execute_one(*tools, *call, events, tool_slots));
-        }
-        auto joined = co_await WhenAll(std::move(pending));
-
         staged.append(agent_output(std::move(response)));
-        std::vector<provider::ToolResult> results;
-        results.reserve(joined.size());
-        for (auto &result : joined) {
-            results.push_back(std::move(result));
-        }
+        auto results = co_await execute_tools(*tools, calls, events);
         staged.append(session::ToolResults{.results = std::move(results)});
     }
 }

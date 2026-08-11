@@ -130,12 +130,7 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "error: cannot resolve working directory: %s\n", cwd_error.message().c_str());
         return 1;
     }
-    auto policy = load_tool_policy();
-    if (!policy) {
-        std::fprintf(stderr, "error: %s\n", policy.error().message().c_str());
-        return 1;
-    }
-    ToolSet tools(std::move(cwd), *policy);
+    ToolSet tools(std::move(cwd));
     model::Catalog models(provider::default_providers_file(), codex::default_auth_file());
 
     lighter::EventLoop loop;

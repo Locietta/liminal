@@ -416,6 +416,7 @@ std::array<ToolRegistration, 2> make_exec_tools(ExecSessionManager &sessions) {
                         .required = {"cmd"},
                     },
             },
+        .execution_mode = ToolExecutionMode::PARALLEL,
         .execute = [&sessions](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<ExecCommandInput>(call.input));
             auto response = co_await sessions.start(std::move(input)).or_fail();
@@ -448,6 +449,7 @@ std::array<ToolRegistration, 2> make_exec_tools(ExecSessionManager &sessions) {
                         .required = {"session_id"},
                     },
             },
+        .execution_mode = ToolExecutionMode::EXCLUSIVE,
         .execute = [&sessions](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<WriteStdinInput>(call.input));
             auto response = co_await sessions.write(std::move(input)).or_fail();

@@ -458,6 +458,7 @@ ToolRegistration make_apply_patch_tool() {
                 .input_schema = {.properties = {{"patch", {.type = "string", .description = "Complete Codex-style patch text."}}},
                                  .required = {"patch"}},
             },
+        .execution_mode = ToolExecutionMode::EXCLUSIVE,
         .execute = execute_apply_patch,
         .describe = describe_apply_patch,
     };

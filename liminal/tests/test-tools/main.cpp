@@ -51,6 +51,12 @@ void test_tools_are_available_by_default() {
                 definitions[2].name == "exec_command" && definitions[3].name == "write_stdin" &&
                 definitions[4].kind == provider::ToolKind::WEB_SEARCH && definitions[5].kind == provider::ToolKind::WEB_FETCH,
             "default tools must include file reading, patch editing, interactive shell execution, and hosted web access");
+    require(tools.execution_mode("read_file") == ToolExecutionMode::PARALLEL &&
+                tools.execution_mode("exec_command") == ToolExecutionMode::PARALLEL &&
+                tools.execution_mode("apply_patch") == ToolExecutionMode::EXCLUSIVE &&
+                tools.execution_mode("write_stdin") == ToolExecutionMode::EXCLUSIVE &&
+                tools.execution_mode("unknown") == ToolExecutionMode::EXCLUSIVE,
+            "built-in and unknown tools must expose conservative execution semantics");
 
     auto readme = execute(tools, make_call("read", "read_file", R"({"path":"../README.md"})"));
     require(readme.has_value() && !readme->is_error && readme->content.contains("Liminal"),
@@ -71,6 +77,8 @@ void test_tool_registry_dispatches_extensions() {
         },
     });
     require(registered.has_value(), "tool registry rejected a valid extension");
+    require(tools.execution_mode("echo_extension") == ToolExecutionMode::EXCLUSIVE,
+            "extensions must default to exclusive execution until they opt into parallelism");
 
     auto result = execute(tools, make_call("extension", "echo_extension", R"({})"));
     require(result.has_value() && result->content == "extended", "tool registry did not dispatch an extension");
