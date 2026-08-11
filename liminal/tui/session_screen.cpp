@@ -36,8 +36,9 @@ using StyledLine = std::vector<StyledSpan>;
 
 constexpr auto k_command_elapsed_threshold = std::chrono::seconds(10);
 
-constexpr std::string_view k_spinner_frames[] = {"·", "✢", "✳", "✻", "✽", "✻", "✳", "✢"};
-constexpr auto k_spinner_interval = std::chrono::milliseconds(200);
+constexpr std::string_view k_working_dot = "•";
+constexpr Style k_working_pulse[] = {Style::MUTED, Style::NORMAL, Style::EMPHASIS, Style::NORMAL};
+constexpr auto k_working_pulse_interval = std::chrono::milliseconds(500);
 constexpr auto k_working_elapsed_threshold = std::chrono::seconds(3);
 
 std::string_view working_label(SessionState state) noexcept {
@@ -1000,11 +1001,11 @@ std::vector<LayoutRow> SessionScreen::working_rows() const {
     if (!working()) return {};
     const auto now = monotonic_now();
     const auto elapsed = now >= turn_started_at ? now - turn_started_at : std::chrono::steady_clock::duration{};
-    const auto frame_index = static_cast<usize>(elapsed / k_spinner_interval) % std::size(k_spinner_frames);
+    const auto phase = static_cast<usize>(elapsed / k_working_pulse_interval) % std::size(k_working_pulse);
 
     std::vector<LayoutRow> rows(2);
     auto &status = rows[1];
-    append_span(status.spans, k_spinner_frames[frame_index], Style::ACCENT);
+    append_span(status.spans, k_working_dot, k_working_pulse[phase]);
     append_span(status.spans, " ", Style::NORMAL);
     append_span(status.spans, working_label(state), Style::NORMAL);
     if (elapsed >= k_working_elapsed_threshold) {

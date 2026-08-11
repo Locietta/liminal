@@ -4,7 +4,7 @@ Liminal's interactive terminal interface keeps the transcript and prompt compose
 
 ## Turn activity
 
-While a turn is active, an animated status line follows the newest output in the transcript, one blank line below it: a pulsing glyph with `Thinking…`, `Writing…`, or `Running tools…` matching what the agent is doing, plus a muted elapsed time once the turn runs longer than a few seconds. It scrolls away naturally while browsing history and disappears as soon as the turn settles.
+While a turn is active, an animated status line follows the newest output in the transcript, one blank line below it: a breathing dot with `Thinking…`, `Writing…`, or `Running tools…` matching what the agent is doing, plus a muted elapsed time once the turn runs longer than a few seconds. It scrolls away naturally while browsing history and disappears as soon as the turn settles.
 
 ## Prompt composer
 

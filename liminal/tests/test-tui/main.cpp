@@ -656,11 +656,16 @@ void check_working_indicator() {
     require(waiting.surface.row_text(1) == "you: go" && waiting.surface.row_text(2).empty() &&
                 waiting.surface.row_text(3).contains("Thinking…"),
             "a waiting turn must show the status one blank line below the newest output");
-    const auto spinner_before = waiting.surface.row_text(3);
+    const auto dot_style = [&screen] {
+        const auto frame = screen.frame();
+        return frame.surface.cells[static_cast<usize>(3 * frame.surface.columns)].style;
+    };
+    require(dot_style() == tui::Style::MUTED, "the working dot must start at its dim pulse phase");
     now += std::chrono::milliseconds(200);
-    const auto spinner_after = screen.frame().surface.row_text(3);
-    require(spinner_after != spinner_before && spinner_after.contains("Thinking…"),
-            "the spinner glyph must advance with time without disturbing the state label");
+    require(dot_style() == tui::Style::NORMAL, "the working dot must brighten as the pulse advances");
+    now += std::chrono::milliseconds(200);
+    require(dot_style() == tui::Style::EMPHASIS && screen.frame().surface.row_text(3).contains("Thinking…"),
+            "the pulse must peak at bold intensity without disturbing the state label");
     now += std::chrono::seconds(3);
     require(frame_text(screen.frame()).contains("(3s)"), "long waits must add a muted elapsed suffix");
 
