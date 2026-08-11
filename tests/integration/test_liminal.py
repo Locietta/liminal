@@ -228,7 +228,7 @@ def check_conpty_terminal_session(tmp_path, base_url):
         read_conpty_until(process, output, PROMPT_MARKER, 10)
         assert output.count(b"\x1b[?1049h") == 1
         assert output.index(b"\x1b[?2004h") < output.index(b"\x1b[?1049h")
-        assert b"\x1b[?1000h\x1b[?1006h" in output
+        assert b"\x1b[?1002h\x1b[?1006h" in output
 
         process.write(b"\x07")
         read_conpty_until(process, output, PROMPT_MARKER + b" edited externally", 10)
@@ -630,7 +630,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
 
         assert output.count(b"\x1b[?1049h") == 1
         assert output.index(b"\x1b[?2004h") < output.index(b"\x1b[?1049h")
-        assert b"\x1b[?1000h\x1b[?1006h" in output
+        assert b"\x1b[?1002h\x1b[?1006h" in output
 
         os.kill(process.pid, signal.SIGTSTP)
         deadline = time.monotonic() + 5

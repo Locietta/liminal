@@ -929,6 +929,43 @@ void SessionScreen::follow_tail() noexcept {
     unread = false;
 }
 
+void SessionScreen::begin_selection(i32 row, i32 column) { selection = {.anchor = {row, column}, .focus = {row, column}}; }
+
+bool SessionScreen::extend_selection(i32 row, i32 column) {
+    if (!selection) return false;
+    const CellPoint focus{row, column};
+    if (focus == selection->focus) return false;
+    selection->focus = focus;
+    return true;
+}
+
+std::string SessionScreen::take_selection() {
+    if (!selection) return {};
+    const auto range = *selection;
+    selection.reset();
+    if (range.anchor == range.focus) return {};
+
+    const auto [first, last] = std::minmax(range.anchor, range.focus);
+    const auto projected = frame();
+    const auto &surface = projected.surface;
+    std::string text;
+    bool first_line = true;
+    for (i32 row = std::max(first.row, 0); row <= std::min(last.row, surface.rows - 1); ++row) {
+        const auto begin_column = row == first.row ? std::max(first.column, 0) : 0;
+        const auto end_column = row == last.row ? std::min(last.column, surface.columns - 1) : surface.columns - 1;
+        std::string line;
+        for (i32 column = begin_column; column <= end_column; ++column) {
+            const auto &cell = surface.cells[static_cast<usize>(row * surface.columns + column)];
+            if (!cell.continuation) line += cell.text;
+        }
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        if (!first_line) text += '\n';
+        first_line = false;
+        text += line;
+    }
+    return text;
+}
+
 i32 SessionScreen::viewport_rows() const {
     const auto projection = project_composer(*this);
     const auto header = size.rows >= 2 ? 1 : 0;
@@ -1024,6 +1061,17 @@ Frame SessionScreen::frame() const {
         .column = std::clamp(projected_composer.cursor_column, 0, size.columns - 1),
         .visible = true,
     };
+
+    if (selection && selection->anchor != selection->focus) {
+        const auto [first, last] = std::minmax(selection->anchor, selection->focus);
+        for (i32 row = std::max(first.row, 0); row <= std::min(last.row, size.rows - 1); ++row) {
+            const auto begin_column = row == first.row ? std::max(first.column, 0) : 0;
+            const auto end_column = row == last.row ? std::min(last.column, size.columns - 1) : size.columns - 1;
+            for (i32 column = begin_column; column <= end_column; ++column) {
+                result.surface.cells[static_cast<usize>(row * size.columns + column)].selected = true;
+            }
+        }
+    }
     return result;
 }
 

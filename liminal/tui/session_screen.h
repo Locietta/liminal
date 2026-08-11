@@ -66,6 +66,21 @@ struct ViewportAnchor {
     friend bool operator==(const ViewportAnchor &, const ViewportAnchor &) = default;
 };
 
+struct CellPoint {
+    i32 row = 0;
+    i32 column = 0;
+
+    friend auto operator<=>(const CellPoint &, const CellPoint &) = default;
+};
+
+/// Mouse drag selection over screen cells, in reading order between the press
+/// anchor and the drag focus. Cell coordinates deliberately mirror native
+/// terminal selection: content may stream underneath an active drag.
+struct SelectionState {
+    CellPoint anchor;
+    CellPoint focus;
+};
+
 struct LayoutRow {
     u64 block_id = 0;
     usize source_offset = 0;
@@ -147,6 +162,12 @@ struct SessionScreen {
     void page(i32 direction);
     void follow_tail() noexcept;
 
+    void begin_selection(i32 row, i32 column);
+    bool extend_selection(i32 row, i32 column);
+    /// Returns the selected text and clears the selection. A click that never
+    /// moved off its press cell returns an empty string.
+    std::string take_selection();
+
     Frame frame() const;
     i32 viewport_rows() const;
     std::vector<LayoutRow> layout_block(const Block &block) const;
@@ -164,6 +185,7 @@ struct SessionScreen {
     SessionFooter footer;
     std::optional<std::string> transient_status;
     std::optional<ViewportAnchor> anchor;
+    std::optional<SelectionState> selection;
     bool unread = false;
     bool external_editor_active = false;
     SessionState state = SessionState::EDITING;

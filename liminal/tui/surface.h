@@ -50,6 +50,7 @@ struct Cell {
     std::string text = " ";
     Style style = Style::NORMAL;
     bool continuation = false;
+    bool selected = false;
 
     friend bool operator==(const Cell &, const Cell &) = default;
 };

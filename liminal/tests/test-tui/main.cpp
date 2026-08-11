@@ -677,6 +677,52 @@ void check_working_indicator() {
             "a completed turn must release the indicator row");
 }
 
+void check_mouse_selection() {
+    const auto cell_selected = [](const tui::Frame &frame, i32 row, i32 column) {
+        return frame.surface.cells[static_cast<usize>(row * frame.surface.columns + column)].selected;
+    };
+
+    tui::SessionScreen screen;
+    screen.resize({20, 8});
+    screen.set_model("test", std::nullopt);
+    screen.apply(SessionNotice{.text = "alpha beta"});
+    screen.apply(SessionNotice{.text = "gamma delta"});
+
+    screen.begin_selection(1, 0);
+    require(!cell_selected(screen.frame(), 1, 0), "a selection must stay invisible until the drag moves off its press cell");
+    require(screen.extend_selection(2, 4), "extending a selection must move its focus");
+    require(!screen.extend_selection(2, 4), "extending to the current focus must report no change");
+    const auto highlighted = screen.frame();
+    require(cell_selected(highlighted, 1, 0) && cell_selected(highlighted, 1, 19) && cell_selected(highlighted, 2, 4),
+            "a multi-row selection must cover the full first row tail and the focus cell");
+    require(!cell_selected(highlighted, 2, 5) && !cell_selected(highlighted, 0, 0),
+            "a selection must not spill past its focus cell or onto other rows");
+    require(screen.take_selection() == "alpha beta\ngamma",
+            "taking a selection must join per-row text with newlines and trim trailing blanks");
+    require(!screen.selection && screen.take_selection().empty(), "taking a selection must clear it");
+
+    screen.begin_selection(1, 2);
+    require(screen.take_selection().empty(), "a click without a drag must not produce clipboard text");
+
+    screen.begin_selection(2, 3);
+    screen.extend_selection(1, 5);
+    require(screen.take_selection() == " beta\ngamm", "an upward drag must normalize into reading order");
+
+    tui::SessionScreen wide;
+    wide.resize({10, 8});
+    wide.apply(SessionNotice{.text = "中文"});
+    wide.begin_selection(1, 0);
+    wide.extend_selection(1, 3);
+    require(wide.take_selection() == "中文", "wide graphemes must be extracted once across their continuation cells");
+
+    tui::Frame inverted{.surface = tui::Surface(3, 1)};
+    inverted.surface.write(0, 0, "abc");
+    inverted.surface.cells[1].selected = true;
+    const auto encoded = tui::encode_frame(inverted);
+    require(encoded.contains("\x1b[7m") && encoded.contains("\x1b[27m"),
+            "selected cells must toggle reverse video on and off around the selection");
+}
+
 void check_headless_virtual_time_and_snapshots() {
     tui::HeadlessSession session(24, 8, 100);
     require(session.render_count == 1, "headless creation must capture an initial frame");
@@ -783,6 +829,7 @@ i32 run_all(std::string_view executable) {
     check_copy_command_and_status();
     check_scroll_resize_and_unread_state();
     check_working_indicator();
+    check_mouse_selection();
     check_headless_virtual_time_and_snapshots();
     check_headless_resize_and_markup_stress();
     return 0;

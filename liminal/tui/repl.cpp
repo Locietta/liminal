@@ -125,6 +125,24 @@ struct CopyRequests {
     lighter::Event ready;
 };
 
+struct SelectionCopies {
+    void push(std::string text) {
+        pending.push_back(std::move(text));
+        ready.set();
+    }
+
+    Task<std::string> next() {
+        while (pending.empty()) co_await ready.wait();
+        auto text = std::move(pending.front());
+        pending.pop_front();
+        if (pending.empty()) ready.reset();
+        co_return text;
+    }
+
+    std::deque<std::string> pending;
+    lighter::Event ready;
+};
+
 std::string finish_prompt(std::string line) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
     return line;
@@ -172,7 +190,8 @@ struct PromptReader {
 };
 
 lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, ConsoleRenderer &renderer, PromptQueue &prompts,
-                                    ExternalEditorRequests &editor_requests, CopyRequests &copy_requests) {
+                                    ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
+                                    i32 &held_mouse_buttons) {
     switch (event.kind) {
         case TerminalEventKind::TEXT:
         case TerminalEventKind::PASTE: return renderer.insert(event.text);
@@ -214,11 +233,25 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
         }
         case TerminalEventKind::RESIZE: return renderer.resize(event.size);
         case TerminalEventKind::MOUSE: {
-            if (event.wheel_delta == 0) return {};
-            constexpr i32 rows_per_notch = 3;
-            constexpr i32 wheel_delta_per_notch = 120;
-            const auto notches = std::max(std::abs(event.wheel_delta) / wheel_delta_per_notch, 1);
-            return renderer.scroll((event.wheel_delta > 0 ? -1 : 1) * rows_per_notch * notches);
+            if (event.wheel_delta != 0) {
+                constexpr i32 rows_per_notch = 3;
+                constexpr i32 wheel_delta_per_notch = 120;
+                const auto notches = std::max(std::abs(event.wheel_delta) / wheel_delta_per_notch, 1);
+                return renderer.scroll((event.wheel_delta > 0 ? -1 : 1) * rows_per_notch * notches);
+            }
+            const bool left = (event.mouse_buttons & 1) != 0;
+            const bool was_left = (held_mouse_buttons & 1) != 0;
+            held_mouse_buttons = event.mouse_buttons;
+            if (left && !was_left) return renderer.begin_selection(event.y, event.x);
+            if (left && was_left) return renderer.extend_selection(event.y, event.x);
+            if (!left && was_left) {
+                // Copy-on-release: a drag that moved off its press cell lands
+                // on the clipboard; a plain click just clears the selection.
+                auto text = renderer.take_selection();
+                if (!text.empty()) selection_copies.push(std::move(text));
+                return renderer.redraw();
+            }
+            return {};
         }
         case TerminalEventKind::CLOSED:
         case TerminalEventKind::FOCUS: return {};
@@ -227,8 +260,9 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
 }
 
 Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &renderer, PromptQueue &prompts,
-                              ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, TurnControl &control,
-                              SessionFailure &failure) {
+                              ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
+                              TurnControl &control, SessionFailure &failure) {
+    i32 held_mouse_buttons = 0;
     while (true) {
         auto event = co_await terminal.next_event();
         if (!event) {
@@ -236,7 +270,8 @@ Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &render
             co_return 1;
         }
         if (event->kind == TerminalEventKind::CLOSED) co_return 0;
-        if (auto error = apply_terminal_event(*event, renderer, prompts, editor_requests, copy_requests)) {
+        if (auto error =
+                apply_terminal_event(*event, renderer, prompts, editor_requests, copy_requests, selection_copies, held_mouse_buttons)) {
             failure.record("cannot render terminal input", error, control);
             co_return 1;
         }
@@ -255,6 +290,19 @@ Task<i32> copy_reply_loop(CopyRequests &requests, Agent &agent, ConsoleRenderer 
     while (true) {
         co_await requests.next();
         if (auto error = co_await copy_reply_with_feedback(agent, 1, renderer)) {
+            failure.record("cannot render clipboard status", error, control);
+            co_return 1;
+        }
+    }
+}
+
+Task<i32> selection_copy_loop(SelectionCopies &copies, ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure) {
+    while (true) {
+        auto text = co_await copies.next();
+        auto copied = co_await copy_to_clipboard(std::move(text));
+        const auto error =
+            copied ? renderer.status("Copied selection to clipboard") : renderer.notice("[copy error: " + copied.error().detail + "]\n");
+        if (error) {
             failure.record("cannot render clipboard status", error, control);
             co_return 1;
         }
@@ -629,16 +677,18 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             PromptQueue prompts;
             ExternalEditorRequests editor_requests;
             CopyRequests copy_requests;
+            SelectionCopies selection_copies;
             PromptReader reader{.prompts = &prompts};
             lighter::Event render_requested;
             renderer.set_redraw_scheduler([&render_requested] { render_requested.set(); });
 #ifndef _WIN32
             auto raced = co_await WhenAny(
                 repl_body(agent, reader, renderer, control, models, failure), signal_monitor(interrupts, renderer, control, failure),
-                terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, control, failure),
+                terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies, control, failure),
                 render_monitor(render_requested, renderer, control, failure),
                 external_editor_loop(editor_requests, terminal, renderer, control, failure),
-                copy_reply_loop(copy_requests, agent, renderer, control, failure), animation_monitor(renderer, control, failure),
+                copy_reply_loop(copy_requests, agent, renderer, control, failure),
+                selection_copy_loop(selection_copies, renderer, control, failure), animation_monitor(renderer, control, failure),
                 suspend_monitor(suspend_controls, terminal, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
@@ -648,13 +698,15 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             if (raced.index() == 5) exit_code = std::get<5>(raced);
             if (raced.index() == 6) exit_code = std::get<6>(raced);
             if (raced.index() == 7) exit_code = std::get<7>(raced);
+            if (raced.index() == 8) exit_code = std::get<8>(raced);
 #else
             auto raced = co_await WhenAny(
                 repl_body(agent, reader, renderer, control, models, failure), signal_monitor(interrupts, renderer, control, failure),
-                terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, control, failure),
+                terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies, control, failure),
                 render_monitor(render_requested, renderer, control, failure),
                 external_editor_loop(editor_requests, terminal, renderer, control, failure),
-                copy_reply_loop(copy_requests, agent, renderer, control, failure), animation_monitor(renderer, control, failure));
+                copy_reply_loop(copy_requests, agent, renderer, control, failure),
+                selection_copy_loop(selection_copies, renderer, control, failure), animation_monitor(renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
@@ -662,6 +714,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             if (raced.index() == 4) exit_code = std::get<4>(raced);
             if (raced.index() == 5) exit_code = std::get<5>(raced);
             if (raced.index() == 6) exit_code = std::get<6>(raced);
+            if (raced.index() == 7) exit_code = std::get<7>(raced);
 #endif
             renderer.set_redraw_scheduler({});
         } else {

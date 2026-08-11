@@ -47,6 +47,9 @@ struct ConsoleRenderer {
     lighter::Error set_external_editor_active(bool active);
     lighter::Error scroll(i32 rows);
     lighter::Error page(i32 direction);
+    lighter::Error begin_selection(i32 row, i32 column);
+    lighter::Error extend_selection(i32 row, i32 column);
+    std::string take_selection();
     lighter::Error resize(lighter::TerminalSize size);
     lighter::Error refresh_animation();
     lighter::Error redraw();

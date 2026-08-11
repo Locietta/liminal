@@ -120,11 +120,13 @@ std::string terminal_features(const TerminalSession::Options &options, bool enab
                 result += "\x1b[?1004h";
             }
             if (options.mouse_events) {
-                result += "\x1b[?1000h\x1b[?1006h";
+                // Button-event tracking (1002) adds motion-while-held reports
+                // on top of 1000's press/release/wheel, enabling drag selection.
+                result += "\x1b[?1002h\x1b[?1006h";
             }
         } else {
             if (options.mouse_events) {
-                result += "\x1b[?1006l\x1b[?1000l";
+                result += "\x1b[?1006l\x1b[?1002l";
             }
             if (options.focus_events) {
                 result += "\x1b[?1004l";

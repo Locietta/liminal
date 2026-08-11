@@ -208,6 +208,12 @@ void check_mouse_sequences() {
             "an SGR wheel-down event must use the native Windows wheel direction convention");
     require(events[2].mouse_buttons == 1 && events[2].pressed && events[3].mouse_buttons == 0 && !events[3].pressed,
             "SGR button press and release events must retain normalized button state");
+
+    feed(decoder, "\x1b[<32;6;4M\x1b[<0;6;4m", events);
+    require(events.size() == 6 && events[4].kind == TerminalEventKind::MOUSE && events[4].mouse_buttons == 1 && events[4].x == 5 &&
+                events[4].y == 3 && events[4].wheel_delta == 0,
+            "a button-event drag report must keep the held button and its motion coordinates");
+    require(events[5].mouse_buttons == 0 && !events[5].pressed, "a drag release must clear the normalized button state");
 }
 
 bool same_event(const TerminalEvent &lhs, const TerminalEvent &rhs) {

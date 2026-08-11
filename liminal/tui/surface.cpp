@@ -54,13 +54,21 @@ void append_safe_cell_text(std::string &output, std::string_view text) { output 
 
 void append_row(std::string &output, const Surface &surface, i32 row) {
     Style active = Style::NORMAL;
+    bool inverted = false;
     output += "\x1b[0m\x1b[2K";
     for (i32 column = 0; column < surface.columns; ++column) {
         const auto &cell = surface.cells[static_cast<usize>(row * surface.columns + column)];
         if (cell.continuation) continue;
-        if (cell.style != active) {
-            output += style_sequence(cell.style);
-            active = cell.style;
+        if (cell.style != active || cell.selected != inverted) {
+            if (inverted && !cell.selected) output += "\x1b[27m";
+            if (cell.style != active) {
+                output += style_sequence(cell.style);
+                active = cell.style;
+            }
+            // Style sequences may reset attributes, so reverse video is
+            // re-asserted after every boundary inside a selection.
+            if (cell.selected) output += "\x1b[7m";
+            inverted = cell.selected;
         }
         append_safe_cell_text(output, cell.text);
     }

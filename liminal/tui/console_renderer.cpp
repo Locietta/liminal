@@ -217,6 +217,18 @@ lighter::Error ConsoleRenderer::page(i32 direction) {
     return redraw();
 }
 
+lighter::Error ConsoleRenderer::begin_selection(i32 row, i32 column) {
+    screen.begin_selection(row, column);
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::extend_selection(i32 row, i32 column) {
+    if (!screen.extend_selection(row, column)) return {};
+    return redraw();
+}
+
+std::string ConsoleRenderer::take_selection() { return screen.take_selection(); }
+
 lighter::Error ConsoleRenderer::resize(lighter::TerminalSize size) {
     screen.resize(size);
     return redraw();
