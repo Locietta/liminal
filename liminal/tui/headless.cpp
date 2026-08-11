@@ -48,6 +48,7 @@ std::string_view name(Style style) {
         case Style::MUTED: return "muted";
         case Style::ACCENT: return "accent";
         case Style::CODE: return "code";
+        case Style::CODE_BLOCK: return "code_block";
         case Style::CODE_KEYWORD: return "code_keyword";
         case Style::CODE_PREPROCESSOR: return "code_preprocessor";
         case Style::CODE_TYPE: return "code_type";

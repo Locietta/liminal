@@ -366,7 +366,7 @@ std::vector<StyledRow> layout_rich_text(std::string_view source, i32 columns) {
             LogicalLine code{.source_offset = offset, .source_size = line.size(), .preserve_whitespace = true};
             if (frame_code) append_span(code.spans, "│ ", Style::MUTED);
             if (fenced_diff) {
-                append_span(code.spans, line, diff_style(line).value_or(Style::CODE));
+                append_span(code.spans, line, diff_style(line).value_or(Style::CODE_BLOCK));
             } else {
                 auto highlighted = code_highlighter.highlight_line(line);
                 code.spans.insert(code.spans.end(), std::make_move_iterator(highlighted.begin()),

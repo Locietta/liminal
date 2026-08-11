@@ -17,6 +17,7 @@ enum struct Style {
     MUTED,
     ACCENT,
     CODE,
+    CODE_BLOCK,
     CODE_KEYWORD,
     CODE_PREPROCESSOR,
     CODE_TYPE,

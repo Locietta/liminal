@@ -118,20 +118,31 @@ void check_surface_cells_and_encoding() {
     require(encoded.ends_with("\x1b[1;4H\x1b[?25h"), "frame must restore the requested visible cursor");
     require(tui::encode_frame_diff(&frame, frame).empty(), "an unchanged frame must not emit terminal operations");
 
-    tui::Frame palette{.surface = tui::Surface(10, 1)};
+    tui::Frame palette{.surface = tui::Surface(12, 1)};
     constexpr tui::Style syntax_styles[] = {
-        tui::Style::CODE,          tui::Style::CODE_KEYWORD,  tui::Style::CODE_PREPROCESSOR, tui::Style::CODE_TYPE,
-        tui::Style::CODE_FUNCTION, tui::Style::CODE_STRING,   tui::Style::CODE_COMMENT,      tui::Style::CODE_NUMBER,
-        tui::Style::CODE_CONSTANT, tui::Style::CODE_PROPERTY,
+        tui::Style::CODE,        tui::Style::CODE_BLOCK,    tui::Style::CODE_KEYWORD,  tui::Style::CODE_PREPROCESSOR,
+        tui::Style::CODE_TYPE,   tui::Style::CODE_FUNCTION, tui::Style::CODE_STRING,   tui::Style::CODE_COMMENT,
+        tui::Style::CODE_NUMBER, tui::Style::CODE_CONSTANT, tui::Style::CODE_PROPERTY, tui::Style::CODE_OPERATOR,
     };
     for (usize index = 0; index < std::size(syntax_styles); ++index) {
         palette.surface.write(0, static_cast<i32>(index), "K", syntax_styles[index]);
     }
     const auto encoded_palette = tui::encode_frame(palette);
-    require(encoded_palette.contains("\x1b[1;38;2;240;200;255mK"), "code keywords must use bold, high-luminance lavender");
-    require(encoded_palette.contains("\x1b[1;38;2;255;210;138mK"), "code preprocessors must use distinct bold, high-luminance gold");
+    require(encoded_palette.contains("\x1b[1;38;2;203;166;247mK"), "code keywords must use bold, high-luminance mauve");
+    require(encoded_palette.contains("\x1b[1;38;2;250;179;135mK"), "code preprocessors must use distinct bold, high-luminance peach");
+    require(encoded_palette.contains("\x1b[22;38;2;205;214;244mK"), "generic block code must use a calm near-foreground tint");
+    require(encoded_palette.contains("\x1b[22;38;2;249;226;175mK"), "inline code must keep a warm accent distinct from prose");
     require(!encoded_palette.contains("\x1b[2m") && !encoded_palette.contains("\x1b[90m"),
             "syntax highlighting must not dim text or use a dark comment color");
+
+    tui::Frame diff_palette{.surface = tui::Surface(3, 1)};
+    diff_palette.surface.write(0, 0, "+", tui::Style::DIFF_ADDITION);
+    diff_palette.surface.write(0, 1, "-", tui::Style::DIFF_DELETION);
+    diff_palette.surface.write(0, 2, "@", tui::Style::DIFF_HUNK);
+    const auto encoded_diff = tui::encode_frame(diff_palette);
+    require(encoded_diff.contains("\x1b[22;38;2;166;227;161m+") && encoded_diff.contains("\x1b[22;38;2;243;139;168m-") &&
+                encoded_diff.contains("\x1b[1;38;2;116;199;236m@"),
+            "diff styles must use fixed truecolor so brightness never depends on terminal ANSI definitions");
 
     tui::Frame footer_palette{.surface = tui::Surface(4, 1)};
     constexpr tui::Style footer_styles[] = {
@@ -144,8 +155,8 @@ void check_surface_cells_and_encoding() {
         footer_palette.surface.write(0, static_cast<i32>(index), "F", footer_styles[index]);
     }
     const auto encoded_footer = tui::encode_frame(footer_palette);
-    require(encoded_footer.contains("\x1b[22;38;2;255;229;154mF") && encoded_footer.contains("\x1b[22;38;2;183;244;173mF") &&
-                encoded_footer.contains("\x1b[22;38;2;255;210;138mF") && encoded_footer.contains("\x1b[22;38;2;169;204;255mF"),
+    require(encoded_footer.contains("\x1b[22;38;2;249;226;175mF") && encoded_footer.contains("\x1b[22;38;2;166;227;161mF") &&
+                encoded_footer.contains("\x1b[22;38;2;250;179;135mF") && encoded_footer.contains("\x1b[22;38;2;137;180;250mF"),
             "footer metadata fields must encode four distinct high-luminance colors");
 
     tui::Frame composer{.surface = tui::Surface(4, 1)};
@@ -372,8 +383,8 @@ diff --git a/file.cpp b/file.cpp
                 text_has_style(multiline_comment, "return", tui::Style::CODE_KEYWORD),
             "syntax state must carry across code lines and resume highlighting after a block comment");
     const auto unknown_language = tui::layout_rich_text("```unknown\nif value == 7\n```", 40);
-    require(text_has_style(unknown_language, "if value == 7", tui::Style::CODE),
-            "unknown fenced languages must fall back to the generic code style");
+    require(text_has_style(unknown_language, "if value == 7", tui::Style::CODE_BLOCK),
+            "unknown fenced languages must fall back to the generic block code style");
     const auto python = tui::layout_rich_text("```Python3\ndef greet(name=\"Ada\"): # welcome\n    return 1\n```", 50);
     require(text_has_style(python, "def", tui::Style::CODE_KEYWORD) && text_has_style(python, "\"Ada\"", tui::Style::CODE_STRING) &&
                 text_has_style(python, "# welcome", tui::Style::CODE_COMMENT) && text_has_style(python, "1", tui::Style::CODE_NUMBER),
@@ -391,8 +402,8 @@ diff --git a/file.cpp b/file.cpp
 
     tui::CodeHighlighter guarded("cpp");
     const auto oversized = guarded.highlight_line(std::string(4097, 'x'));
-    require(!guarded.supported() && oversized.size() == 1 && oversized.front().style == tui::Style::CODE,
-            "oversized source lines must disable highlighting and retain generic code output");
+    require(!guarded.supported() && oversized.size() == 1 && oversized.front().style == tui::Style::CODE_BLOCK,
+            "oversized source lines must disable highlighting and retain generic block code output");
 
     tui::SessionScreen streaming;
     streaming.resize({40, 16});

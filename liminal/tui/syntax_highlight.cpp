@@ -36,9 +36,9 @@ constexpr usize k_max_highlight_line_bytes = 4 * 1024;
         case TokenRole::ESCAPE: return Style::CODE_STRING;
         case TokenRole::NUMBER: return Style::CODE_NUMBER;
         case TokenRole::OPERATOR: return Style::CODE_OPERATOR;
-        case TokenRole::UNRECOGNIZED: return Style::CODE;
+        case TokenRole::UNRECOGNIZED: return Style::CODE_BLOCK;
     }
-    return Style::CODE;
+    return Style::CODE_BLOCK;
 }
 
 void append_span(std::vector<StyledSpan> &spans, std::string_view text, Style style) {
@@ -52,7 +52,7 @@ void append_span(std::vector<StyledSpan> &spans, std::string_view text, Style st
 
 [[nodiscard]] std::vector<StyledSpan> fallback(std::string_view line) {
     if (line.empty()) return {};
-    return {{.text = std::string(line), .style = Style::CODE}};
+    return {{.text = std::string(line), .style = Style::CODE_BLOCK}};
 }
 
 } // namespace
