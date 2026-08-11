@@ -15,13 +15,13 @@
 
 namespace liminal {
 
-struct ExecSessionManager;
+struct ShellTaskManager;
 
-struct ExecSessionManagerDeleter {
-    void operator()(ExecSessionManager *sessions) const;
+struct ShellTaskManagerDeleter {
+    void operator()(ShellTaskManager *tasks) const;
 };
 
-using ExecSessionManagerPtr = std::unique_ptr<ExecSessionManager, ExecSessionManagerDeleter>;
+using ShellTaskManagerPtr = std::unique_ptr<ShellTaskManager, ShellTaskManagerDeleter>;
 
 enum struct ToolExecutionMode {
     EXCLUSIVE,
@@ -78,7 +78,7 @@ struct ToolSet {
     std::filesystem::path working_directory;
 
 private:
-    ExecSessionManagerPtr exec_sessions;
+    ShellTaskManagerPtr shell_tasks;
     std::vector<ToolRegistration> registrations;
 };
 

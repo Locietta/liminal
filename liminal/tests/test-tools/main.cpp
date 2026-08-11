@@ -48,13 +48,13 @@ void test_tools_are_available_by_default() {
     ToolSet tools(std::filesystem::current_path() / "liminal");
     auto definitions = tools.definitions();
     require(definitions.size() == 6 && definitions[0].name == "read_file" && definitions[1].name == "apply_patch" &&
-                definitions[2].name == "exec_command" && definitions[3].name == "write_stdin" &&
+                definitions[2].name == "exec_command" && definitions[3].name == "interact_with_shell_task" &&
                 definitions[4].kind == provider::ToolKind::WEB_SEARCH && definitions[5].kind == provider::ToolKind::WEB_FETCH,
             "default tools must include file reading, patch editing, interactive shell execution, and hosted web access");
     require(tools.execution_mode("read_file") == ToolExecutionMode::PARALLEL &&
                 tools.execution_mode("exec_command") == ToolExecutionMode::PARALLEL &&
                 tools.execution_mode("apply_patch") == ToolExecutionMode::EXCLUSIVE &&
-                tools.execution_mode("write_stdin") == ToolExecutionMode::EXCLUSIVE &&
+                tools.execution_mode("interact_with_shell_task") == ToolExecutionMode::EXCLUSIVE &&
                 tools.execution_mode("unknown") == ToolExecutionMode::EXCLUSIVE,
             "built-in and unknown tools must expose conservative execution semantics");
 
@@ -108,12 +108,12 @@ void test_tool_presentations_are_specific_and_bounded() {
             "exec_command presentation must retain the exact multiline command as semantic data");
     const provider::ToolResult command_result{
         .call_id = "command",
-        .content = "session_id: 2\nstatus: exited\nexit_code: 7\n\noutput:\nconfigured\nbuilt\none test failed\n",
+        .content = "shell_task_id: 2\nstatus: exited\nexit_code: 7\n\noutput:\nconfigured\nbuilt\none test failed\n",
         .is_error = true,
     };
     const auto summary = tools.summarize(command, command_result);
-    require(summary.contains("session 2 · exit 7") && summary.contains("configured") && summary.contains("one test failed"),
-            "exec_command completion must expose session state and a bounded output preview");
+    require(summary.contains("shell task 2 · exit 7") && summary.contains("configured") && summary.contains("one test failed"),
+            "exec_command completion must expose shell task state and a bounded output preview");
 }
 
 void test_read_file_is_bounded_and_regular() {
@@ -223,31 +223,33 @@ void test_apply_patch_operations_are_validated_before_writes() {
     std::filesystem::remove_all(directory, remove_error);
 }
 
-lighter::Task<> exercise_interactive_session(ToolSet &tools) {
+lighter::Task<> exercise_shell_task_interaction(ToolSet &tools) {
 #ifdef _WIN32
     constexpr std::string_view command = R"({"cmd":"$line = [Console]::In.ReadLine(); Write-Output \"got:$line\"","yield_time_ms":25})";
 #else
     constexpr std::string_view command = R"({"cmd":"IFS= read -r line; printf 'got:%s\\n' \"$line\"","yield_time_ms":25})";
 #endif
     auto started = co_await tools.execute(make_call("start", "exec_command", command));
-    require(started.has_value() && !started->is_error && started->content.contains("session_id: 1") &&
+    require(started.has_value() && !started->is_error && started->content.contains("shell_task_id: 1") &&
                 started->content.contains("status: running"),
-            "exec_command must return a session ID for a command awaiting input");
+            "exec_command must return a shell task ID for a command awaiting input");
 
-    auto written =
-        co_await tools.execute(make_call("write", "write_stdin", R"({"session_id":"1","chars":"hello\n","yield_time_ms":3000})"));
-    require(written.has_value() && written->content.contains("got:hello"), "write_stdin must deliver characters to the running process");
+    auto written = co_await tools.execute(
+        make_call("write", "interact_with_shell_task", R"({"shell_task_id":"1","chars":"hello\n","yield_time_ms":3000})"));
+    require(written.has_value() && written->content.contains("got:hello"),
+            "interact_with_shell_task must deliver characters to the running shell task");
 
-    auto finished = co_await tools.execute(make_call("poll", "write_stdin", R"({"session_id":"1","chars":"","yield_time_ms":3000})"));
+    auto finished =
+        co_await tools.execute(make_call("poll", "interact_with_shell_task", R"({"shell_task_id":"1","chars":"","yield_time_ms":3000})"));
     require(finished.has_value() && !finished->is_error && finished->content.contains("status: exited") &&
                 finished->content.contains("exit_code: 0"),
-            "write_stdin must poll a session through process completion");
+            "interact_with_shell_task must poll a shell task through completion");
 }
 
-void test_interactive_session() {
+void test_shell_task_interaction() {
     lighter::EventLoop loop;
     ToolSet tools(std::filesystem::current_path());
-    auto task = exercise_interactive_session(tools);
+    auto task = exercise_shell_task_interaction(tools);
     loop.schedule(task);
     loop.run();
     std::ignore = task.result();
@@ -271,7 +273,7 @@ i32 run_all() {
     test_tool_presentations_are_specific_and_bounded();
     test_read_file_is_bounded_and_regular();
     test_apply_patch_operations_are_validated_before_writes();
-    test_interactive_session();
+    test_shell_task_interaction();
     test_nonzero_command_is_an_error_result();
     return 0;
 }

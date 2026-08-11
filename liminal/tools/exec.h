@@ -7,9 +7,9 @@
 
 namespace liminal {
 
-struct ExecSessionManager;
+struct ShellTaskManager;
 
-ExecSessionManagerPtr make_exec_session_manager(std::filesystem::path working_directory);
-std::array<ToolRegistration, 2> make_exec_tools(ExecSessionManager &sessions);
+ShellTaskManagerPtr make_shell_task_manager(std::filesystem::path working_directory);
+std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks);
 
 } // namespace liminal

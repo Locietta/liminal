@@ -295,10 +295,10 @@ ToolCallPresentation fallback_description(const provider::ToolCall &call) {
 } // namespace
 
 ToolSet::ToolSet(std::filesystem::path working_directory)
-    : working_directory(std::move(working_directory)), exec_sessions(make_exec_session_manager(this->working_directory)) {
+    : working_directory(std::move(working_directory)), shell_tasks(make_shell_task_manager(this->working_directory)) {
     lighter::check(static_cast<bool>(register_tool(read_file_registration())), "failed to register read_file");
     lighter::check(static_cast<bool>(register_tool(make_apply_patch_tool())), "failed to register apply_patch");
-    for (auto &tool : make_exec_tools(*exec_sessions)) {
+    for (auto &tool : make_exec_tools(*shell_tasks)) {
         lighter::check(static_cast<bool>(register_tool(std::move(tool))), "failed to register exec tool");
     }
 }

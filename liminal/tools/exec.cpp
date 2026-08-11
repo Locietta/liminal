@@ -39,8 +39,8 @@ constexpr i64 k_max_yield_ms = 30'000;
 constexpr usize k_default_output_chars = 32 * 1024;
 constexpr usize k_min_output_chars = 1024;
 constexpr usize k_max_output_chars = 128 * 1024;
-constexpr usize k_session_buffer_bytes = 1024 * 1024;
-constexpr usize k_max_sessions = 32;
+constexpr usize k_shell_task_buffer_bytes = 1024 * 1024;
+constexpr usize k_max_shell_tasks = 32;
 
 struct ExecCommandInput {
     std::string cmd;
@@ -49,14 +49,14 @@ struct ExecCommandInput {
     std::optional<usize> max_output_chars;
 };
 
-struct WriteStdinInput {
-    std::string session_id;
+struct InteractWithShellTaskInput {
+    std::string shell_task_id;
     std::optional<std::string> chars;
     std::optional<i64> yield_time_ms;
     std::optional<usize> max_output_chars;
 };
 
-struct ExecResponse {
+struct ShellTaskResponse {
     std::string content;
     bool is_error = false;
 };
@@ -103,9 +103,9 @@ std::optional<std::string_view> field(std::string_view content, std::string_view
 }
 
 std::string summarize_exec(const provider::ToolResult &result) {
-    const auto session = field(result.content, "session_id").value_or("?");
+    const auto task = field(result.content, "shell_task_id").value_or("?");
     const auto status = field(result.content, "status").value_or(result.is_error ? "failed" : "completed");
-    std::string summary = "session " + std::string(session) + " · ";
+    std::string summary = "shell task " + std::string(task) + " · ";
     if (const auto code = field(result.content, "exit_code")) {
         summary += "exit " + std::string(*code);
     } else {
@@ -120,8 +120,8 @@ std::string summarize_exec(const provider::ToolResult &result) {
 
 } // namespace
 
-struct ExecSessionManager {
-    struct Session {
+struct ShellTaskManager {
+    struct ShellTask {
         std::string id;
         std::string command;
         std::optional<Process::SpawnResult> child;
@@ -137,8 +137,8 @@ struct ExecSessionManager {
 
         void append(std::string_view text) {
             output.append(text);
-            if (output.size() > k_session_buffer_bytes) {
-                const auto removed = output.size() - k_session_buffer_bytes;
+            if (output.size() > k_shell_task_buffer_bytes) {
+                const auto removed = output.size() - k_shell_task_buffer_bytes;
                 output.erase(0, removed);
                 output_offset += removed;
             }
@@ -163,31 +163,31 @@ struct ExecSessionManager {
         }
     };
 
-    explicit ExecSessionManager(std::filesystem::path working_directory) : working_directory(std::move(working_directory)) {}
-    ~ExecSessionManager() {
-        for (const auto &[id, session] : sessions) {
+    explicit ShellTaskManager(std::filesystem::path working_directory) : working_directory(std::move(working_directory)) {}
+    ~ShellTaskManager() {
+        for (const auto &[id, task] : tasks) {
             std::ignore = id;
-            if (session->running && session->child) {
+            if (task->running && task->child) {
 #ifdef _WIN32
-                std::ignore = session->child->proc.kill(SIGTERM);
+                std::ignore = task->child->proc.kill(SIGTERM);
 #else
-                std::ignore = session->child->proc.kill(SIGKILL);
+                std::ignore = task->child->proc.kill(SIGKILL);
 #endif
             }
         }
     }
 
-    Task<ExecResponse, Error> start(ExecCommandInput input);
-    Task<ExecResponse, Error> write(WriteStdinInput input);
+    Task<ShellTaskResponse, Error> start(ExecCommandInput input);
+    Task<ShellTaskResponse, Error> interact(InteractWithShellTaskInput input);
 
     std::filesystem::path working_directory;
     u64 next_id = 1;
-    std::unordered_map<std::string, std::shared_ptr<Session>> sessions;
+    std::unordered_map<std::string, std::shared_ptr<ShellTask>> tasks;
 };
 
 namespace {
 
-Task<i32, lighter::Error> drain(Stream &stream, ExecSessionManager::Session *session) {
+Task<i32, lighter::Error> drain(Stream &stream, ShellTaskManager::ShellTask *task) {
     lighter::encoding::utf8::Sanitizer sanitizer;
     while (true) {
         auto chunk = co_await stream.read_chunk();
@@ -198,29 +198,29 @@ Task<i32, lighter::Error> drain(Stream &stream, ExecSessionManager::Session *ses
         if (chunk->empty()) break;
         std::string sanitized;
         sanitizer.feed(std::string_view(chunk->data(), chunk->size()), sanitized);
-        if (!sanitized.empty()) session->append(sanitized);
+        if (!sanitized.empty()) task->append(sanitized);
         stream.consume(chunk->size());
     }
     std::string tail;
     sanitizer.finish(tail);
-    if (!tail.empty()) session->append(tail);
+    if (!tail.empty()) task->append(tail);
     co_return 0;
 }
 
-Task<> pump_session(std::shared_ptr<ExecSessionManager::Session> session) {
-    auto &child = *session->child;
-    auto joined = co_await WhenAll(drain(child.stdout_pipe, session.get()), drain(child.stderr_pipe, session.get()), child.proc.wait());
+Task<> pump_shell_task(std::shared_ptr<ShellTaskManager::ShellTask> task) {
+    auto &child = *task->child;
+    auto joined = co_await WhenAll(drain(child.stdout_pipe, task.get()), drain(child.stderr_pipe, task.get()), child.proc.wait());
     if (!joined) {
-        session->fail("process I/O failed: " + std::string(joined.error().message()));
+        task->fail("process I/O failed: " + std::string(joined.error().message()));
         co_return;
     }
     auto [stdout_done, stderr_done, status] = *std::move(joined);
     std::ignore = stdout_done;
     std::ignore = stderr_done;
-    session->complete(status);
+    task->complete(status);
 }
 
-Result<std::filesystem::path> resolve_working_directory(const ExecSessionManager &manager, const std::optional<std::string> &requested) {
+Result<std::filesystem::path> resolve_working_directory(const ShellTaskManager &manager, const std::optional<std::string> &requested) {
     auto path = requested ? std::filesystem::path(*requested) : manager.working_directory;
     if (path.is_relative()) path = manager.working_directory / path;
     std::error_code error;
@@ -232,29 +232,29 @@ Result<std::filesystem::path> resolve_working_directory(const ExecSessionManager
     return path;
 }
 
-void prune_sessions(ExecSessionManager &manager) {
-    for (auto iterator = manager.sessions.begin(); iterator != manager.sessions.end();) {
-        const auto &session = *iterator->second;
-        const auto end = session.output_offset + session.output.size();
-        if (!session.running && session.delivered_offset >= end) {
-            iterator = manager.sessions.erase(iterator);
+void prune_shell_tasks(ShellTaskManager &manager) {
+    for (auto iterator = manager.tasks.begin(); iterator != manager.tasks.end();) {
+        const auto &task = *iterator->second;
+        const auto end = task.output_offset + task.output.size();
+        if (!task.running && task.delivered_offset >= end) {
+            iterator = manager.tasks.erase(iterator);
         } else {
             ++iterator;
         }
     }
 }
 
-Task<> wait_for_finish(ExecSessionManager::Session &session, std::chrono::milliseconds duration) {
-    if (!session.running || duration.count() == 0) co_return;
-    auto waited = co_await lighter::with_timeout(session.finished.wait(), duration);
+Task<> wait_for_finish(ShellTaskManager::ShellTask &task, std::chrono::milliseconds duration) {
+    if (!task.running || duration.count() == 0) co_return;
+    auto waited = co_await lighter::with_timeout(task.finished.wait(), duration);
     std::ignore = waited;
 }
 
-Task<> wait_for_change(ExecSessionManager::Session &session, u64 version, std::chrono::milliseconds duration) {
-    if (!session.running || session.version != version || duration.count() == 0) co_return;
-    session.changed.reset();
-    if (session.version != version) co_return;
-    auto waited = co_await lighter::with_timeout(session.changed.wait(), duration);
+Task<> wait_for_change(ShellTaskManager::ShellTask &task, u64 version, std::chrono::milliseconds duration) {
+    if (!task.running || task.version != version || duration.count() == 0) co_return;
+    task.changed.reset();
+    if (task.version != version) co_return;
+    auto waited = co_await lighter::with_timeout(task.changed.wait(), duration);
     std::ignore = waited;
 }
 
@@ -283,55 +283,56 @@ std::string visible_output(std::string_view raw) {
     return result;
 }
 
-std::string take_output(ExecSessionManager::Session &session, usize limit) {
+std::string take_output(ShellTaskManager::ShellTask &task, usize limit) {
     std::string result;
-    if (session.delivered_offset < session.output_offset) {
-        result = "[" + std::to_string(session.output_offset - session.delivered_offset) + " earlier bytes were truncated]\n";
-        session.delivered_offset = session.output_offset;
+    if (task.delivered_offset < task.output_offset) {
+        result = "[" + std::to_string(task.output_offset - task.delivered_offset) + " earlier bytes were truncated]\n";
+        task.delivered_offset = task.output_offset;
     }
-    const auto available = session.output_offset + session.output.size();
-    if (session.delivered_offset >= available) return result;
+    const auto available = task.output_offset + task.output.size();
+    if (task.delivered_offset >= available) return result;
 
-    const auto index = static_cast<usize>(session.delivered_offset - session.output_offset);
-    auto count = std::min(limit, session.output.size() - index);
-    count = lighter::encoding::utf8::complete_prefix_len(std::string_view(session.output).substr(index, count));
-    result += visible_output(std::string_view(session.output).substr(index, count));
-    session.delivered_offset += count;
-    if (session.delivered_offset < available) {
-        result += "\n[" + std::to_string(available - session.delivered_offset) + " bytes remain; poll with write_stdin and empty chars]\n";
+    const auto index = static_cast<usize>(task.delivered_offset - task.output_offset);
+    auto count = std::min(limit, task.output.size() - index);
+    count = lighter::encoding::utf8::complete_prefix_len(std::string_view(task.output).substr(index, count));
+    result += visible_output(std::string_view(task.output).substr(index, count));
+    task.delivered_offset += count;
+    if (task.delivered_offset < available) {
+        result += "\n[" + std::to_string(available - task.delivered_offset) +
+                  " bytes remain; poll with interact_with_shell_task and empty chars]\n";
     }
     return result;
 }
 
-ExecResponse response_for(ExecSessionManager::Session &session, usize limit) {
-    std::string result = "session_id: " + session.id;
+ShellTaskResponse response_for(ShellTaskManager::ShellTask &task, usize limit) {
+    std::string result = "shell_task_id: " + task.id;
     bool is_error = false;
-    if (session.running) {
+    if (task.running) {
         result += "\nstatus: running";
-    } else if (session.error) {
-        result += "\nstatus: failed\nerror: " + *session.error;
+    } else if (task.error) {
+        result += "\nstatus: failed\nerror: " + *task.error;
         is_error = true;
     } else {
-        result += "\nstatus: exited\nexit_code: " + std::to_string(session.exit_status->status);
-        if (session.exit_status->term_signal != 0) {
-            result += "\nterm_signal: " + std::to_string(session.exit_status->term_signal);
+        result += "\nstatus: exited\nexit_code: " + std::to_string(task.exit_status->status);
+        if (task.exit_status->term_signal != 0) {
+            result += "\nterm_signal: " + std::to_string(task.exit_status->term_signal);
         }
-        is_error = session.exit_status->status != 0 || session.exit_status->term_signal != 0;
+        is_error = task.exit_status->status != 0 || task.exit_status->term_signal != 0;
     }
-    auto output = take_output(session, limit);
+    auto output = take_output(task, limit);
     if (!output.empty()) result += "\n\noutput:\n" + output;
     return {.content = std::move(result), .is_error = is_error};
 }
 
 } // namespace
 
-Task<ExecResponse, Error> ExecSessionManager::start(ExecCommandInput input) {
+Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input) {
     if (input.cmd.empty()) co_await fail(Error::tool("cmd cannot be empty"));
     auto duration = co_await or_fail(yield_duration(input.yield_time_ms));
     const auto limit = co_await or_fail(output_limit(input.max_output_chars));
     auto directory = co_await or_fail(resolve_working_directory(*this, input.workdir));
-    prune_sessions(*this);
-    if (sessions.size() >= k_max_sessions) co_await fail(Error::tool("too many live exec sessions"));
+    prune_shell_tasks(*this);
+    if (tasks.size() >= k_max_shell_tasks) co_await fail(Error::tool("too many live shell tasks"));
 
 #ifdef _WIN32
     Process::Options options{
@@ -352,56 +353,58 @@ Task<ExecResponse, Error> ExecSessionManager::start(ExecCommandInput input) {
     auto spawned = Process::spawn(options);
     if (!spawned) co_await fail(Error::tool("failed to spawn command shell: " + std::string(spawned.error().message())));
 
-    auto session = std::make_shared<Session>();
-    session->id = std::to_string(next_id++);
-    session->command = std::move(input.cmd);
-    session->child = *std::move(spawned);
-    const auto id = session->id;
-    auto *state = session.get();
-    sessions.emplace(id, session);
-    lighter::EventLoop::current().schedule(pump_session(std::move(session)));
+    auto task = std::make_shared<ShellTask>();
+    task->id = std::to_string(next_id++);
+    task->command = std::move(input.cmd);
+    task->child = *std::move(spawned);
+    const auto id = task->id;
+    auto *state = task.get();
+    tasks.emplace(id, task);
+    lighter::EventLoop::current().schedule(pump_shell_task(std::move(task)));
 
     co_await wait_for_finish(*state, duration);
     co_return response_for(*state, limit);
 }
 
-Task<ExecResponse, Error> ExecSessionManager::write(WriteStdinInput input) {
+Task<ShellTaskResponse, Error> ShellTaskManager::interact(InteractWithShellTaskInput input) {
     auto duration = co_await or_fail(yield_duration(input.yield_time_ms));
     const auto limit = co_await or_fail(output_limit(input.max_output_chars));
-    const auto found = sessions.find(input.session_id);
-    if (found == sessions.end()) co_await fail(Error::tool("unknown exec session: " + input.session_id));
-    auto &session = *found->second;
-    const auto version = session.version;
+    const auto found = tasks.find(input.shell_task_id);
+    if (found == tasks.end()) co_await fail(Error::tool("unknown shell task: " + input.shell_task_id));
+    auto &task = *found->second;
+    const auto version = task.version;
 
     if (input.chars && !input.chars->empty()) {
-        if (!session.running) co_await fail(Error::tool("exec session has already exited: " + input.session_id));
-        auto written = co_await session.child->stdin_pipe.write(std::span<const char>(input.chars->data(), input.chars->size()));
-        if (!written) co_await fail(Error::tool("failed to write exec session input: " + std::string(written.error().message())));
+        if (!task.running) co_await fail(Error::tool("shell task has already exited: " + input.shell_task_id));
+        auto written = co_await task.child->stdin_pipe.write(std::span<const char>(input.chars->data(), input.chars->size()));
+        if (!written) co_await fail(Error::tool("failed to write shell task input: " + std::string(written.error().message())));
     }
-    const auto available = session.output_offset + session.output.size();
-    if (session.delivered_offset >= available) co_await wait_for_change(session, version, duration);
-    co_return response_for(session, limit);
+    const auto available = task.output_offset + task.output.size();
+    if (task.delivered_offset >= available) co_await wait_for_change(task, version, duration);
+    co_return response_for(task, limit);
 }
 
-void ExecSessionManagerDeleter::operator()(ExecSessionManager *sessions) const { delete sessions; }
+void ShellTaskManagerDeleter::operator()(ShellTaskManager *tasks) const { delete tasks; }
 
-ExecSessionManagerPtr make_exec_session_manager(std::filesystem::path working_directory) {
-    return ExecSessionManagerPtr(new ExecSessionManager(std::move(working_directory)));
+ShellTaskManagerPtr make_shell_task_manager(std::filesystem::path working_directory) {
+    return ShellTaskManagerPtr(new ShellTaskManager(std::move(working_directory)));
 }
 
-std::array<ToolRegistration, 2> make_exec_tools(ExecSessionManager &sessions) {
+std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
     auto exec = ToolRegistration{
         .definition =
             {
                 .name = "exec_command",
 #ifdef _WIN32
                 .description =
-                    "Run a PowerShell command. Returns an exit status, or a session ID when still running. Use write_stdin to send "
-                    "input or poll that session. Prefer ripgrep (rg) for text search and uutils commands for ordinary filesystem work.",
+                    "Run a PowerShell command. Returns an exit status, or a shell task ID when still running. Use "
+                    "interact_with_shell_task to send input or poll that task. Prefer ripgrep (rg) for text search and uutils commands "
+                    "for ordinary filesystem work.",
 #else
                 .description =
-                    "Run a POSIX shell command. Returns an exit status, or a session ID when still running. Use write_stdin to send "
-                    "input or poll that session. Prefer ripgrep (rg) for text search and uutils commands for ordinary filesystem work.",
+                    "Run a POSIX shell command. Returns an exit status, or a shell task ID when still running. Use "
+                    "interact_with_shell_task to send input or poll that task. Prefer ripgrep (rg) for text search and uutils commands "
+                    "for ordinary filesystem work.",
 #endif
                 .input_schema =
                     {
@@ -417,9 +420,9 @@ std::array<ToolRegistration, 2> make_exec_tools(ExecSessionManager &sessions) {
                     },
             },
         .execution_mode = ToolExecutionMode::PARALLEL,
-        .execute = [&sessions](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
+        .execute = [&tasks](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<ExecCommandInput>(call.input));
-            auto response = co_await sessions.start(std::move(input)).or_fail();
+            auto response = co_await tasks.start(std::move(input)).or_fail();
             co_return provider::ToolResult{.call_id = call.id, .content = std::move(response.content), .is_error = response.is_error};
         },
         .describe =
@@ -431,39 +434,40 @@ std::array<ToolRegistration, 2> make_exec_tools(ExecSessionManager &sessions) {
         .summarize = [](const provider::ToolCall &, const provider::ToolResult &result) { return summarize_exec(result); },
     };
 
-    auto write = ToolRegistration{
+    auto interact = ToolRegistration{
         .definition =
             {
-                .name = "write_stdin",
-                .description = "Write characters to a running exec_command session, or poll it by passing an empty chars string.",
+                .name = "interact_with_shell_task",
+                .description = "Send characters to a running exec_command shell task, or poll it by passing an empty chars string.",
                 .input_schema =
                     {
                         .properties =
                             {
-                                {"session_id", {.type = "string", .description = "Session ID returned by exec_command."}},
+                                {"shell_task_id", {.type = "string", .description = "Shell task ID returned by exec_command."}},
                                 {"chars", {.type = "string", .description = "Characters to write. Empty or omitted means poll only."}},
                                 {"yield_time_ms", {.type = "integer", .description = "Wait up to 30000 ms for new output; default 10000."}},
                                 {"max_output_chars",
                                  {.type = "integer", .description = "Maximum output bytes returned now; 1024-131072, default 32768."}},
                             },
-                        .required = {"session_id"},
+                        .required = {"shell_task_id"},
                     },
             },
         .execution_mode = ToolExecutionMode::EXCLUSIVE,
-        .execute = [&sessions](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
-            auto input = co_await or_fail(parse_input<WriteStdinInput>(call.input));
-            auto response = co_await sessions.write(std::move(input)).or_fail();
+        .execute = [&tasks](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
+            auto input = co_await or_fail(parse_input<InteractWithShellTaskInput>(call.input));
+            auto response = co_await tasks.interact(std::move(input)).or_fail();
             co_return provider::ToolResult{.call_id = call.id, .content = std::move(response.content), .is_error = response.is_error};
         },
         .describe =
             [](const provider::ToolCall &call) {
-                const auto input = parse_input<WriteStdinInput>(call.input);
-                return ToolCallPresentation{.description =
-                                                input ? "Write stdin for session " + bounded_text(input->session_id) : "Write stdin"};
+                const auto input = parse_input<InteractWithShellTaskInput>(call.input);
+                if (!input) return ToolCallPresentation{.description = "Interact with shell task"};
+                const auto action = input->chars && !input->chars->empty() ? "Send input to shell task " : "Poll shell task ";
+                return ToolCallPresentation{.description = action + bounded_text(input->shell_task_id)};
             },
         .summarize = [](const provider::ToolCall &, const provider::ToolResult &result) { return summarize_exec(result); },
     };
-    return {std::move(exec), std::move(write)};
+    return {std::move(exec), std::move(interact)};
 }
 
 } // namespace liminal
