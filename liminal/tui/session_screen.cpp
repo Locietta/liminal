@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <iterator>
+#include <numbers>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -36,10 +38,13 @@ using StyledLine = std::vector<StyledSpan>;
 
 constexpr auto k_command_elapsed_threshold = std::chrono::seconds(10);
 
-constexpr std::string_view k_working_dot = "•";
-constexpr Style k_working_pulse[] = {Style::MUTED, Style::NORMAL, Style::EMPHASIS, Style::NORMAL};
-constexpr auto k_working_pulse_interval = std::chrono::milliseconds(500);
 constexpr auto k_working_elapsed_threshold = std::chrono::seconds(3);
+constexpr auto k_shimmer_period = std::chrono::seconds(2);
+constexpr usize k_shimmer_padding = 10;
+constexpr float k_shimmer_half_width = 5.0F;
+constexpr Style k_shimmer_styles[] = {
+    Style::WORKING_BASE, Style::WORKING_LOW, Style::WORKING_MEDIUM, Style::WORKING_HIGH, Style::WORKING_BRIGHT, Style::WORKING_PEAK,
+};
 
 std::string_view working_label(SessionState state) noexcept {
     switch (state) {
@@ -56,6 +61,41 @@ void append_span(StyledLine &spans, std::string_view text, Style style) {
         spans.back().text += text;
     } else {
         spans.push_back({.text = std::string(text), .style = style});
+    }
+}
+
+std::vector<std::string_view> graphemes(std::string_view text) {
+    std::vector<std::string_view> result;
+    usize offset = 0;
+    while (offset < text.size()) {
+        const auto grapheme = next_grapheme(text, offset);
+        result.push_back(text.substr(offset, grapheme.size));
+        offset += grapheme.size;
+    }
+    return result;
+}
+
+Style shimmer_style(float intensity) noexcept {
+    const auto scaled = std::round(std::clamp(intensity, 0.0F, 1.0F) * static_cast<float>(std::size(k_shimmer_styles) - 1));
+    return k_shimmer_styles[static_cast<usize>(scaled)];
+}
+
+void append_shimmer(StyledLine &spans, std::string_view text, std::chrono::steady_clock::duration elapsed) {
+    const auto clusters = graphemes(text);
+    const auto period = clusters.size() + k_shimmer_padding * 2;
+    const auto elapsed_seconds = std::chrono::duration<float>(elapsed).count();
+    const auto cycle_seconds = std::chrono::duration<float>(k_shimmer_period).count();
+    const auto position = std::fmod(elapsed_seconds, cycle_seconds) / cycle_seconds * static_cast<float>(period);
+
+    for (usize index = 0; index < clusters.size(); ++index) {
+        const auto character_position = static_cast<float>(index + k_shimmer_padding);
+        const auto distance = std::abs(character_position - position);
+        float intensity = 0.0F;
+        if (distance <= k_shimmer_half_width) {
+            const auto angle = std::numbers::pi_v<float> * distance / k_shimmer_half_width;
+            intensity = 0.5F * (1.0F + std::cos(angle));
+        }
+        append_span(spans, clusters[index], shimmer_style(intensity));
     }
 }
 
@@ -730,7 +770,6 @@ void SessionScreen::apply(const Event &event) {
     if (std::holds_alternative<TurnCancelled>(event)) state = SessionState::CANCELLED;
     if (std::holds_alternative<TurnFailed>(event)) state = SessionState::FAILED;
     if (!was_working && working()) turn_started_at = monotonic_now();
-    if (anchor) unread = true;
 }
 
 void SessionScreen::add_notice(std::string text) { apply(SessionNotice{.text = trim_notice(std::move(text))}); }
@@ -940,7 +979,6 @@ void SessionScreen::page(i32 direction) { scroll(direction * std::max(viewport_r
 void SessionScreen::follow_tail() noexcept {
     transient_status.reset();
     anchor.reset();
-    unread = false;
 }
 
 void SessionScreen::begin_selection(i32 row, i32 column) { selection = {.anchor = {row, column}, .focus = {row, column}}; }
@@ -1001,13 +1039,11 @@ std::vector<LayoutRow> SessionScreen::working_rows() const {
     if (!working()) return {};
     const auto now = monotonic_now();
     const auto elapsed = now >= turn_started_at ? now - turn_started_at : std::chrono::steady_clock::duration{};
-    const auto phase = static_cast<usize>(elapsed / k_working_pulse_interval) % std::size(k_working_pulse);
 
     std::vector<LayoutRow> rows(2);
     auto &status = rows[1];
-    append_span(status.spans, k_working_dot, k_working_pulse[phase]);
-    append_span(status.spans, " ", Style::NORMAL);
-    append_span(status.spans, working_label(state), Style::NORMAL);
+    const auto label = "• " + std::string(working_label(state));
+    append_shimmer(status.spans, label, elapsed);
     if (elapsed >= k_working_elapsed_threshold) {
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
         append_span(status.spans, " (" + elapsed_text(seconds) + ")", Style::MUTED);
@@ -1046,11 +1082,8 @@ Frame SessionScreen::frame() const {
             status_text = "Save and close external editor to continue";
         } else if (transient_status) {
             status_text = *transient_status;
-        } else if (anchor) {
-            status_text = "history";
-            if (unread) status_text += " · new output";
         }
-        if (external_editor_active || transient_status || anchor) {
+        if (external_editor_active || transient_status) {
             const auto status_style = !external_editor_active && transient_status ? Style::ACCENT : Style::MUTED;
             result.surface.write(size.rows - 1, 0, status_text, status_style);
         } else {

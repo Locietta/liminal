@@ -72,7 +72,6 @@ struct HeadlessSnapshot {
     std::string composer_text;
     usize composer_cursor = 0;
     std::optional<SnapshotAnchor> anchor;
-    bool unread = false;
     std::vector<SnapshotBlock> blocks;
     std::vector<std::string> visible_text;
     SnapshotCursor cursor;

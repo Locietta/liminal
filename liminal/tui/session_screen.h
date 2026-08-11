@@ -189,7 +189,6 @@ struct SessionScreen {
     std::optional<std::string> transient_status;
     std::optional<ViewportAnchor> anchor;
     std::optional<SelectionState> selection;
-    bool unread = false;
     bool external_editor_active = false;
     SessionState state = SessionState::EDITING;
     std::chrono::steady_clock::time_point turn_started_at;

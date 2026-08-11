@@ -65,6 +65,12 @@ std::string_view name(Style style) {
         case Style::DIFF_HUNK: return "diff_hunk";
         case Style::FAILURE: return "failure";
         case Style::COMPOSER: return "composer";
+        case Style::WORKING_BASE: return "working_base";
+        case Style::WORKING_LOW: return "working_low";
+        case Style::WORKING_MEDIUM: return "working_medium";
+        case Style::WORKING_HIGH: return "working_high";
+        case Style::WORKING_BRIGHT: return "working_bright";
+        case Style::WORKING_PEAK: return "working_peak";
         case Style::FOOTER_MODEL: return "footer_model";
         case Style::FOOTER_WORKSPACE: return "footer_workspace";
         case Style::FOOTER_CONTEXT: return "footer_context";
@@ -242,7 +248,6 @@ HeadlessSnapshot HeadlessSession::inspect() const {
                               .effort = screen.effort,
                               .composer_text = screen.composer.text,
                               .composer_cursor = screen.composer.cursor,
-                              .unread = screen.unread,
                               .cursor = {.row = frame.cursor.row, .column = frame.cursor.column, .visible = frame.cursor.visible},
                               .layout = projected_screen.layout_diagnostics(),
                               .ansi_operations = {}};

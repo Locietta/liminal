@@ -159,6 +159,13 @@ void check_surface_cells_and_encoding() {
                 encoded_footer.contains("\x1b[22;38;2;250;179;135mF") && encoded_footer.contains("\x1b[22;38;2;137;180;250mF"),
             "footer metadata fields must encode four distinct high-luminance colors");
 
+    tui::Frame shimmer_palette{.surface = tui::Surface(2, 1)};
+    shimmer_palette.surface.write(0, 0, "S", tui::Style::WORKING_BASE);
+    shimmer_palette.surface.write(0, 1, "S", tui::Style::WORKING_PEAK);
+    const auto encoded_shimmer = tui::encode_frame(shimmer_palette);
+    require(encoded_shimmer.contains("\x1b[22;38;2;108;112;134mS") && encoded_shimmer.contains("\x1b[22;38;2;205;214;244mS"),
+            "working shimmer endpoints must encode a visible neutral brightness range");
+
     tui::Frame composer{.surface = tui::Surface(4, 1)};
     composer.surface.fill_row(0, tui::Style::COMPOSER);
     composer.surface.write(0, 0, ">", tui::Style::COMPOSER);
@@ -600,7 +607,7 @@ void check_copy_command_and_status() {
             "external-editor guidance must take priority over a copy confirmation");
 }
 
-void check_scroll_resize_and_unread_state() {
+void check_scroll_resize_state() {
     tui::SessionScreen screen;
     screen.resize({18, 8});
     screen.set_model("test-model", std::optional<std::string>("high"));
@@ -621,23 +628,24 @@ void check_scroll_resize_and_unread_state() {
     require(screen.anchor.has_value(), "PageUp must establish a semantic viewport anchor");
     const auto original_anchor = *screen.anchor;
     const auto history = screen.frame();
-    require(frame_text(history).contains("history"), "browsing state must be visible");
+    require(history.surface.row_text(7).starts_with("test-model high"), "scrolling back must preserve normal footer metadata");
     require(!frame_text(history).contains("line-8"), "PageUp must move away from the transcript tail");
 
     screen.apply(SessionNotice{.text = "line-9"});
     require(screen.anchor == original_anchor, "new output must preserve a browsing anchor");
-    require(screen.unread, "new output while browsing must set the unread indicator");
+    require(screen.frame().surface.row_text(7).starts_with("test-model high"),
+            "new output while browsing must not replace footer metadata");
 
     screen.resize({10, 8});
     require(screen.anchor == original_anchor, "resize must preserve the semantic source anchor");
     const auto resized = screen.frame();
-    require(resized.surface.row_text(7).starts_with("history"), "resize must deterministically reflow browsing status");
+    require(resized.surface.row_text(7).starts_with("test-model"), "resize must deterministically retain footer metadata");
     require(tui::encode_frame(resized) == tui::encode_frame(screen.frame()), "unchanged state must produce an identical frame");
     const auto diagnostics = screen.layout_diagnostics();
     require(diagnostics.cache_hits > 0 && diagnostics.cached_blocks > 0, "repeated frames must reuse stable block layout");
 
     screen.follow_tail();
-    require(!screen.anchor && !screen.unread, "returning to tail must clear browsing and unread state");
+    require(!screen.anchor, "returning to tail must clear the browsing anchor");
     require(frame_text(screen.frame()).contains("line-9"), "returning to tail must reveal the newest output");
 }
 
@@ -656,17 +664,25 @@ void check_working_indicator() {
     require(waiting.surface.row_text(1) == "you: go" && waiting.surface.row_text(2).empty() &&
                 waiting.surface.row_text(3).contains("Thinking…"),
             "a waiting turn must show the status one blank line below the newest output");
-    const auto dot_style = [&screen] {
+    const auto status_styles = [&screen] {
         const auto frame = screen.frame();
-        return frame.surface.cells[static_cast<usize>(3 * frame.surface.columns)].style;
+        std::vector<tui::Style> styles;
+        for (i32 column = 0; column < tui::text_width("• Thinking…"); ++column) {
+            styles.push_back(frame.surface.cells[static_cast<usize>(3 * frame.surface.columns + column)].style);
+        }
+        return styles;
     };
-    require(dot_style() == tui::Style::MUTED, "the working dot must start at its dim pulse phase");
-    now += std::chrono::milliseconds(200);
-    require(dot_style() == tui::Style::NORMAL, "the working dot must brighten as the pulse advances");
-    now += std::chrono::milliseconds(200);
-    require(dot_style() == tui::Style::EMPHASIS && screen.frame().surface.row_text(3).contains("Thinking…"),
-            "the pulse must peak at bold intensity without disturbing the state label");
-    now += std::chrono::seconds(3);
+    const auto initial_styles = status_styles();
+    require(std::ranges::all_of(initial_styles, [](tui::Style style) { return style == tui::Style::WORKING_BASE; }),
+            "the working shimmer must begin at its base brightness");
+    now += std::chrono::milliseconds(900);
+    const auto highlighted_styles = status_styles();
+    require(highlighted_styles[2] != tui::Style::WORKING_BASE &&
+                std::ranges::any_of(highlighted_styles, [](tui::Style style) { return style == tui::Style::WORKING_PEAK; }),
+            "the shimmer highlight must travel across the state text, not only the dot");
+    now += std::chrono::milliseconds(100);
+    require(status_styles() != highlighted_styles, "the full-label shimmer must advance on each 100ms animation frame");
+    now += std::chrono::seconds(2);
     require(frame_text(screen.frame()).contains("(3s)"), "long waits must add a muted elapsed suffix");
 
     screen.apply(AssistantTextDelta{.text = "hi"});
@@ -854,7 +870,7 @@ i32 run_all(std::string_view executable) {
     check_external_editor_round_trip(executable);
     check_clipboard_helper();
     check_copy_command_and_status();
-    check_scroll_resize_and_unread_state();
+    check_scroll_resize_state();
     check_working_indicator();
     check_mouse_selection();
     check_headless_virtual_time_and_snapshots();

@@ -43,6 +43,12 @@ std::string_view style_sequence(Style style) {
         case Style::DIFF_HUNK: return "\x1b[1;38;2;116;199;236m";
         case Style::FAILURE: return "\x1b[31m";
         case Style::COMPOSER: return "\x1b[22;39;48;2;38;38;38m";
+        case Style::WORKING_BASE: return "\x1b[22;38;2;108;112;134m";
+        case Style::WORKING_LOW: return "\x1b[22;38;2;127;132;156m";
+        case Style::WORKING_MEDIUM: return "\x1b[22;38;2;147;153;178m";
+        case Style::WORKING_HIGH: return "\x1b[22;38;2;166;173;200m";
+        case Style::WORKING_BRIGHT: return "\x1b[22;38;2;186;194;222m";
+        case Style::WORKING_PEAK: return "\x1b[22;38;2;205;214;244m";
         case Style::FOOTER_MODEL: return "\x1b[22;38;2;249;226;175m";
         case Style::FOOTER_WORKSPACE: return "\x1b[22;38;2;166;227;161m";
         case Style::FOOTER_CONTEXT: return "\x1b[22;38;2;250;179;135m";

@@ -248,9 +248,9 @@ def check_conpty_terminal_session(tmp_path, base_url):
         process.write(b"\x1b[B")
         read_conpty_until_fresh(process, output, PROMPT_MARKER, 5)
         process.write(b"\x1b[<64;1;1M")
-        read_conpty_until_fresh(process, output, b"history", 5)
+        read_conpty_until_fresh(process, output, b"extra-model-6", 5)
         process.write(b"\x1b[<65;1;1M")
-        read_conpty_until_fresh(process, output, b"test-model", 5)
+        read_conpty_until_fresh(process, output, b"select with /model", 5)
 
         process.write(b"\x1b[200~a\nb\x1b[201~")
         read_conpty_until(process, output, PROMPT_MARKER + b" a", 5)
