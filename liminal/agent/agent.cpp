@@ -116,20 +116,15 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
         .on_text_delta = [&events](std::string_view text) { emit(events, AssistantTextDelta{.text = std::string(text)}); },
     };
 
-    constexpr i32 k_max_iterations = 32;
-    usize tool_calls_used = 0;
     bool automatically_compacted = false;
     lighter::Semaphore tool_slots(static_cast<isize>(tools->policy.max_parallel_calls));
-    for (i32 iteration = 0; iteration < k_max_iterations; ++iteration) {
+    while (true) {
         context::ContextBuilder builder;
         auto built = builder.build(instructions, staged, context_budget(model.entry));
         if (!built) {
             co_await fail(std::move(built).error());
         }
         if (needs_automatic_compaction(*built)) {
-            if (automatically_compacted) {
-                co_await fail(Error::protocol("context reached the automatic compaction threshold again after automatic compaction"));
-            }
             auto full = builder.build(instructions, staged);
             if (!full) {
                 co_await fail(std::move(full).error());
@@ -151,8 +146,8 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
             if (!built) {
                 co_await fail(std::move(built).error());
             }
-            if (built->omitted_budget_entries != 0) {
-                co_await fail(Error::protocol("automatic compaction did not reduce context below the model input budget"));
+            if (needs_automatic_compaction(*built)) {
+                co_await fail(Error::protocol("automatic compaction did not reduce context below its threshold"));
             }
         }
         auto response = co_await model.handle->complete(built->provider_history, tools->definitions(), stream).or_fail();
@@ -178,11 +173,6 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
         if (calls.empty()) {
             co_await fail(Error::protocol("provider requested tool results without any tool calls"));
         }
-        if (calls.size() > tools->policy.max_calls_per_turn - tool_calls_used) {
-            co_await fail(
-                Error::tool("tool call budget exceeded (maximum " + std::to_string(tools->policy.max_calls_per_turn) + " per turn)"));
-        }
-        tool_calls_used += calls.size();
 
         std::vector<Task<provider::ToolResult>> pending;
         pending.reserve(calls.size());
@@ -206,7 +196,6 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
         }
         staged.append(session::ToolResults{.results = std::move(results)});
     }
-    co_await fail(Error::protocol("exceeded " + std::to_string(k_max_iterations) + " tool iterations in one turn"));
 }
 
 Task<void, Error> Agent::compact(std::string_view instructions) {

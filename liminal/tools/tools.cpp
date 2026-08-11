@@ -29,7 +29,6 @@ namespace {
 
 constexpr usize k_file_limit = 128 * 1024;
 constexpr usize k_max_parallel_call_limit = 32;
-constexpr usize k_max_turn_call_limit = 256;
 constexpr usize k_max_call_summary_bytes = 2 * 1024;
 constexpr usize k_max_preview_line_bytes = 240;
 constexpr usize k_max_preview_lines = 4;
@@ -320,10 +319,6 @@ Result<ToolPolicy> load_tool_policy() {
     auto parallel = parse_bounded_environment<usize>("LIMINAL_MAX_PARALLEL_TOOLS", policy.max_parallel_calls, 1, k_max_parallel_call_limit);
     if (!parallel) return outcome_error(std::move(parallel).error());
     policy.max_parallel_calls = *parallel;
-
-    auto per_turn = parse_bounded_environment<usize>("LIMINAL_MAX_TOOLS_PER_TURN", policy.max_calls_per_turn, 1, k_max_turn_call_limit);
-    if (!per_turn) return outcome_error(std::move(per_turn).error());
-    policy.max_calls_per_turn = *per_turn;
     return policy;
 }
 

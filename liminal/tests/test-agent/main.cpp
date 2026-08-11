@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -39,6 +41,19 @@ std::vector<context::InstructionSource> compact_test_instructions() {
         .origin = "test:compact",
         .content = "test policy",
     }};
+}
+
+std::shared_ptr<usize> register_noop_tool(ToolSet &tools) {
+    auto executions = std::make_shared<usize>(0);
+    auto registered = tools.register_tool({
+        .definition = {.name = "test_noop", .description = "Test no-op"},
+        .execute = [executions](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
+            ++*executions;
+            co_return provider::ToolResult{.call_id = call.id, .content = "ok"};
+        },
+    });
+    require(registered.has_value(), "failed to register the test no-op tool");
+    return executions;
 }
 
 void test_successful_turn() {
@@ -151,23 +166,27 @@ void test_successful_turn() {
     provider_mock.verify();
 }
 
-void test_tool_call_budget() {
-    ToolPolicy policy{.max_calls_per_turn = 1};
-    ToolSet tools(std::filesystem::current_path(), policy);
+void test_long_tool_loop() {
+    constexpr usize k_tool_calls = 40;
+    ToolSet tools(std::filesystem::current_path());
+    auto tool_executions = register_noop_tool(tools);
+    auto completions = std::make_shared<usize>(0);
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
-    provider_mock.expect<provider::CompleteDispatch>().calls(
-        [](const provider::History &, const std::vector<provider::ToolDefinition> &,
-           const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
-            provider::TurnResponse response{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
-            for (usize index = 0; index < 2; ++index) {
-                response.parts.push_back(provider::ToolCall{
-                    .id = "call-" + std::to_string(index),
-                    .name = "read_file",
-                    .input = read_file_input(),
-                });
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([completions](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                             const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+            const auto completion = (*completions)++;
+            if (completion == k_tool_calls) {
+                co_return provider::TurnResponse{.parts = {provider::TextPart{.text = "done"}}, .stop = provider::StopKind::DONE};
             }
+            provider::TurnResponse response{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+            response.parts.push_back(provider::ToolCall{
+                .id = "call-" + std::to_string(completion),
+                .name = "test_noop",
+            });
             co_return response;
-        });
+        })
+        .times(k_tool_calls + 1);
     provider_mock.expect<provider::CompactDispatch>().never();
     model::Choice choice{
         .handle = provider_mock.handle(),
@@ -176,14 +195,13 @@ void test_tool_call_budget() {
     Agent agent(std::move(choice), tools);
 
     lighter::EventLoop loop;
-    auto task = agent.run_turn("too many tools", {});
+    auto task = agent.run_turn("keep working", {});
     loop.schedule(task);
     loop.run();
-    auto outcome = task.result();
 
-    require(outcome.has_error() && outcome.error().kind == ErrorKind::TOOL && outcome.error().detail.contains("budget exceeded"),
-            "an over-budget provider response must fail before executing tools");
-    require(agent.session.entries.empty(), "an over-budget turn must not commit session entries");
+    require(task.result().has_value(), "a productive tool loop longer than 32 iterations failed");
+    require(*tool_executions == k_tool_calls, "the long-running turn did not execute every requested tool");
+    require(agent.session.entries.size() == 2 * k_tool_calls + 2, "the long-running turn did not commit its complete history");
     provider_mock.verify();
 }
 
@@ -231,6 +249,64 @@ void test_automatic_compaction() {
     require(agent.session.entries.size() == 5 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
                 std::holds_alternative<session::AgentOutput>(agent.session.entries[4].payload),
             "automatic compaction did not commit a semantic checkpoint with the turn");
+    provider_mock.verify();
+}
+
+void test_multiple_automatic_compactions_in_one_turn() {
+    ToolSet tools(std::filesystem::current_path());
+    auto tool_executions = register_noop_tool(tools);
+    auto compactions = std::make_shared<usize>(0);
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompactDispatch>()
+        .calls([compactions](provider::History &history, std::string_view) -> lighter::Task<void, Error> {
+            const auto instruction_count = provider::instruction_prefix_size(history);
+            history.resize(instruction_count);
+            provider::append_user(history, "SUMMARY " + std::to_string(++*compactions));
+            co_return;
+        })
+        .times(2);
+    auto completions = std::make_shared<usize>(0);
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([completions](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                             const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+            const auto completion = (*completions)++;
+            require(history.size() == 2 && history[0].role == provider::Role::DEVELOPER && history[1].role == provider::Role::USER,
+                    "completion did not use the latest automatic checkpoint");
+            require(std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY " + std::to_string(completion + 1),
+                    "completion used the wrong automatic checkpoint");
+            if (completion == 0) {
+                provider::TurnResponse response{
+                    .stop = provider::StopKind::NEEDS_TOOL_RESULTS,
+                    .usage = {.input_tokens = 1'800, .output_tokens = 10, .context_tokens = 1'810},
+                };
+                response.parts.push_back(provider::ToolCall{.id = "call", .name = "test_noop"});
+                co_return response;
+            }
+            co_return provider::TurnResponse{.parts = {provider::TextPart{.text = "done"}}, .stop = provider::StopKind::DONE};
+        })
+        .times(2);
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 2'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    agent.session.append(session::UserMessage{.text = std::string(4'000, 'u')});
+    agent.session.append(session::AgentOutput{.parts = {provider::TextPart{.text = std::string(4'000, 'a')}}});
+
+    std::vector<Event> events;
+    lighter::EventLoop loop;
+    auto task = agent.run_turn("latest", [&events](const Event &event) { events.push_back(event); });
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "a turn requiring multiple automatic compactions failed");
+    require(*compactions == 2, "the long-running turn did not compact as often as needed");
+    require(*tool_executions == 1, "the compacted turn did not execute its tool call");
+    require(agent.session.entries.size() == 8 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
+                std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[6].payload),
+            "the turn did not commit both automatic checkpoints");
+    require(std::ranges::count_if(events, [](const Event &event) { return std::holds_alternative<SessionNotice>(event); }) == 1,
+            "multiple automatic compactions must emit one committed-turn notice");
     provider_mock.verify();
 }
 
@@ -346,8 +422,9 @@ void test_context_manifest() {
 
 i32 run_all() {
     test_successful_turn();
-    test_tool_call_budget();
+    test_long_tool_loop();
     test_automatic_compaction();
+    test_multiple_automatic_compactions_in_one_turn();
     test_proactive_compaction_uses_reported_context();
     test_failed_turn_does_not_report_staged_compaction();
     test_context_manifest();

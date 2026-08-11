@@ -24,10 +24,9 @@ using ExecSessionManagerPtr = std::unique_ptr<ExecSessionManager, ExecSessionMan
 
 struct ToolPolicy {
     lighter::usize max_parallel_calls = 4;
-    lighter::usize max_calls_per_turn = 32;
 };
 
-/// Load resource limits for built-in tools.
+/// Load the concurrency policy for built-in tools.
 Result<ToolPolicy> load_tool_policy();
 
 /// Bounded, user-facing data for the built-in tool lifecycle. Commands remain
