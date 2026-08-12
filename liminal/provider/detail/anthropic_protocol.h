@@ -19,7 +19,7 @@ Result<std::string> encode_complete_request(const provider::History &history, co
 
 /// Decode an already framed sequence of Anthropic server-sent events.
 /// Network chunk framing is tested independently by lighter::http::sse.
-Result<provider::TurnResponse> decode_stream(std::span<const lighter::http::sse::Event> events,
-                                             const provider::StreamCallbacks &callbacks = {}, std::string request_id = {});
+Result<provider::ProviderCallCompletion> decode_stream(std::span<const lighter::http::sse::Event> events,
+                                                       const provider::StreamCallbacks &callbacks = {}, std::string request_id = {});
 
 } // namespace liminal::anthropic::protocol

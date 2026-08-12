@@ -66,6 +66,7 @@ void test_request_encoding() {
                     .input = object(R"({"path":"README.md"})"),
                 },
             },
+        .phase = provider::MessagePhase::COMMENTARY,
     });
     provider::append_tool_results(history, {{.call_id = "call_1", .content = "Liminal"}});
     std::vector<provider::ToolDefinition> tools{{
@@ -88,7 +89,8 @@ void test_request_encoding() {
             "system instructions must be lifted into the top-level field the Codex backend accepts");
     require(encoded->contains(R"("role":"developer")") && encoded->contains("Test developer policy."),
             "developer instruction was not encoded explicitly");
-    require(encoded->contains(R"("role":"assistant","content":[{"type":"output_text","text":"I will inspect."}])"),
+    require(encoded->contains(R"("role":"assistant","content":[{"type":"output_text","text":"I will inspect."}])") &&
+                encoded->contains(R"("phase":"commentary")"),
             "generated text was not encoded as assistant output");
     require(encoded->contains(R"("encrypted_content":"encrypted-reasoning")"), "encrypted reasoning was not replayed");
     require(encoded->contains(R"("type":"function_call_output","call_id":"call_1","output":"Liminal")"), "tool result was not replayed");
@@ -120,18 +122,24 @@ void test_web_search_decoding_citations_and_replay() {
              R"({"response":{"id":"resp_web","model":"manual-model","status":"completed","usage":{"input_tokens":8,"output_tokens":6}}})"},
     };
     std::string streamed;
-    auto decoded =
-        openai::protocol::decode_stream(events, {.on_text_delta = [&streamed](std::string_view text) { streamed += text; }}, "req_web");
-    require(decoded && decoded->stop == provider::StopKind::DONE && decoded->parts.size() == 2,
+    std::vector<provider::OutputItem> outputs;
+    std::vector<provider::OutputItemHeader> started;
+    provider::StreamCallbacks callbacks{
+        .on_item_started = [&started](const provider::OutputItemHeader &item) { started.push_back(item); },
+        .on_assistant_text_delta = [&streamed](const provider::OutputItemId &, std::string_view text) { streamed += text; },
+        .on_item_completed = [&outputs](const provider::OutputItem &item) { outputs.push_back(item); },
+    };
+    auto decoded = openai::protocol::decode_stream(events, callbacks, "req_web");
+    require(decoded && decoded->stop == provider::StopKind::DONE && outputs.size() == 2 && started.size() == outputs.size(),
             "OpenAI hosted web search response did not decode as a completed turn");
-    const auto *search = std::get_if<provider::OpaquePart>(&decoded->parts[0]);
-    const auto *text = std::get_if<provider::TextPart>(&decoded->parts[1]);
-    require(search && search->payload.contains("Liminal CLI"), "web search call was not retained for replay");
-    require(text && text->text.contains("[Liminal docs](https://example.com/liminal)"), "URL citation was not retained in text");
+    const auto *search = std::get_if<provider::ProviderOpaqueItem>(&outputs[0]);
+    const auto *text = std::get_if<provider::AssistantMessageItem>(&outputs[1]);
+    require(search && search->part.payload.contains("Liminal CLI"), "web search call was not retained for replay");
+    require(text && text->parts[0].text.contains("[Liminal docs](https://example.com/liminal)"), "URL citation was not retained in text");
     require(streamed.contains("Source: [Liminal docs](https://example.com/liminal)"), "streamed citation was not surfaced live");
 
     auto history = base_history();
-    provider::append_response(history, *decoded);
+    for (const auto &output : outputs) provider::append_output_item(history, output);
     auto replayed = openai::protocol::encode_complete_request(history, {}, options());
     require(replayed && replayed->contains(R"("type":"web_search_call")") && replayed->contains("Liminal CLI"),
             "web search call did not replay into the next request");
@@ -147,7 +155,7 @@ void test_stream_decoding_and_replay() {
         {.event = "response.output_text.delta", .data = R"({"delta":"Let me inspect."})"},
         {.event = "response.output_item.done",
          .data =
-             R"({"output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Let me inspect."}]}})"},
+             R"({"output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Let me inspect."}]}})"},
         {.event = "response.output_item.done",
          .data =
              R"({"output_index":2,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"README.md\"}","status":"completed"}})"},
@@ -156,7 +164,13 @@ void test_stream_decoding_and_replay() {
              R"({"response":{"id":"resp_1","model":"manual-model","status":"completed","usage":{"input_tokens":20,"output_tokens":15,"total_tokens":36,"input_tokens_details":{"cached_tokens":4},"output_tokens_details":{"reasoning_tokens":5}}}})"},
     };
     std::string streamed;
-    provider::StreamCallbacks callbacks{.on_text_delta = [&streamed](std::string_view text) { streamed += text; }};
+    std::vector<provider::OutputItem> outputs;
+    std::vector<provider::OutputItemHeader> started;
+    provider::StreamCallbacks callbacks{
+        .on_item_started = [&started](const provider::OutputItemHeader &item) { started.push_back(item); },
+        .on_assistant_text_delta = [&streamed](const provider::OutputItemId &, std::string_view text) { streamed += text; },
+        .on_item_completed = [&outputs](const provider::OutputItem &item) { outputs.push_back(item); },
+    };
 
     auto decoded = openai::protocol::decode_stream(events, callbacks, "req_tools");
     require(decoded.has_value(), "failed to decode OpenAI event stream");
@@ -166,15 +180,18 @@ void test_stream_decoding_and_replay() {
     require(decoded->usage.input_tokens == 20 && decoded->usage.output_tokens == 15, "usage totals were not decoded");
     require(decoded->usage.cache_read_tokens == 4 && decoded->usage.reasoning_tokens == 5, "usage details were not decoded");
     require(decoded->usage.context_tokens == 36, "provider-reported context usage was not normalized");
-    require(decoded->parts.size() == 3, "decoded response has the wrong part count");
+    require(outputs.size() == 3 && started.size() == outputs.size(), "decoded response has the wrong output item lifecycle");
 
-    const auto *opaque = std::get_if<provider::OpaquePart>(&decoded->parts[0]);
-    const auto *call = std::get_if<provider::ToolCall>(&decoded->parts[2]);
-    require(opaque && opaque->payload.contains("encrypted-reasoning"), "encrypted reasoning was not retained opaquely");
-    require(call && call->id == "call_1" && call->name == "read_file", "function call was not decoded");
+    const auto *opaque = std::get_if<provider::ProviderOpaqueItem>(&outputs[0]);
+    const auto *message = std::get_if<provider::AssistantMessageItem>(&outputs[1]);
+    const auto *call = std::get_if<provider::ToolCallItem>(&outputs[2]);
+    require(opaque && opaque->part.payload.contains("encrypted-reasoning"), "encrypted reasoning was not retained opaquely");
+    require(opaque->id.value == "rs_1" && message && message->id.value == "msg_1" && message->phase == provider::MessagePhase::COMMENTARY,
+            "output item identity or message phase was not preserved");
+    require(call && call->call.id == "call_1" && call->call.name == "read_file", "function call was not decoded");
 
     auto history = base_history();
-    provider::append_response(history, *decoded);
+    for (const auto &output : outputs) provider::append_output_item(history, output);
     provider::append_tool_results(history, {{.call_id = "call_1", .content = "Liminal"}});
     auto replayed = openai::protocol::encode_complete_request(history, {}, options());
     require(replayed && replayed->contains(R"("encrypted_content":"encrypted-reasoning")"),
@@ -201,13 +218,13 @@ void test_completion_retry_is_scriptable() {
     usize stream_calls = 0;
     provider::detail::CompletionAttempts attempts{
         .stream = [&stream_calls](const std::string &body, const provider::StreamCallbacks &,
-                                  bool &) -> lighter::Task<provider::TurnResponse, Error> {
+                                  bool &) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             ++stream_calls;
             if (stream_calls == 1) {
                 co_await lighter::fail(Error::http_status(429, "rate_limit_error", "slow down", "req_1", 7ms));
             }
             require(body == "encoded request", "retry changed the request body");
-            co_return provider::TurnResponse{.stop = provider::StopKind::DONE, .model = "test-model"};
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE, .model = "test-model"};
         },
         .sleep = [](std::chrono::milliseconds delay) -> lighter::Task<> {
             require(delay == 7ms, "retry-after delay was not honored");
@@ -228,8 +245,8 @@ void test_completion_does_not_retry_visible_output() {
     usize sleep_calls = 0;
     provider::detail::CompletionAttempts attempts{
         .stream = [](const std::string &, const provider::StreamCallbacks &,
-                     bool &text_emitted) -> lighter::Task<provider::TurnResponse, Error> {
-            text_emitted = true;
+                     bool &output_emitted) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            output_emitted = true;
             co_await lighter::fail(Error::http_status(500, "server_error", "failed after text", "req_1"));
         },
         .sleep = [&sleep_calls](std::chrono::milliseconds) -> lighter::Task<> {

@@ -25,7 +25,7 @@ Result<std::string> encode_compact_request(const provider::History &conversation
 
 /// Decode an already framed sequence of Responses API server-sent events.
 /// Network chunk framing is tested independently by lighter::http::sse.
-Result<provider::TurnResponse> decode_stream(std::span<const lighter::http::sse::Event> events,
-                                             const provider::StreamCallbacks &callbacks = {}, std::string request_id = {});
+Result<provider::ProviderCallCompletion> decode_stream(std::span<const lighter::http::sse::Event> events,
+                                                       const provider::StreamCallbacks &callbacks = {}, std::string request_id = {});
 
 } // namespace liminal::openai::protocol

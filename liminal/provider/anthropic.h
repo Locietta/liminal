@@ -41,9 +41,9 @@ struct Client {
     /// Streams one Messages API call to completion, invoking callbacks live.
     /// Retries transport/429/5xx failures with backoff, but only while no
     /// text has been surfaced through the callbacks.
-    lighter::Task<provider::TurnResponse, Error> complete(const provider::History &history,
-                                                          const std::vector<provider::ToolDefinition> &tools,
-                                                          const provider::StreamCallbacks &callbacks);
+    lighter::Task<provider::ProviderCallCompletion, Error> complete(const provider::History &history,
+                                                                    const std::vector<provider::ToolDefinition> &tools,
+                                                                    const provider::StreamCallbacks &callbacks);
 
     /// Anthropic has no remote compaction endpoint; summarizes locally
     /// through complete() (provider/compact.h).

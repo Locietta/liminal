@@ -275,7 +275,13 @@ Result<WireHistory> to_wire(const provider::History &history) {
         // An item whose parts were all foreign opaques would serialize as an
         // empty message, which the API rejects; skip it entirely.
         if (!message.content.empty()) {
-            serialized.messages.push_back(std::move(message));
+            if (message.role == "assistant" && !serialized.messages.empty() && serialized.messages.back().role == message.role) {
+                auto &content = serialized.messages.back().content;
+                content.insert(content.end(), std::make_move_iterator(message.content.begin()),
+                               std::make_move_iterator(message.content.end()));
+            } else {
+                serialized.messages.push_back(std::move(message));
+            }
         }
     }
     if (!system.empty()) serialized.system = std::move(system);
@@ -301,12 +307,10 @@ provider::StopKind to_stop_kind(std::string_view stop_reason) {
     return provider::StopKind::OTHER;
 }
 
-/// Wire response -> neutral TurnResponse. Thinking blocks become opaque
-/// parts so they replay bit-exact (signatures must not be re-encoded).
-Result<provider::TurnResponse> to_turn_response(wire::AssistantMessage message) {
+provider::ProviderCallCompletion to_call_completion(wire::AssistantMessage message) {
     const auto context_tokens = message.usage.input_tokens + message.usage.output_tokens + message.usage.cache_read_input_tokens +
                                 message.usage.cache_creation_input_tokens;
-    provider::TurnResponse response{
+    return {
         .stop = to_stop_kind(message.stop_reason),
         .stop_detail = std::move(message.stop_reason),
         .usage = {.input_tokens = message.usage.input_tokens,
@@ -317,36 +321,29 @@ Result<provider::TurnResponse> to_turn_response(wire::AssistantMessage message) 
         .model = std::move(message.model),
         .request_id = std::move(message.request_id),
     };
-    response.parts.reserve(message.content.size());
+}
 
-    for (auto &block : message.content) {
-        if (auto *text = std::get_if<wire::TextBlock>(&block)) {
-            response.parts.push_back(provider::TextPart{.text = cited_text(std::move(*text))});
-        } else if (auto *call = std::get_if<wire::ToolUseBlock>(&block)) {
-            response.parts.push_back(std::move(*call));
-        } else if (std::holds_alternative<wire::ThinkingBlock>(block) || std::holds_alternative<wire::RedactedThinkingBlock>(block)) {
-            auto payload = encode_opaque(std::move(block));
-            if (!payload) {
-                return outcome_error(std::move(payload).error());
-            }
-            response.parts.push_back(provider::OpaquePart{
-                .provider_tag = std::string(k_provider_tag),
-                .payload = *std::move(payload),
-            });
-        } else if (std::holds_alternative<wire::ServerToolUseBlock>(block) ||
-                   std::holds_alternative<wire::WebSearchToolResultBlock>(block) ||
-                   std::holds_alternative<wire::WebFetchToolResultBlock>(block)) {
-            auto payload = encode_opaque(std::move(block));
-            if (!payload) return outcome_error(std::move(payload).error());
-            response.parts.push_back(provider::OpaquePart{
-                .provider_tag = std::string(k_provider_tag),
-                .payload = *std::move(payload),
-            });
-        } else {
-            return outcome_error(Error::protocol("unexpected tool_result block in assistant response"));
-        }
+Result<provider::OutputItem> to_output_item(wire::ContentBlock block, provider::OutputItemId id) {
+    if (auto *text = std::get_if<wire::TextBlock>(&block)) {
+        return provider::OutputItem(provider::AssistantMessageItem{
+            .id = std::move(id),
+            .parts = {{.text = cited_text(std::move(*text))}},
+        });
     }
-    return response;
+    if (auto *call = std::get_if<wire::ToolUseBlock>(&block)) {
+        return provider::OutputItem(provider::ToolCallItem{.id = std::move(id), .call = std::move(*call)});
+    }
+    if (std::holds_alternative<wire::ThinkingBlock>(block) || std::holds_alternative<wire::RedactedThinkingBlock>(block) ||
+        std::holds_alternative<wire::ServerToolUseBlock>(block) || std::holds_alternative<wire::WebSearchToolResultBlock>(block) ||
+        std::holds_alternative<wire::WebFetchToolResultBlock>(block)) {
+        auto payload = encode_opaque(std::move(block));
+        if (!payload) return outcome_error(std::move(payload).error());
+        return provider::OutputItem(provider::ProviderOpaqueItem{
+            .id = std::move(id),
+            .part = {.provider_tag = std::string(k_provider_tag), .payload = *std::move(payload)},
+        });
+    }
+    return outcome_error(Error::protocol("unexpected tool_result block in assistant response"));
 }
 
 // --- SSE wire event payloads (probe shapes, all fields optional-ish) ----
@@ -469,17 +466,20 @@ struct StreamAccumulator {
 
     bool saw_message_start = false;
     bool saw_message_stop = false;
-    bool emitted_text = false;
+    bool output_emitted = false;
 
     Result<void> consume(const http::sse::Event &event, const provider::StreamCallbacks &callbacks);
     Result<wire::AssistantMessage> finish() &&;
 
 private:
     void apply_usage(const WireUsage &usage);
-    Result<void> on_block_start(const ContentBlockStartEvent &event);
+    provider::OutputItemId block_id(u64 index) const;
+    Result<void> on_block_start(const ContentBlockStartEvent &event, const provider::StreamCallbacks &callbacks);
     Result<void> on_block_delta(const ContentBlockDeltaEvent &event, const provider::StreamCallbacks &callbacks);
-    Result<void> on_block_stop(const ContentBlockStopEvent &event);
+    Result<void> on_block_stop(const ContentBlockStopEvent &event, const provider::StreamCallbacks &callbacks);
 };
+
+provider::OutputItemId StreamAccumulator::block_id(u64 index) const { return {.value = message.id + ":" + std::to_string(index)}; }
 
 void StreamAccumulator::apply_usage(const WireUsage &usage) {
     // Streaming usage is cumulative: later events overwrite, never add.
@@ -493,7 +493,7 @@ void StreamAccumulator::apply_usage(const WireUsage &usage) {
     }
 }
 
-Result<void> StreamAccumulator::on_block_start(const ContentBlockStartEvent &event) {
+Result<void> StreamAccumulator::on_block_start(const ContentBlockStartEvent &event, const provider::StreamCallbacks &callbacks) {
     auto index = static_cast<usize>(event.index);
     if (pending.size() <= index) {
         pending.resize(index + 1);
@@ -524,6 +524,13 @@ Result<void> StreamAccumulator::on_block_start(const ContentBlockStartEvent &eve
     } else {
         return outcome_error(Error::protocol("unknown content block type: " + probe.type));
     }
+    output_emitted = true;
+    if (callbacks.on_item_started) {
+        const auto kind = probe.type == "text"     ? provider::OutputItemKind::ASSISTANT_MESSAGE :
+                          probe.type == "tool_use" ? provider::OutputItemKind::TOOL_CALL :
+                                                     provider::OutputItemKind::PROVIDER_OPAQUE;
+        callbacks.on_item_started({.id = block_id(event.index), .kind = kind});
+    }
     return {};
 }
 
@@ -542,9 +549,9 @@ Result<void> StreamAccumulator::on_block_delta(const ContentBlockDeltaEvent &eve
         }
         auto piece = delta.text.value_or("");
         text->text += piece;
-        emitted_text = true;
-        if (callbacks.on_text_delta && !piece.empty()) {
-            callbacks.on_text_delta(piece);
+        output_emitted = true;
+        if (callbacks.on_assistant_text_delta && !piece.empty()) {
+            callbacks.on_assistant_text_delta(block_id(event.index), piece);
         }
     } else if (delta.type == "input_json_delta") {
         if (auto *tool = std::get_if<PendingToolUse>(&block)) {
@@ -559,7 +566,9 @@ Result<void> StreamAccumulator::on_block_delta(const ContentBlockDeltaEvent &eve
         if (!text || !delta.citation) return outcome_error(Error::protocol("citations_delta for a non-text block"));
         text->citations.push_back(*delta.citation);
         auto citation = citation_markdown(*delta.citation);
-        if (citation && callbacks.on_text_delta) callbacks.on_text_delta("\n\nSource: " + *citation);
+        if (citation && callbacks.on_assistant_text_delta) {
+            callbacks.on_assistant_text_delta(block_id(event.index), "\n\nSource: " + *citation);
+        }
     } else if (delta.type == "thinking_delta") {
         auto *thinking = std::get_if<PendingThinking>(&block);
         if (!thinking) {
@@ -578,7 +587,7 @@ Result<void> StreamAccumulator::on_block_delta(const ContentBlockDeltaEvent &eve
     return {};
 }
 
-Result<void> StreamAccumulator::on_block_stop(const ContentBlockStopEvent &event) {
+Result<void> StreamAccumulator::on_block_stop(const ContentBlockStopEvent &event, const provider::StreamCallbacks &callbacks) {
     auto index = static_cast<usize>(event.index);
     if (index >= pending.size() || !pending[index]) {
         return outcome_error(Error::protocol("content_block_stop without an active block"));
@@ -632,6 +641,9 @@ Result<void> StreamAccumulator::on_block_stop(const ContentBlockStopEvent &event
                 wire::WebFetchToolResultBlock{.tool_use_id = std::move(result->tool_use_id), .content = std::move(result->content)};
         }
     }
+    auto output = to_output_item(*completed[index], block_id(event.index));
+    if (!output) return outcome_error(std::move(output).error());
+    if (callbacks.on_item_completed) callbacks.on_item_completed(*output);
     return {};
 }
 
@@ -665,7 +677,7 @@ Result<void> StreamAccumulator::consume(const http::sse::Event &event, const pro
         if (!parsed) {
             return outcome_error(std::move(parsed).error());
         }
-        return on_block_start(*parsed);
+        return on_block_start(*parsed, callbacks);
     }
     if (name == "content_block_delta") {
         auto parsed = parse_wire<ContentBlockDeltaEvent>(event.data, "content_block_delta");
@@ -679,7 +691,7 @@ Result<void> StreamAccumulator::consume(const http::sse::Event &event, const pro
         if (!parsed) {
             return outcome_error(std::move(parsed).error());
         }
-        return on_block_stop(*parsed);
+        return on_block_stop(*parsed, callbacks);
     }
     if (name == "message_delta") {
         auto parsed = parse_wire<MessageDeltaEvent>(event.data, "message_delta");
@@ -767,8 +779,9 @@ std::optional<std::chrono::milliseconds> parse_retry_after(const http::Streaming
     return std::chrono::seconds(seconds);
 }
 
-Task<wire::AssistantMessage, Error> attempt_stream(http::Client &http_client, const ClientOptions &options, const std::string &body,
-                                                   const provider::StreamCallbacks &callbacks, bool &text_emitted) {
+Task<provider::ProviderCallCompletion, Error> attempt_stream(http::Client &http_client, const ClientOptions &options,
+                                                             const std::string &body, const provider::StreamCallbacks &callbacks,
+                                                             bool &output_emitted) {
     auto request = http_client.on().post(options.base_url + "/v1/messages");
     request.header("anthropic-version", "2023-06-01").header("accept", "text/event-stream").json_text(body);
     if (!options.auth) {
@@ -819,20 +832,21 @@ Task<wire::AssistantMessage, Error> attempt_stream(http::Client &http_client, co
     while (!accumulator.saw_message_stop) {
         auto event = co_await events.next();
         if (!event) {
-            text_emitted = accumulator.emitted_text;
+            output_emitted = accumulator.output_emitted;
             co_await fail(Error::http(std::move(event).error()));
         }
         if (!*event) {
             break; // clean EOF; finish() rejects it if message_stop never came
         }
         auto consumed = accumulator.consume(**event, callbacks);
-        text_emitted = accumulator.emitted_text;
+        output_emitted = accumulator.output_emitted;
         if (!consumed) {
             co_await fail(std::move(consumed).error());
         }
     }
 
-    co_return co_await or_fail(std::move(accumulator).finish());
+    auto message = co_await or_fail(std::move(accumulator).finish());
+    co_return to_call_completion(std::move(message));
 }
 
 } // namespace
@@ -881,8 +895,8 @@ Result<std::string> encode_complete_request(const provider::History &history, co
     return *std::move(encoded);
 }
 
-Result<provider::TurnResponse> decode_stream(std::span<const http::sse::Event> events, const provider::StreamCallbacks &callbacks,
-                                             std::string request_id) {
+Result<provider::ProviderCallCompletion> decode_stream(std::span<const http::sse::Event> events, const provider::StreamCallbacks &callbacks,
+                                                       std::string request_id) {
     StreamAccumulator accumulator;
     accumulator.message.request_id = std::move(request_id);
     for (const auto &event : events) {
@@ -895,7 +909,7 @@ Result<provider::TurnResponse> decode_stream(std::span<const http::sse::Event> e
     if (!message) {
         return outcome_error(std::move(message).error());
     }
-    return to_turn_response(*std::move(message));
+    return to_call_completion(*std::move(message));
 }
 
 } // namespace protocol
@@ -906,14 +920,14 @@ Client::Client(ClientOptions options) : options(std::move(options)) {
     }
 }
 
-Task<provider::TurnResponse, Error> Client::complete(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
-                                                     const provider::StreamCallbacks &callbacks) {
+Task<provider::ProviderCallCompletion, Error> Client::complete(const provider::History &history,
+                                                               const std::vector<provider::ToolDefinition> &tools,
+                                                               const provider::StreamCallbacks &callbacks) {
     const std::string body = co_await or_fail(protocol::encode_complete_request(history, tools, options));
     provider::detail::CompletionAttempts attempts{
         .stream = [this](const std::string &request_body, const provider::StreamCallbacks &stream_callbacks,
-                         bool &text_emitted) -> Task<provider::TurnResponse, Error> {
-            auto message = co_await attempt_stream(http_client, options, request_body, stream_callbacks, text_emitted).or_fail();
-            co_return co_await or_fail(to_turn_response(std::move(message)));
+                         bool &output_emitted) -> Task<provider::ProviderCallCompletion, Error> {
+            return attempt_stream(http_client, options, request_body, stream_callbacks, output_emitted);
         },
         .sleep = [](std::chrono::milliseconds delay) { return lighter::sleep(delay); },
     };

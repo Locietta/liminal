@@ -71,16 +71,18 @@ Task<void, Error> local_compact(ProviderView provider, History &history, std::st
 
     // No tools: the summarizer must answer in text, in one shot. Empty
     // callbacks keep the summary off the live console.
-    auto response = co_await provider->complete(to_summarize, {}, {}).or_fail();
-    if (response.stop != StopKind::DONE) {
-        co_await fail(Error::protocol("compaction summary ended with " + response.stop_detail));
-    }
-
     std::string summary;
-    for (const auto &part : response.parts) {
-        if (const auto *text = std::get_if<TextPart>(&part)) {
-            summary += text->text;
-        }
+    StreamCallbacks callbacks{
+        .on_item_completed =
+            [&summary](const OutputItem &item) {
+                if (const auto *message = std::get_if<AssistantMessageItem>(&item)) {
+                    for (const auto &part : message->parts) summary += part.text;
+                }
+            },
+    };
+    auto completion = co_await provider->complete(to_summarize, {}, callbacks).or_fail();
+    if (completion.stop != StopKind::DONE) {
+        co_await fail(Error::protocol("compaction summary ended with " + completion.stop_detail));
     }
     if (summary.empty()) {
         co_await fail(Error::protocol("compaction summary contained no text"));

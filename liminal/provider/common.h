@@ -1,6 +1,5 @@
 #pragma once
 
-#include <functional>
 #include <map>
 #include <string>
 #include <string_view>
@@ -53,12 +52,6 @@ struct ToolDefinition {
     std::string name;
     std::string description;
     InputSchema input_schema;
-};
-
-struct StreamCallbacks {
-    /// Provider-neutral streamed text as it arrives; may be empty. Agent and
-    /// UI lifecycle events are intentionally outside the provider boundary.
-    std::copyable_function<void(std::string_view) const> on_text_delta;
 };
 
 } // namespace liminal::provider

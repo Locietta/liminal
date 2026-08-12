@@ -1,8 +1,10 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -46,16 +48,64 @@ struct OpaquePart {
 
 using Part = std::variant<TextPart, ToolCall, ToolResult, OpaquePart>;
 
+enum struct MessagePhase {
+    UNSPECIFIED,
+    COMMENTARY,
+    FINAL,
+};
+
 struct Item {
     Role role = Role::USER;
     std::vector<Part> parts;
+    MessagePhase phase = MessagePhase::UNSPECIFIED;
 };
 
 using History = std::vector<Item>;
 
-/// Why a completion stopped, normalized across providers. Unknown
+struct OutputItemId {
+    std::string value;
+    auto operator<=>(const OutputItemId &) const = default;
+};
+
+enum struct OutputItemKind {
+    ASSISTANT_MESSAGE,
+    TOOL_CALL,
+    PROVIDER_OPAQUE,
+};
+
+struct OutputItemHeader {
+    OutputItemId id;
+    OutputItemKind kind = OutputItemKind::PROVIDER_OPAQUE;
+    MessagePhase phase = MessagePhase::UNSPECIFIED;
+};
+
+struct AssistantMessageItem {
+    OutputItemId id;
+    std::vector<TextPart> parts;
+    MessagePhase phase = MessagePhase::UNSPECIFIED;
+};
+
+struct ToolCallItem {
+    OutputItemId id;
+    ToolCall call;
+};
+
+struct ProviderOpaqueItem {
+    OutputItemId id;
+    OpaquePart part;
+};
+
+using OutputItem = std::variant<AssistantMessageItem, ToolCallItem, ProviderOpaqueItem>;
+
+struct StreamCallbacks {
+    std::copyable_function<void(const OutputItemHeader &) const> on_item_started;
+    std::copyable_function<void(const OutputItemId &, std::string_view) const> on_assistant_text_delta;
+    std::copyable_function<void(const OutputItem &) const> on_item_completed;
+};
+
+/// Why a provider call stopped, normalized across providers. Unknown
 /// provider-native reasons map to OTHER with the raw reason in
-/// TurnResponse::stop_detail; the agent decides how to react.
+/// ProviderCallCompletion::stop_detail; the agent decides how to react.
 enum struct StopKind {
     DONE,               ///< terminal response, commit and return to the user
     NEEDS_TOOL_RESULTS, ///< model requested tool calls; continue the turn
@@ -77,9 +127,10 @@ struct Usage {
     u64 context_tokens = 0;
 };
 
-/// One assistant response, already translated to neutral parts.
-struct TurnResponse {
-    std::vector<Part> parts;
+/// Metadata returned once a provider call has finished. Completed output is
+/// delivered incrementally through StreamCallbacks instead of being batched
+/// into this value.
+struct ProviderCallCompletion {
     StopKind stop = StopKind::OTHER;
     std::string stop_detail; ///< provider-native stop reason, for diagnostics
     Usage usage;
@@ -112,8 +163,22 @@ inline void append_user(History &history, std::string prompt) {
     history.push_back({.role = Role::USER, .parts = {TextPart{.text = std::move(prompt)}}});
 }
 
-inline void append_response(History &history, TurnResponse response) {
-    history.push_back({.role = Role::ASSISTANT, .parts = std::move(response.parts)});
+inline void append_output_item(History &history, const OutputItem &output) {
+    std::visit(
+        [&history](const auto &item) {
+            using T = std::decay_t<decltype(item)>;
+            if constexpr (std::is_same_v<T, AssistantMessageItem>) {
+                Item history_item{.role = Role::ASSISTANT, .phase = item.phase};
+                history_item.parts.reserve(item.parts.size());
+                for (const auto &part : item.parts) history_item.parts.push_back(part);
+                history.push_back(std::move(history_item));
+            } else if constexpr (std::is_same_v<T, ToolCallItem>) {
+                history.push_back({.role = Role::ASSISTANT, .parts = {item.call}});
+            } else {
+                history.push_back({.role = Role::ASSISTANT, .parts = {item.part}});
+            }
+        },
+        output);
 }
 
 /// All tool results of one round travel in a single user item, in call order.
@@ -126,16 +191,6 @@ inline void append_tool_results(History &history, std::vector<ToolResult> result
     history.push_back(std::move(item));
 }
 
-inline std::vector<const ToolCall *> tool_calls(const TurnResponse &response) {
-    std::vector<const ToolCall *> calls;
-    for (const auto &part : response.parts) {
-        if (const auto *call = std::get_if<ToolCall>(&part)) {
-            calls.push_back(call);
-        }
-    }
-    return calls;
-}
-
 } // namespace liminal::provider
 
 // Tagged so semantic session payloads and provider projections can be encoded.
@@ -143,4 +198,10 @@ template <>
 struct glz::meta<liminal::provider::Part> {
     static constexpr std::string_view tag = "type";
     static constexpr auto ids = std::array{"text", "tool_call", "tool_result", "opaque"};
+};
+
+template <>
+struct glz::meta<liminal::provider::OutputItem> {
+    static constexpr std::string_view tag = "type";
+    static constexpr auto ids = std::array{"assistant_message", "tool_call", "provider_opaque"};
 };

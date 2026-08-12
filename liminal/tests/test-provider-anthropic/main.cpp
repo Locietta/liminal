@@ -116,20 +116,26 @@ void test_web_tools_decode_citations_and_replay() {
         {.event = "message_stop", .data = R"({"type":"message_stop"})"},
     };
     std::string streamed;
-    auto decoded =
-        anthropic::protocol::decode_stream(events, {.on_text_delta = [&streamed](std::string_view text) { streamed += text; }}, "req_web");
-    require(decoded && decoded->stop == provider::StopKind::DONE && decoded->parts.size() == 3,
+    std::vector<provider::OutputItem> outputs;
+    std::vector<provider::OutputItemHeader> started;
+    provider::StreamCallbacks callbacks{
+        .on_item_started = [&started](const provider::OutputItemHeader &item) { started.push_back(item); },
+        .on_assistant_text_delta = [&streamed](const provider::OutputItemId &, std::string_view text) { streamed += text; },
+        .on_item_completed = [&outputs](const provider::OutputItem &item) { outputs.push_back(item); },
+    };
+    auto decoded = anthropic::protocol::decode_stream(events, callbacks, "req_web");
+    require(decoded && decoded->stop == provider::StopKind::DONE && outputs.size() == 3 && started.size() == outputs.size(),
             "Anthropic hosted web response did not decode as a completed turn");
-    const auto *search = std::get_if<provider::OpaquePart>(&decoded->parts[0]);
-    const auto *result = std::get_if<provider::OpaquePart>(&decoded->parts[1]);
-    const auto *text = std::get_if<provider::TextPart>(&decoded->parts[2]);
-    require(search && search->payload.contains("Liminal CLI"), "server web search call was not retained");
-    require(result && result->payload.contains("encrypted-result"), "encrypted web search result was not retained");
-    require(text && text->text.contains("[Liminal docs](https://example.com/liminal)"), "web citation was not retained in text");
+    const auto *search = std::get_if<provider::ProviderOpaqueItem>(&outputs[0]);
+    const auto *result = std::get_if<provider::ProviderOpaqueItem>(&outputs[1]);
+    const auto *text = std::get_if<provider::AssistantMessageItem>(&outputs[2]);
+    require(search && search->part.payload.contains("Liminal CLI"), "server web search call was not retained");
+    require(result && result->part.payload.contains("encrypted-result"), "encrypted web search result was not retained");
+    require(text && text->parts[0].text.contains("[Liminal docs](https://example.com/liminal)"), "web citation was not retained in text");
     require(streamed.contains("Source: [Liminal docs](https://example.com/liminal)"), "streamed web citation was not surfaced live");
 
     auto history = base_history();
-    provider::append_response(history, *decoded);
+    for (const auto &output : outputs) provider::append_output_item(history, output);
     auto replayed = anthropic::protocol::encode_complete_request(history, {}, options());
     require(replayed && replayed->contains(R"("type":"server_tool_use")") && replayed->contains("encrypted-result"),
             "Anthropic server web blocks did not replay into the next request");
@@ -167,7 +173,13 @@ void test_stream_decoding_and_replay() {
         {.event = "message_stop", .data = R"({"type":"message_stop"})"},
     };
     std::string streamed;
-    provider::StreamCallbacks callbacks{.on_text_delta = [&streamed](std::string_view text) { streamed += text; }};
+    std::vector<provider::OutputItem> outputs;
+    std::vector<provider::OutputItemHeader> started;
+    provider::StreamCallbacks callbacks{
+        .on_item_started = [&started](const provider::OutputItemHeader &item) { started.push_back(item); },
+        .on_assistant_text_delta = [&streamed](const provider::OutputItemId &, std::string_view text) { streamed += text; },
+        .on_item_completed = [&outputs](const provider::OutputItem &item) { outputs.push_back(item); },
+    };
 
     auto decoded = anthropic::protocol::decode_stream(events, callbacks, "req_tools");
     require(decoded.has_value(), "failed to decode Anthropic event stream");
@@ -177,15 +189,18 @@ void test_stream_decoding_and_replay() {
     require(decoded->usage.input_tokens == 10 && decoded->usage.output_tokens == 15, "usage totals were not decoded");
     require(decoded->usage.cache_read_tokens == 3 && decoded->usage.cache_write_tokens == 2, "cache usage was not decoded");
     require(decoded->usage.context_tokens == 30, "provider-reported context usage was not normalized");
-    require(decoded->parts.size() == 3, "decoded response has the wrong part count");
+    require(outputs.size() == 3 && started.size() == outputs.size(), "decoded response has the wrong output item lifecycle");
 
-    const auto *opaque = std::get_if<provider::OpaquePart>(&decoded->parts[0]);
-    const auto *call = std::get_if<provider::ToolCall>(&decoded->parts[2]);
-    require(opaque && opaque->payload.contains("sig-abc123"), "thinking signature was not retained opaquely");
-    require(call && call->id == "toolu_1" && call->name == "read_file", "tool use was not decoded");
+    const auto *opaque = std::get_if<provider::ProviderOpaqueItem>(&outputs[0]);
+    const auto *message = std::get_if<provider::AssistantMessageItem>(&outputs[1]);
+    const auto *call = std::get_if<provider::ToolCallItem>(&outputs[2]);
+    require(opaque && opaque->part.payload.contains("sig-abc123"), "thinking signature was not retained opaquely");
+    require(opaque->id.value == "msg_1:0" && message && message->id.value == "msg_1:1",
+            "Anthropic content block identity was not preserved");
+    require(call && call->call.id == "toolu_1" && call->call.name == "read_file", "tool use was not decoded");
 
     auto history = base_history();
-    provider::append_response(history, *decoded);
+    for (const auto &output : outputs) provider::append_output_item(history, output);
     provider::append_tool_results(history, {{.call_id = "toolu_1", .content = "Liminal"}});
     auto replayed = anthropic::protocol::encode_complete_request(history, {}, options());
     require(replayed && replayed->contains(R"("thinking":"I should inspect.","signature":"sig-abc123")"),

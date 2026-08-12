@@ -48,6 +48,7 @@ struct MessageItem {
     std::string role;
     std::vector<MessageContent> content;
     std::optional<std::string> status;
+    std::optional<std::string> phase;
 };
 
 struct FunctionCallItem {
@@ -289,10 +290,14 @@ Result<WireInput> to_wire(const provider::History &history) {
         const bool assistant = item.role == provider::Role::ASSISTANT;
         const auto role = std::string(role_name(item.role));
         wire::MessageItem message{.role = role};
+        if (item.phase == provider::MessagePhase::COMMENTARY) message.phase = "commentary";
+        if (item.phase == provider::MessagePhase::FINAL) message.phase = "final_answer";
 
         auto flush_message = [&] {
             if (!message.content.empty()) {
-                items.push_back(std::exchange(message, wire::MessageItem{.role = role}));
+                auto next = wire::MessageItem{.role = role};
+                next.phase = message.phase;
+                items.push_back(std::exchange(message, std::move(next)));
             }
         };
 
@@ -333,51 +338,75 @@ Result<WireInput> to_wire(const provider::History &history) {
     return result;
 }
 
-/// Wire output items -> neutral parts of one assistant response. Reasoning
-/// and compaction items become opaque parts so encrypted content replays
-/// bit-exact; refusal text stays visible as a text part.
-Result<void> to_parts(std::vector<wire::ResponseItem> output, provider::TurnResponse &response, bool &refused) {
-    for (auto &item : output) {
-        if (auto *message = std::get_if<wire::MessageItem>(&item)) {
-            for (auto &content : message->content) {
-                if (auto *text = std::get_if<wire::OutputText>(&content)) {
-                    response.parts.push_back(provider::TextPart{.text = cited_text(std::move(*text))});
-                } else if (auto *refusal = std::get_if<wire::Refusal>(&content)) {
-                    refused = true;
-                    response.parts.push_back(provider::TextPart{.text = std::move(refusal->refusal)});
-                } else if (auto *input = std::get_if<wire::InputText>(&content)) {
-                    response.parts.push_back(provider::TextPart{.text = std::move(input->text)});
+provider::MessagePhase message_phase(const wire::MessageItem &message) {
+    if (message.phase == "commentary") return provider::MessagePhase::COMMENTARY;
+    if (message.phase == "final_answer") return provider::MessagePhase::FINAL;
+    return provider::MessagePhase::UNSPECIFIED;
+}
+
+std::string item_id(const wire::ResponseItem &item, u64 output_index) {
+    return std::visit(
+        [output_index](const auto &value) {
+            if constexpr (requires { value.id; }) {
+                using Id = std::decay_t<decltype(value.id)>;
+                if constexpr (std::is_same_v<Id, std::optional<std::string>>) {
+                    if (value.id) return *value.id;
+                } else if (!value.id.empty()) {
+                    return value.id;
                 }
             }
-        } else if (auto *function = std::get_if<wire::FunctionCallItem>(&item)) {
-            auto input = parse_wire<glz::generic>(function->arguments.empty() ? std::string_view("{}") : function->arguments,
-                                                  "function_call arguments");
-            if (!input) {
-                return outcome_error(std::move(input).error());
-            }
-            if (!input->is_object()) {
-                return outcome_error(Error::protocol("function_call arguments are not a JSON object"));
-            }
-            response.parts.push_back(provider::ToolCall{
-                .id = std::move(function->call_id),
-                .name = std::move(function->name),
-                .input = *std::move(input),
-            });
-        } else if (std::holds_alternative<wire::ReasoningItem>(item) || std::holds_alternative<wire::CompactionItem>(item) ||
-                   std::holds_alternative<wire::WebSearchCallItem>(item)) {
-            auto payload = encode_opaque(item);
-            if (!payload) {
-                return outcome_error(std::move(payload).error());
-            }
-            response.parts.push_back(provider::OpaquePart{
-                .provider_tag = std::string(k_provider_tag),
-                .payload = *std::move(payload),
-            });
-        } else {
-            return outcome_error(Error::protocol("unexpected function_call_output in model output"));
-        }
+            return "output:" + std::to_string(output_index);
+        },
+        item);
+}
+
+provider::OutputItemHeader item_header(const wire::ResponseItem &item, u64 output_index) {
+    provider::OutputItemHeader header{.id = {.value = item_id(item, output_index)}};
+    if (const auto *message = std::get_if<wire::MessageItem>(&item)) {
+        header.kind = provider::OutputItemKind::ASSISTANT_MESSAGE;
+        header.phase = message_phase(*message);
+    } else if (std::holds_alternative<wire::FunctionCallItem>(item)) {
+        header.kind = provider::OutputItemKind::TOOL_CALL;
     }
-    return {};
+    return header;
+}
+
+Result<provider::OutputItem> to_output_item(wire::ResponseItem item, u64 output_index, bool &refused) {
+    const provider::OutputItemId id{.value = item_id(item, output_index)};
+    if (auto *message = std::get_if<wire::MessageItem>(&item)) {
+        provider::AssistantMessageItem output{.id = id, .phase = message_phase(*message)};
+        for (auto &content : message->content) {
+            if (auto *text = std::get_if<wire::OutputText>(&content)) {
+                output.parts.push_back({.text = cited_text(std::move(*text))});
+            } else if (auto *refusal = std::get_if<wire::Refusal>(&content)) {
+                refused = true;
+                output.parts.push_back({.text = std::move(refusal->refusal)});
+            } else if (auto *input = std::get_if<wire::InputText>(&content)) {
+                output.parts.push_back({.text = std::move(input->text)});
+            }
+        }
+        return provider::OutputItem(std::move(output));
+    }
+    if (auto *function = std::get_if<wire::FunctionCallItem>(&item)) {
+        auto input =
+            parse_wire<glz::generic>(function->arguments.empty() ? std::string_view("{}") : function->arguments, "function_call arguments");
+        if (!input) return outcome_error(std::move(input).error());
+        if (!input->is_object()) return outcome_error(Error::protocol("function_call arguments are not a JSON object"));
+        return provider::OutputItem(provider::ToolCallItem{
+            .id = id,
+            .call = {.id = std::move(function->call_id), .name = std::move(function->name), .input = *std::move(input)},
+        });
+    }
+    if (std::holds_alternative<wire::ReasoningItem>(item) || std::holds_alternative<wire::CompactionItem>(item) ||
+        std::holds_alternative<wire::WebSearchCallItem>(item)) {
+        auto payload = encode_opaque(item);
+        if (!payload) return outcome_error(std::move(payload).error());
+        return provider::OutputItem(provider::ProviderOpaqueItem{
+            .id = id,
+            .part = {.provider_tag = std::string(k_provider_tag), .payload = *std::move(payload)},
+        });
+    }
+    return outcome_error(Error::protocol("unexpected function_call_output in model output"));
 }
 
 // --- SSE wire event payloads --------------------------------------------
@@ -391,12 +420,18 @@ struct OutputItemDoneEvent {
     glz::generic item;
 };
 
+using OutputItemAddedEvent = OutputItemDoneEvent;
+
 struct TextDeltaEvent {
     std::string delta;
+    std::optional<std::string> item_id;
+    std::optional<u64> output_index;
 };
 
 struct AnnotationAddedEvent {
     glz::generic annotation;
+    std::optional<std::string> item_id;
+    std::optional<u64> output_index;
 };
 
 struct WireInputTokenDetails {
@@ -465,29 +500,56 @@ Result<wire::ResponseItem> parse_item(const glz::generic &value) {
 // --- stream accumulator -------------------------------------------------
 
 struct StreamAccumulator {
-    provider::TurnResponse response;
+    provider::ProviderCallCompletion completion;
     std::vector<std::optional<wire::ResponseItem>> completed;
+    std::vector<bool> started;
     std::string status;
     bool saw_created = false;
     bool saw_completed = false;
-    bool emitted_text = false;
+    bool output_emitted = false;
+    bool has_calls = false;
+    bool refused = false;
 
     void apply_usage(const WireUsage &usage) {
-        if (usage.input_tokens) response.usage.input_tokens = *usage.input_tokens;
-        if (usage.output_tokens) response.usage.output_tokens = *usage.output_tokens;
-        response.usage.context_tokens =
-            usage.total_tokens.value_or(response.usage.input_tokens > std::numeric_limits<u64>::max() - response.usage.output_tokens ?
+        if (usage.input_tokens) completion.usage.input_tokens = *usage.input_tokens;
+        if (usage.output_tokens) completion.usage.output_tokens = *usage.output_tokens;
+        completion.usage.context_tokens =
+            usage.total_tokens.value_or(completion.usage.input_tokens > std::numeric_limits<u64>::max() - completion.usage.output_tokens ?
                                             std::numeric_limits<u64>::max() :
-                                            response.usage.input_tokens + response.usage.output_tokens);
+                                            completion.usage.input_tokens + completion.usage.output_tokens);
         if (usage.input_tokens_details && usage.input_tokens_details->cached_tokens) {
-            response.usage.cache_read_tokens = *usage.input_tokens_details->cached_tokens;
+            completion.usage.cache_read_tokens = *usage.input_tokens_details->cached_tokens;
         }
         if (usage.output_tokens_details && usage.output_tokens_details->reasoning_tokens) {
-            response.usage.reasoning_tokens = *usage.output_tokens_details->reasoning_tokens;
+            completion.usage.reasoning_tokens = *usage.output_tokens_details->reasoning_tokens;
         }
     }
 
-    Result<void> add_item(u64 output_index, wire::ResponseItem item) {
+    Result<void> start_item(u64 output_index, const wire::ResponseItem &item, const provider::StreamCallbacks &callbacks) {
+        const auto index = static_cast<usize>(output_index);
+        if (started.size() <= index) started.resize(index + 1);
+        if (started[index]) return {};
+        started[index] = true;
+        output_emitted = true;
+        if (callbacks.on_item_started) callbacks.on_item_started(item_header(item, output_index));
+        return {};
+    }
+
+    void start_assistant_item(u64 output_index, std::string id, const provider::StreamCallbacks &callbacks) {
+        const auto index = static_cast<usize>(output_index);
+        if (started.size() <= index) started.resize(index + 1);
+        if (started[index]) return;
+        started[index] = true;
+        output_emitted = true;
+        if (callbacks.on_item_started) {
+            callbacks.on_item_started({
+                .id = {.value = std::move(id)},
+                .kind = provider::OutputItemKind::ASSISTANT_MESSAGE,
+            });
+        }
+    }
+
+    Result<void> add_item(u64 output_index, wire::ResponseItem item, const provider::StreamCallbacks &callbacks) {
         auto index = static_cast<usize>(output_index);
         if (completed.size() <= index) {
             completed.resize(index + 1);
@@ -495,7 +557,13 @@ struct StreamAccumulator {
         if (completed[index]) {
             return outcome_error(Error::protocol("duplicate response.output_item.done index"));
         }
+        auto started_result = start_item(output_index, item, callbacks);
+        if (!started_result) return started_result;
+        has_calls = has_calls || std::holds_alternative<wire::FunctionCallItem>(item);
+        auto output = to_output_item(item, output_index, refused);
+        if (!output) return outcome_error(std::move(output).error());
         completed[index] = std::move(item);
+        if (callbacks.on_item_completed) callbacks.on_item_completed(*output);
         return {};
     }
 
@@ -513,20 +581,30 @@ struct StreamAccumulator {
                 return outcome_error(std::move(parsed).error());
             }
             saw_created = true;
-            response.model = std::move(parsed->response.model);
+            completion.model = std::move(parsed->response.model);
             return {};
         }
         if (!saw_created) {
             return outcome_error(Error::protocol("event before response.created: " + name));
+        }
+        if (name == "response.output_item.added") {
+            auto parsed = parse_wire<OutputItemAddedEvent>(event.data, name);
+            if (!parsed) return outcome_error(std::move(parsed).error());
+            auto item = parse_item(parsed->item);
+            if (!item) return outcome_error(std::move(item).error());
+            return start_item(parsed->output_index, *item, callbacks);
         }
         if (name == "response.output_text.delta" || name == "response.refusal.delta") {
             auto parsed = parse_wire<TextDeltaEvent>(event.data, name);
             if (!parsed) {
                 return outcome_error(std::move(parsed).error());
             }
-            emitted_text = true;
-            if (callbacks.on_text_delta && !parsed->delta.empty()) {
-                callbacks.on_text_delta(parsed->delta);
+            output_emitted = true;
+            const auto output_index = parsed->output_index.value_or(static_cast<u64>(completed.size()));
+            auto id = parsed->item_id.value_or("output:" + std::to_string(output_index));
+            start_assistant_item(output_index, id, callbacks);
+            if (callbacks.on_assistant_text_delta && !parsed->delta.empty()) {
+                callbacks.on_assistant_text_delta({.value = std::move(id)}, parsed->delta);
             }
             return {};
         }
@@ -534,7 +612,13 @@ struct StreamAccumulator {
             auto parsed = parse_wire<AnnotationAddedEvent>(event.data, name);
             if (!parsed) return outcome_error(std::move(parsed).error());
             auto citation = citation_markdown(parsed->annotation);
-            if (citation && callbacks.on_text_delta) callbacks.on_text_delta("\n\nSource: " + *citation);
+            const auto output_index = parsed->output_index.value_or(static_cast<u64>(completed.size()));
+            auto id = parsed->item_id.value_or("output:" + std::to_string(output_index));
+            start_assistant_item(output_index, id, callbacks);
+            if (citation && callbacks.on_assistant_text_delta) {
+                output_emitted = true;
+                callbacks.on_assistant_text_delta({.value = std::move(id)}, "\n\nSource: " + *citation);
+            }
             return {};
         }
         if (name == "response.output_item.done") {
@@ -546,7 +630,7 @@ struct StreamAccumulator {
             if (!item) {
                 return outcome_error(std::move(item).error());
             }
-            return add_item(parsed->output_index, *std::move(item));
+            return add_item(parsed->output_index, *std::move(item), callbacks);
         }
         if (name == "response.completed") {
             auto parsed = parse_wire<ResponseEvent>(event.data, name);
@@ -556,7 +640,7 @@ struct StreamAccumulator {
             if (parsed->response.status != "completed") {
                 return outcome_error(Error::protocol("response.completed carried status: " + parsed->response.status));
             }
-            if (response.model.empty()) response.model = std::move(parsed->response.model);
+            if (completion.model.empty()) completion.model = std::move(parsed->response.model);
             if (parsed->response.usage) apply_usage(*parsed->response.usage);
 
             // Non-streaming-shaped gateways may only carry output on the
@@ -567,7 +651,7 @@ struct StreamAccumulator {
                     if (!item) {
                         return outcome_error(std::move(item).error());
                     }
-                    auto added = add_item(index, *std::move(item));
+                    auto added = add_item(index, *std::move(item), callbacks);
                     if (!added) {
                         return added;
                     }
@@ -586,7 +670,7 @@ struct StreamAccumulator {
                 auto type = parsed->response.error->code.value_or(parsed->response.error->type.value_or(""));
                 bool transient = transient_api_type(type);
                 return outcome_error(
-                    Error::api(std::move(type), std::move(parsed->response.error->message), response.request_id, transient));
+                    Error::api(std::move(type), std::move(parsed->response.error->message), completion.request_id, transient));
             }
             if (parsed->response.incomplete_details) {
                 return outcome_error(Error::protocol("response incomplete: " + parsed->response.incomplete_details->reason));
@@ -600,36 +684,25 @@ struct StreamAccumulator {
             }
             auto code = parsed->code.value_or("");
             bool transient = transient_api_type(code);
-            return outcome_error(Error::api(std::move(code), std::move(parsed->message), response.request_id, transient));
+            return outcome_error(Error::api(std::move(code), std::move(parsed->message), completion.request_id, transient));
         }
         return {};
     }
 
-    Result<provider::TurnResponse> finish() && {
+    Result<provider::ProviderCallCompletion> finish() && {
         if (!saw_completed) {
             return outcome_error(Error::protocol("stream ended before response.completed"));
         }
-        std::vector<wire::ResponseItem> output;
-        output.reserve(completed.size());
         for (auto &entry : completed) {
             if (!entry) {
                 return outcome_error(Error::protocol("response output item index gap"));
             }
-            output.push_back(*std::move(entry));
         }
-
-        bool refused = false;
-        auto converted = to_parts(std::move(output), response, refused);
-        if (!converted) {
-            return outcome_error(std::move(converted).error());
-        }
-
-        bool has_calls = !provider::tool_calls(response).empty();
-        response.stop = refused   ? provider::StopKind::REFUSED :
-                        has_calls ? provider::StopKind::NEEDS_TOOL_RESULTS :
-                                    provider::StopKind::DONE;
-        response.stop_detail = std::move(status);
-        return std::move(response);
+        completion.stop = refused   ? provider::StopKind::REFUSED :
+                          has_calls ? provider::StopKind::NEEDS_TOOL_RESULTS :
+                                      provider::StopKind::DONE;
+        completion.stop_detail = std::move(status);
+        return std::move(completion);
     }
 };
 
@@ -702,8 +775,9 @@ Error parse_status_error(int status, std::string_view body, std::string request_
     return Error::http_status(status, std::move(api_type), std::move(detail), std::move(request_id), retry_after);
 }
 
-Task<provider::TurnResponse, Error> attempt_stream(http::Client &http_client, const ClientOptions &options, const std::string &body,
-                                                   const provider::StreamCallbacks &callbacks, bool &text_emitted) {
+Task<provider::ProviderCallCompletion, Error> attempt_stream(http::Client &http_client, const ClientOptions &options,
+                                                             const std::string &body, const provider::StreamCallbacks &callbacks,
+                                                             bool &output_emitted) {
     auto request = http_client.on().post(options.base_url + "/responses");
     request.header("accept", "text/event-stream").json_text(body);
     apply_auth_headers(request, co_await resolve_auth(options).or_fail());
@@ -727,18 +801,18 @@ Task<provider::TurnResponse, Error> attempt_stream(http::Client &http_client, co
 
     http::sse::EventStream events(std::move(response));
     StreamAccumulator accumulator;
-    accumulator.response.request_id = std::move(request_id);
+    accumulator.completion.request_id = std::move(request_id);
     while (!accumulator.saw_completed) {
         auto event = co_await events.next();
         if (!event) {
-            text_emitted = accumulator.emitted_text;
+            output_emitted = accumulator.output_emitted;
             co_await fail(Error::http(std::move(event).error()));
         }
         if (!*event) {
             break;
         }
         auto consumed = accumulator.consume(**event, callbacks);
-        text_emitted = accumulator.emitted_text;
+        output_emitted = accumulator.output_emitted;
         if (!consumed) {
             co_await fail(std::move(consumed).error());
         }
@@ -859,10 +933,10 @@ Result<std::string> encode_compact_request(const provider::History &conversation
     return *std::move(encoded);
 }
 
-Result<provider::TurnResponse> decode_stream(std::span<const http::sse::Event> events, const provider::StreamCallbacks &callbacks,
-                                             std::string request_id) {
+Result<provider::ProviderCallCompletion> decode_stream(std::span<const http::sse::Event> events, const provider::StreamCallbacks &callbacks,
+                                                       std::string request_id) {
     StreamAccumulator accumulator;
-    accumulator.response.request_id = std::move(request_id);
+    accumulator.completion.request_id = std::move(request_id);
     for (const auto &event : events) {
         auto consumed = accumulator.consume(event, callbacks);
         if (!consumed) {
@@ -880,13 +954,14 @@ Client::Client(ClientOptions options) : options(std::move(options)) {
     }
 }
 
-Task<provider::TurnResponse, Error> Client::complete(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
-                                                     const provider::StreamCallbacks &callbacks) {
+Task<provider::ProviderCallCompletion, Error> Client::complete(const provider::History &history,
+                                                               const std::vector<provider::ToolDefinition> &tools,
+                                                               const provider::StreamCallbacks &callbacks) {
     const std::string body = co_await or_fail(protocol::encode_complete_request(history, tools, options));
     provider::detail::CompletionAttempts attempts{
         .stream = [this](const std::string &request_body, const provider::StreamCallbacks &stream_callbacks,
-                         bool &text_emitted) -> Task<provider::TurnResponse, Error> {
-            return attempt_stream(http_client, options, request_body, stream_callbacks, text_emitted);
+                         bool &output_emitted) -> Task<provider::ProviderCallCompletion, Error> {
+            return attempt_stream(http_client, options, request_body, stream_callbacks, output_emitted);
         },
         .sleep = [](std::chrono::milliseconds delay) { return lighter::sleep(delay); },
     };

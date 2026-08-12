@@ -25,8 +25,8 @@ PRO_DEF_MEM_DISPATCH(CompactDispatch, compact);
 struct ProviderFacade
     : pro::facade_builder //
       ::add_convention<
-          CompleteDispatch, lighter::Task<TurnResponse, Error>(const History &history, const std::vector<ToolDefinition> &tools,
-                                                               const StreamCallbacks &callbacks)
+          CompleteDispatch, lighter::Task<ProviderCallCompletion, Error>(const History &history, const std::vector<ToolDefinition> &tools,
+                                                                         const StreamCallbacks &callbacks)
       >::add_convention<CompactDispatch, lighter::Task<void, Error>(History &history, std::string_view instructions)>::build {};
 
 using Provider = pro::proxy<ProviderFacade>;

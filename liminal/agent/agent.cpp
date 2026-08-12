@@ -3,6 +3,7 @@
 #include "default_instructions.h"
 
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -28,13 +29,27 @@ void emit(const EventSink &events, Event event) {
     }
 }
 
-session::AgentOutput agent_output(provider::TurnResponse response) {
-    return {
-        .parts = std::move(response.parts),
-        .usage = response.usage,
-        .model = std::move(response.model),
-        .request_id = std::move(response.request_id),
+session::AgentOutput agent_output(const std::vector<provider::OutputItem> &items, provider::ProviderCallCompletion completion) {
+    session::AgentOutput output{
+        .usage = completion.usage,
+        .model = std::move(completion.model),
+        .request_id = std::move(completion.request_id),
     };
+    for (const auto &item : items) {
+        std::visit(
+            [&output](const auto &value) {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, provider::AssistantMessageItem>) {
+                    for (const auto &part : value.parts) output.parts.push_back(part);
+                } else if constexpr (std::is_same_v<T, provider::ToolCallItem>) {
+                    output.parts.push_back(value.call);
+                } else {
+                    output.parts.push_back(value.part);
+                }
+            },
+            item);
+    }
+    return output;
 }
 
 context::ContextBudget context_budget(const model::Entry &model) {
@@ -140,10 +155,6 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
     auto staged = session;
     staged.append(session::UserMessage{.text = std::move(prompt)});
 
-    provider::StreamCallbacks stream{
-        .on_text_delta = [&events](std::string_view text) { emit(events, AssistantTextDelta{.text = std::string(text)}); },
-    };
-
     bool automatically_compacted = false;
     while (true) {
         context::ContextBuilder builder;
@@ -177,13 +188,22 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
                 co_await fail(Error::protocol("automatic compaction did not reduce context below its threshold"));
             }
         }
-        auto response = co_await model.handle->complete(built->provider_history, tools->definitions(), stream).or_fail();
-        auto calls = provider::tool_calls(response);
+        std::vector<provider::OutputItem> items;
+        provider::StreamCallbacks stream{
+            .on_assistant_text_delta = [&events](const provider::OutputItemId &,
+                                                 std::string_view text) { emit(events, AssistantTextDelta{.text = std::string(text)}); },
+            .on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); },
+        };
+        auto completion = co_await model.handle->complete(built->provider_history, tools->definitions(), stream).or_fail();
+        std::vector<const provider::ToolCall *> calls;
+        for (const auto &item : items) {
+            if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) calls.push_back(&call->call);
+        }
         emit(events, AssistantSegmentCompleted{});
 
-        switch (response.stop) {
+        switch (completion.stop) {
             case provider::StopKind::DONE:
-                staged.append(agent_output(std::move(response)));
+                staged.append(agent_output(items, std::move(completion)));
                 session = std::move(staged);
                 if (automatically_compacted) {
                     emit(events, SessionNotice{.text = "[history compacted automatically]\n"});
@@ -192,16 +212,16 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
                 co_return;
             case provider::StopKind::NEEDS_TOOL_RESULTS: break;
             case provider::StopKind::TRUNCATED:
-                co_await fail(Error::protocol("response truncated (" + response.stop_detail + "); raise max_tokens"));
+                co_await fail(Error::protocol("response truncated (" + completion.stop_detail + "); raise max_tokens"));
             case provider::StopKind::CONTEXT_EXHAUSTED: co_await fail(Error::protocol("context window exhausted; try /compact"));
             case provider::StopKind::REFUSED: co_await fail(Error::protocol("the model refused to continue this conversation"));
-            case provider::StopKind::OTHER: co_await fail(Error::protocol("unsupported stop reason: " + response.stop_detail));
+            case provider::StopKind::OTHER: co_await fail(Error::protocol("unsupported stop reason: " + completion.stop_detail));
         }
         if (calls.empty()) {
             co_await fail(Error::protocol("provider requested tool results without any tool calls"));
         }
 
-        staged.append(agent_output(std::move(response)));
+        staged.append(agent_output(items, std::move(completion)));
         auto results = co_await execute_tools(*tools, calls, events);
         staged.append(session::ToolResults{.results = std::move(results)});
     }

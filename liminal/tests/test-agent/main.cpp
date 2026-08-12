@@ -37,6 +37,23 @@ glz::generic read_file_input() {
     return input;
 }
 
+void emit_message(const provider::StreamCallbacks &callbacks, std::string id, std::string text, bool stream = false) {
+    provider::OutputItemId item_id{.value = std::move(id)};
+    if (stream && callbacks.on_assistant_text_delta) callbacks.on_assistant_text_delta(item_id, text);
+    if (callbacks.on_item_completed) {
+        callbacks.on_item_completed(provider::AssistantMessageItem{.id = std::move(item_id), .parts = {{.text = std::move(text)}}});
+    }
+}
+
+void emit_tool_call(const provider::StreamCallbacks &callbacks, std::string id, std::string name, glz::generic input = {}) {
+    if (callbacks.on_item_completed) {
+        callbacks.on_item_completed(provider::ToolCallItem{
+            .id = {.value = "item-" + id},
+            .call = {.id = std::move(id), .name = std::move(name), .input = std::move(input)},
+        });
+    }
+}
+
 std::vector<context::InstructionSource> compact_test_instructions() {
     return {{
         .authority = context::InstructionAuthority::APPLICATION,
@@ -63,40 +80,32 @@ void test_successful_turn() {
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>()
         .then_calls([](const provider::History &history, const std::vector<provider::ToolDefinition> &,
-                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::TurnResponse, Error> {
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             require(history.size() == 3 && history[0].role == provider::Role::SYSTEM && history[1].role == provider::Role::DEVELOPER &&
                         history[2].role == provider::Role::USER,
                     "initial request used the wrong instruction or task roles");
-            callbacks.on_text_delta("checking");
-            provider::TurnResponse response{
+            emit_message(callbacks, "message-1", "checking", true);
+            emit_tool_call(callbacks, "call-1", "read_file", read_file_input());
+            co_return provider::ProviderCallCompletion{
                 .stop = provider::StopKind::NEEDS_TOOL_RESULTS,
                 .usage = {.input_tokens = 10, .output_tokens = 5},
                 .model = "fake-model",
                 .request_id = "request-1",
             };
-            response.parts.push_back(provider::TextPart{.text = "checking"});
-            response.parts.push_back(provider::ToolCall{
-                .id = "call-1",
-                .name = "read_file",
-                .input = read_file_input(),
-            });
-            co_return response;
         })
         .then_calls([](const provider::History &history, const std::vector<provider::ToolDefinition> &,
-                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::TurnResponse, Error> {
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             require(history.size() == 5 && history[0].role == provider::Role::SYSTEM && history[1].role == provider::Role::DEVELOPER &&
                         history[2].role == provider::Role::USER && history[3].role == provider::Role::ASSISTANT &&
                         history[4].role == provider::Role::USER,
                     "tool continuation used the wrong message roles");
-            callbacks.on_text_delta("done");
-            provider::TurnResponse response{
+            emit_message(callbacks, "message-2", "done", true);
+            co_return provider::ProviderCallCompletion{
                 .stop = provider::StopKind::DONE,
                 .usage = {.input_tokens = 20, .output_tokens = 3},
                 .model = "fake-model",
                 .request_id = "request-2",
             };
-            response.parts.push_back(provider::TextPart{.text = "done"});
-            co_return response;
         });
     provider_mock.expect<provider::CompactDispatch>().calls(
         [](provider::History &history, std::string_view instructions) -> lighter::Task<void, Error> {
@@ -176,17 +185,14 @@ void test_long_tool_loop() {
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>()
         .calls([completions](const provider::History &, const std::vector<provider::ToolDefinition> &,
-                             const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+                             const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             const auto completion = (*completions)++;
             if (completion == k_tool_calls) {
-                co_return provider::TurnResponse{.parts = {provider::TextPart{.text = "done"}}, .stop = provider::StopKind::DONE};
+                emit_message(callbacks, "done", "done");
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
             }
-            provider::TurnResponse response{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
-            response.parts.push_back(provider::ToolCall{
-                .id = "call-" + std::to_string(completion),
-                .name = "test_noop",
-            });
-            co_return response;
+            emit_tool_call(callbacks, "call-" + std::to_string(completion), "test_noop");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
         })
         .times(k_tool_calls + 1);
     provider_mock.expect<provider::CompactDispatch>().never();
@@ -247,20 +253,17 @@ void test_tool_execution_semantics() {
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>()
         .calls([completions](const provider::History &, const std::vector<provider::ToolDefinition> &,
-                             const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+                             const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             if ((*completions)++ != 0) {
-                co_return provider::TurnResponse{.parts = {provider::TextPart{.text = "done"}}, .stop = provider::StopKind::DONE};
+                emit_message(callbacks, "done", "done");
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
             }
-            provider::TurnResponse response{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
             for (usize index = 0; index < k_parallel_calls; ++index) {
-                response.parts.push_back(provider::ToolCall{
-                    .id = "parallel-" + std::to_string(index),
-                    .name = "test_parallel",
-                });
+                emit_tool_call(callbacks, "parallel-" + std::to_string(index), "test_parallel");
             }
-            response.parts.push_back(provider::ToolCall{.id = "exclusive", .name = "test_exclusive"});
-            response.parts.push_back(provider::ToolCall{.id = "trailing", .name = "test_parallel"});
-            co_return response;
+            emit_tool_call(callbacks, "exclusive", "test_exclusive");
+            emit_tool_call(callbacks, "trailing", "test_parallel");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
         })
         .times(2);
     provider_mock.expect<provider::CompactDispatch>().never();
@@ -303,12 +306,13 @@ void test_automatic_compaction() {
         });
     provider_mock.expect<provider::CompleteDispatch>().calls(
         [](const provider::History &history, const std::vector<provider::ToolDefinition> &,
-           const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+           const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             require(history.size() == 3 && history[0].role == provider::Role::DEVELOPER && history[1].role == provider::Role::USER &&
                         history[2].role == provider::Role::USER && std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY" &&
                         std::get<provider::TextPart>(history[2].parts[0]).text == "latest",
                     "completion did not use the compacted checkpoint and current prompt");
-            co_return provider::TurnResponse{.parts = {provider::TextPart{.text = "done"}}, .stop = provider::StopKind::DONE};
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
         });
     model::Choice choice{
         .handle = provider_mock.handle(),
@@ -350,21 +354,21 @@ void test_multiple_automatic_compactions_in_one_turn() {
     auto completions = std::make_shared<usize>(0);
     provider_mock.expect<provider::CompleteDispatch>()
         .calls([completions](const provider::History &history, const std::vector<provider::ToolDefinition> &,
-                             const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+                             const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             const auto completion = (*completions)++;
             require(history.size() == 2 && history[0].role == provider::Role::DEVELOPER && history[1].role == provider::Role::USER,
                     "completion did not use the latest automatic checkpoint");
             require(std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY " + std::to_string(completion + 1),
                     "completion used the wrong automatic checkpoint");
             if (completion == 0) {
-                provider::TurnResponse response{
+                emit_tool_call(callbacks, "call", "test_noop");
+                co_return provider::ProviderCallCompletion{
                     .stop = provider::StopKind::NEEDS_TOOL_RESULTS,
                     .usage = {.input_tokens = 1'800, .output_tokens = 10, .context_tokens = 1'810},
                 };
-                response.parts.push_back(provider::ToolCall{.id = "call", .name = "test_noop"});
-                co_return response;
             }
-            co_return provider::TurnResponse{.parts = {provider::TextPart{.text = "done"}}, .stop = provider::StopKind::DONE};
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
         })
         .times(2);
     model::Choice choice{
@@ -406,10 +410,11 @@ void test_proactive_compaction_uses_reported_context() {
     });
     provider_mock.expect<provider::CompleteDispatch>().calls(
         [](const provider::History &history, const std::vector<provider::ToolDefinition> &,
-           const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
+           const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             require(history.size() == 3 && std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY",
                     "proactive compaction was not used for completion");
-            co_return provider::TurnResponse{.parts = {provider::TextPart{.text = "done"}}, .stop = provider::StopKind::DONE};
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
         });
     model::Choice choice{
         .handle = provider_mock.handle(),
@@ -445,8 +450,8 @@ void test_failed_turn_does_not_report_staged_compaction() {
     });
     provider_mock.expect<provider::CompleteDispatch>().calls(
         [](const provider::History &, const std::vector<provider::ToolDefinition> &,
-           const provider::StreamCallbacks &) -> lighter::Task<provider::TurnResponse, Error> {
-            co_return provider::TurnResponse{.stop = provider::StopKind::CONTEXT_EXHAUSTED};
+           const provider::StreamCallbacks &) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::CONTEXT_EXHAUSTED};
         });
     model::Choice choice{
         .handle = provider_mock.handle(),
