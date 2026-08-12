@@ -61,6 +61,16 @@ struct ShellTaskResponse {
     bool is_error = false;
 };
 
+struct MutexUnlockGuard {
+    explicit MutexUnlockGuard(lighter::Mutex &mutex) : mutex(&mutex) {}
+    ~MutexUnlockGuard() { mutex->unlock(); }
+
+    MutexUnlockGuard(const MutexUnlockGuard &) = delete;
+    MutexUnlockGuard &operator=(const MutexUnlockGuard &) = delete;
+
+    lighter::Mutex *mutex;
+};
+
 template <typename T>
 Result<T> parse_input(const glz::generic &input) {
     auto encoded = json::to_string(input);
@@ -125,6 +135,7 @@ struct ShellTaskManager {
         std::string id;
         std::string command;
         std::optional<Process::SpawnResult> child;
+        lighter::Mutex interaction;
         lighter::Event changed;
         lighter::Event finished;
         std::string output;
@@ -371,7 +382,12 @@ Task<ShellTaskResponse, Error> ShellTaskManager::interact(InteractWithShellTaskI
     const auto limit = co_await or_fail(output_limit(input.max_output_chars));
     const auto found = tasks.find(input.shell_task_id);
     if (found == tasks.end()) co_await fail(Error::tool("unknown shell task: " + input.shell_task_id));
-    auto &task = *found->second;
+    const auto task_pointer = found->second;
+    // Interactions with different tasks may overlap, but one task's input,
+    // output cursor, and lifecycle must be observed in call order.
+    co_await task_pointer->interaction.lock();
+    MutexUnlockGuard interaction_guard(task_pointer->interaction);
+    auto &task = *task_pointer;
     const auto version = task.version;
 
     if (input.chars && !input.chars->empty()) {
@@ -452,7 +468,7 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
                         .required = {"shell_task_id"},
                     },
             },
-        .execution_mode = ToolExecutionMode::EXCLUSIVE,
+        .execution_mode = ToolExecutionMode::PARALLEL,
         .execute = [&tasks](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<InteractWithShellTaskInput>(call.input));
             auto response = co_await tasks.interact(std::move(input)).or_fail();

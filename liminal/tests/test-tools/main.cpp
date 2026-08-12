@@ -10,6 +10,7 @@
 #include <glaze/json.hpp>
 
 #include <lighter/async/io/loop.h>
+#include <lighter/async/runtime/when.h>
 #include <lighter/types.hpp>
 
 #include <liminal/provider/common.h>
@@ -53,8 +54,8 @@ void test_tools_are_available_by_default() {
             "default tools must include file reading, patch editing, interactive shell execution, and hosted web access");
     require(tools.execution_mode("read_file") == ToolExecutionMode::PARALLEL &&
                 tools.execution_mode("exec_command") == ToolExecutionMode::PARALLEL &&
+                tools.execution_mode("interact_with_shell_task") == ToolExecutionMode::PARALLEL &&
                 tools.execution_mode("apply_patch") == ToolExecutionMode::EXCLUSIVE &&
-                tools.execution_mode("interact_with_shell_task") == ToolExecutionMode::EXCLUSIVE &&
                 tools.execution_mode("unknown") == ToolExecutionMode::EXCLUSIVE,
             "built-in and unknown tools must expose conservative execution semantics");
 
@@ -225,25 +226,28 @@ void test_apply_patch_operations_are_validated_before_writes() {
 
 lighter::Task<> exercise_shell_task_interaction(ToolSet &tools) {
 #ifdef _WIN32
-    constexpr std::string_view command = R"({"cmd":"$line = [Console]::In.ReadLine(); Write-Output \"got:$line\"","yield_time_ms":25})";
+    constexpr std::string_view command =
+        R"json({"cmd":"$first = [Console]::In.ReadLine(); Start-Sleep -Milliseconds 100; Write-Output ('first:' + $first); $second = [Console]::In.ReadLine(); Start-Sleep -Milliseconds 100; Write-Output ('second:' + $second)","yield_time_ms":25})json";
 #else
-    constexpr std::string_view command = R"({"cmd":"IFS= read -r line; printf 'got:%s\\n' \"$line\"","yield_time_ms":25})";
+    constexpr std::string_view command =
+        R"({"cmd":"IFS= read -r first; sleep 0.1; echo first:$first; IFS= read -r second; sleep 0.1; echo second:$second","yield_time_ms":25})";
 #endif
     auto started = co_await tools.execute(make_call("start", "exec_command", command));
     require(started.has_value() && !started->is_error && started->content.contains("shell_task_id: 1") &&
                 started->content.contains("status: running"),
             "exec_command must return a shell task ID for a command awaiting input");
 
-    auto written = co_await tools.execute(
-        make_call("write", "interact_with_shell_task", R"({"shell_task_id":"1","chars":"hello\n","yield_time_ms":3000})"));
-    require(written.has_value() && written->content.contains("got:hello"),
-            "interact_with_shell_task must deliver characters to the running shell task");
-
+    auto interacted = co_await lighter::WhenAll(
+        tools.execute(make_call("first", "interact_with_shell_task", R"({"shell_task_id":"1","chars":"one\n","yield_time_ms":3000})")),
+        tools.execute(make_call("second", "interact_with_shell_task", R"({"shell_task_id":"1","chars":"two\n","yield_time_ms":3000})")));
+    require(interacted.has_value(), "concurrent interactions with one shell task failed");
+    auto [first, second] = *std::move(interacted);
+    require(first.content.contains("first:one") && !first.content.contains("second:two") && second.content.contains("second:two"),
+            "interactions with one shell task must remain ordered and drain distinct output");
     auto finished =
-        co_await tools.execute(make_call("poll", "interact_with_shell_task", R"({"shell_task_id":"1","chars":"","yield_time_ms":3000})"));
-    require(finished.has_value() && !finished->is_error && finished->content.contains("status: exited") &&
-                finished->content.contains("exit_code: 0"),
-            "interact_with_shell_task must poll a shell task through completion");
+        co_await tools.execute(make_call("finish", "interact_with_shell_task", R"({"shell_task_id":"1","yield_time_ms":3000})"));
+    require(finished && !finished->is_error && finished->content.contains("status: exited") && finished->content.contains("exit_code: 0"),
+            "the ordered shell task interactions did not run through completion");
 }
 
 void test_shell_task_interaction() {
@@ -253,6 +257,64 @@ void test_shell_task_interaction() {
     loop.schedule(task);
     loop.run();
     std::ignore = task.result();
+}
+
+std::string exec_command_input(std::string_view command, const std::filesystem::path &working_directory) {
+    return "{\"cmd\":\"" + std::string(command) + "\",\"workdir\":\"" + working_directory.generic_string() + "\",\"yield_time_ms\":25}";
+}
+
+lighter::Task<> exercise_distinct_shell_task_interactions(ToolSet &tools, const std::filesystem::path &working_directory) {
+#ifdef _WIN32
+    constexpr std::string_view first_command =
+        R"($null = [Console]::In.ReadLine(); Set-Content -Path a.ready -Value ready -NoNewline; for ($i = 0; $i -lt 500 -and -not (Test-Path b.ready); ++$i) { Start-Sleep -Milliseconds 10 }; if (-not (Test-Path b.ready)) { exit 2 }; Write-Output task-a)";
+    constexpr std::string_view second_command =
+        R"($null = [Console]::In.ReadLine(); Set-Content -Path b.ready -Value ready -NoNewline; for ($i = 0; $i -lt 500 -and -not (Test-Path a.ready); ++$i) { Start-Sleep -Milliseconds 10 }; if (-not (Test-Path a.ready)) { exit 2 }; Write-Output task-b)";
+#else
+    constexpr std::string_view first_command =
+        "IFS= read -r line; : > a.ready; i=0; while [ ! -f b.ready ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done; [ -f "
+        "b.ready ] || exit 2; echo task-a";
+    constexpr std::string_view second_command =
+        "IFS= read -r line; : > b.ready; i=0; while [ ! -f a.ready ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done; [ -f "
+        "a.ready ] || exit 2; echo task-b";
+#endif
+    auto first_started = co_await tools.execute(make_call("start-a", "exec_command", exec_command_input(first_command, working_directory)));
+    auto second_started =
+        co_await tools.execute(make_call("start-b", "exec_command", exec_command_input(second_command, working_directory)));
+    require(first_started && second_started && first_started->content.contains("shell_task_id: 1") &&
+                second_started->content.contains("shell_task_id: 2"),
+            "failed to start distinct shell tasks for concurrent interaction");
+
+    auto interacted = co_await lighter::WhenAll(
+        tools.execute(make_call("interact-a", "interact_with_shell_task", R"({"shell_task_id":"1","chars":"go\n","yield_time_ms":2000})")),
+        tools.execute(make_call("interact-b", "interact_with_shell_task", R"({"shell_task_id":"2","chars":"go\n","yield_time_ms":2000})")));
+    require(interacted.has_value(), "interactions with distinct shell tasks failed");
+    auto [first, second] = *std::move(interacted);
+    require(first.content.contains("task-a") && second.content.contains("task-b"),
+            "interactions with distinct shell tasks blocked each other");
+
+    auto finished = co_await lighter::WhenAll(
+        tools.execute(make_call("finish-a", "interact_with_shell_task", R"({"shell_task_id":"1","yield_time_ms":3000})")),
+        tools.execute(make_call("finish-b", "interact_with_shell_task", R"({"shell_task_id":"2","yield_time_ms":3000})")));
+    require(finished.has_value(), "failed to finish distinct shell tasks");
+    auto [first_finished, second_finished] = *std::move(finished);
+    require(first_finished.content.contains("status: exited") && second_finished.content.contains("status: exited"),
+            "distinct shell tasks did not run through completion");
+}
+
+void test_distinct_shell_tasks_interact_concurrently() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto directory = std::filesystem::temp_directory_path() / ("liminal-shell-tasks-" + std::to_string(nonce));
+    std::filesystem::create_directories(directory);
+
+    lighter::EventLoop loop;
+    ToolSet tools(std::filesystem::current_path());
+    auto task = exercise_distinct_shell_task_interactions(tools, directory);
+    loop.schedule(task);
+    loop.run();
+    std::ignore = task.result();
+
+    std::error_code remove_error;
+    std::filesystem::remove_all(directory, remove_error);
 }
 
 void test_nonzero_command_is_an_error_result() {
@@ -274,6 +336,7 @@ i32 run_all() {
     test_read_file_is_bounded_and_regular();
     test_apply_patch_operations_are_validated_before_writes();
     test_shell_task_interaction();
+    test_distinct_shell_tasks_interact_concurrently();
     test_nonzero_command_is_an_error_result();
     return 0;
 }
