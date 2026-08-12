@@ -1,19 +1,17 @@
 #include "agent.h"
 
 #include "default_instructions.h"
+#include "tool_scheduler.h"
 
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-#include <lighter/async/runtime/when.h>
-
 namespace liminal {
 
 using lighter::fail;
 using lighter::Task;
-using lighter::WhenAll;
 
 namespace {
 
@@ -72,71 +70,6 @@ bool needs_automatic_compaction(const context::ContextManifest &manifest) {
     return manifest.usage.estimated_input_tokens >= threshold;
 }
 
-/// Runs one tool call, converting infrastructure failures into is_error
-/// results so one bad call never aborts its siblings. Cancellation still
-/// unwinds normally.
-Task<provider::ToolResult> execute_one(const ToolSet &tools, const provider::ToolCall &call, const EventSink &events) {
-    auto outcome = co_await tools.execute(call);
-    provider::ToolResult result;
-    if (!outcome) {
-        result = {
-            .call_id = call.id,
-            .content = "Error: " + outcome.error().message(),
-            .is_error = true,
-        };
-    } else {
-        result = *std::move(outcome);
-    }
-    const auto presentation = tools.describe(call);
-    emit(events, ToolCompleted{
-                     .call_id = call.id,
-                     .name = call.name,
-                     .description = presentation.description,
-                     .command = presentation.command,
-                     .summary = tools.summarize(call, result),
-                     .is_error = result.is_error,
-                 });
-    co_return result;
-}
-
-void emit_tool_started(const ToolSet &tools, const provider::ToolCall &call, const EventSink &events) {
-    const auto presentation = tools.describe(call);
-    emit(events, ToolStarted{
-                     .call_id = call.id,
-                     .name = call.name,
-                     .description = presentation.description,
-                     .command = presentation.command,
-                 });
-}
-
-/// Preserve model order while allowing adjacent, explicitly parallel-safe
-/// calls to overlap. Exclusive calls are barriers before and after themselves.
-Task<std::vector<provider::ToolResult>> execute_tools(const ToolSet &tools, const std::vector<const provider::ToolCall *> &calls,
-                                                      const EventSink &events) {
-    std::vector<provider::ToolResult> results;
-    results.reserve(calls.size());
-
-    usize next = 0;
-    while (next < calls.size()) {
-        if (tools.execution_mode(calls[next]->name) == ToolExecutionMode::EXCLUSIVE) {
-            emit_tool_started(tools, *calls[next], events);
-            results.push_back(co_await execute_one(tools, *calls[next], events));
-            ++next;
-            continue;
-        }
-
-        std::vector<Task<provider::ToolResult>> pending;
-        while (next < calls.size() && tools.execution_mode(calls[next]->name) == ToolExecutionMode::PARALLEL) {
-            emit_tool_started(tools, *calls[next], events);
-            pending.push_back(execute_one(tools, *calls[next], events));
-            ++next;
-        }
-        auto joined = co_await WhenAll(std::move(pending));
-        for (auto &result : joined) results.push_back(std::move(result));
-    }
-    co_return results;
-}
-
 } // namespace
 
 Agent::Agent(model::Choice model, ToolSet &tools) : Agent(std::move(model), tools, default_agent_instructions()) {}
@@ -189,17 +122,28 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
             }
         }
         std::vector<provider::OutputItem> items;
+        usize call_count = 0;
+        agent::detail::ToolScheduler scheduler(*tools, events);
         provider::StreamCallbacks stream{
             .on_assistant_text_delta = [&events](const provider::OutputItemId &,
                                                  std::string_view text) { emit(events, AssistantTextDelta{.text = std::string(text)}); },
-            .on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); },
+            .on_item_completed =
+                [&items, &scheduler, &call_count](const provider::OutputItem &item) {
+                    items.push_back(item);
+                    if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) {
+                        ++call_count;
+                        scheduler.submit(call->call);
+                    }
+                },
         };
-        auto completion = co_await model.handle->complete(built->provider_history, tools->definitions(), stream).or_fail();
-        std::vector<const provider::ToolCall *> calls;
-        for (const auto &item : items) {
-            if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) calls.push_back(&call->call);
+        auto completed = co_await model.handle->complete(built->provider_history, tools->definitions(), stream);
+        if (!completed) {
+            co_await scheduler.finish();
+            co_await fail(std::move(completed).error());
         }
+        auto completion = *std::move(completed);
         emit(events, AssistantSegmentCompleted{});
+        auto results = co_await scheduler.finish();
 
         switch (completion.stop) {
             case provider::StopKind::DONE:
@@ -217,12 +161,11 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
             case provider::StopKind::REFUSED: co_await fail(Error::protocol("the model refused to continue this conversation"));
             case provider::StopKind::OTHER: co_await fail(Error::protocol("unsupported stop reason: " + completion.stop_detail));
         }
-        if (calls.empty()) {
+        if (call_count == 0) {
             co_await fail(Error::protocol("provider requested tool results without any tool calls"));
         }
 
         staged.append(agent_output(items, std::move(completion)));
-        auto results = co_await execute_tools(*tools, calls, events);
         staged.append(session::ToolResults{.results = std::move(results)});
     }
 }

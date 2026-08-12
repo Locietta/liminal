@@ -213,6 +213,58 @@ void test_long_tool_loop() {
     provider_mock.verify();
 }
 
+void test_tool_starts_before_provider_call_finishes() {
+    ToolSet tools(std::filesystem::current_path());
+    auto executed = std::make_shared<bool>(false);
+    auto registered = tools.register_tool({
+        .definition = {.name = "test_online", .description = "Test online scheduling"},
+        .execute = [executed](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
+            *executed = true;
+            co_return provider::ToolResult{.call_id = call.id, .content = "online"};
+        },
+    });
+    require(registered.has_value(), "failed to register the online scheduling test tool");
+
+    auto completions = std::make_shared<usize>(0);
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls(
+            [completions, executed](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                                    const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+                if ((*completions)++ != 0) {
+                    emit_message(callbacks, "final", "done", true);
+                    co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+                }
+                emit_message(callbacks, "before", "I will inspect.", true);
+                emit_tool_call(callbacks, "online-call", "test_online");
+                co_await lighter::sleep(1ms);
+                require(*executed, "tool execution waited for the provider call to finish");
+                emit_message(callbacks, "after", "The inspection is running.", true);
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+            })
+        .times(2);
+    provider_mock.expect<provider::CompactDispatch>().never();
+
+    Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
+    std::vector<Event> events;
+    lighter::EventLoop loop;
+    auto task = agent.run_turn("work online", [&events](const Event &event) { events.push_back(event); });
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "online scheduling turn failed");
+    usize tool_completed = events.size();
+    usize after_delta = events.size();
+    for (usize index = 0; index < events.size(); ++index) {
+        if (std::holds_alternative<ToolCompleted>(events[index])) tool_completed = index;
+        if (const auto *delta = std::get_if<AssistantTextDelta>(&events[index]); delta && delta->text == "The inspection is running.") {
+            after_delta = index;
+        }
+    }
+    require(tool_completed < after_delta, "provider progress emitted before the completed online tool event");
+    provider_mock.verify();
+}
+
 struct ToolSchedulingProbe {
     usize running = 0;
     usize max_running = 0;
@@ -510,6 +562,7 @@ void test_context_manifest() {
 i32 run_all() {
     test_successful_turn();
     test_long_tool_loop();
+    test_tool_starts_before_provider_call_finishes();
     test_tool_execution_semantics();
     test_automatic_compaction();
     test_multiple_automatic_compactions_in_one_turn();
