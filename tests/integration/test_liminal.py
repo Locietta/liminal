@@ -230,7 +230,7 @@ def read_pty_frame_without(master, output, marker, timeout):
 
 
 def check_conpty_terminal_session(tmp_path, base_url):
-    from liminal.dev_mcp.windows_pty import ConPtyProcess
+    from windows_pty import ConPtyProcess
 
     process = ConPtyProcess(
         [BINARY],
@@ -317,7 +317,7 @@ def check_conpty_terminal_session(tmp_path, base_url):
 
 
 def check_conpty_terminal_restores_after_interrupt(tmp_path):
-    from liminal.dev_mcp.windows_pty import ConPtyProcess
+    from windows_pty import ConPtyProcess
 
     process = ConPtyProcess(
         [BINARY],
@@ -342,7 +342,7 @@ def check_conpty_terminal_restores_after_interrupt(tmp_path):
 
 
 def check_conpty_ctrl_c_routes_by_state(tmp_path, base_url):
-    from liminal.dev_mcp.windows_pty import ConPtyProcess
+    from windows_pty import ConPtyProcess
 
     process = ConPtyProcess(
         [BINARY],

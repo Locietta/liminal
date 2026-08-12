@@ -23,6 +23,11 @@ copy_worktree() {
     (
         cd "$source"
         git ls-files --cached --others --exclude-standard -z -- . "$@" |
+            while IFS= read -r -d '' path; do
+                if [[ -e "$path" || -L "$path" ]]; then
+                    printf '%s\0' "$path"
+                fi
+            done |
             tar --null --no-recursion --files-from=- -cf -
     ) | tar -C "$destination" -xf -
 }
