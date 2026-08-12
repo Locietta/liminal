@@ -197,7 +197,7 @@ void test_manifest_deduplication_and_redacted_description() {
             "context description exposed instruction or session contents");
 }
 
-void test_bounded_selection_keeps_complete_recent_turns() {
+void test_bounded_selection_keeps_complete_recent_tasks() {
     session::Session session_log({.value = 11});
     const auto old_task = session_log.start_task(std::string(80, 'a'));
     append_message(session_log, old_task, std::string(80, 'b'));
@@ -214,9 +214,9 @@ void test_bounded_selection_keeps_complete_recent_turns() {
 
     auto manifest = context::ContextBuilder{}.build({}, session_log,
                                                     {.context_window_tokens = 60, .reserved_output_tokens = 10, .safety_margin_tokens = 0});
-    require(manifest.has_value(), "bounded context rejected a valid recent turn");
+    require(manifest.has_value(), "bounded context rejected a valid recent task");
     require(manifest->session_entries.size() == 2 && manifest->session_entries[0].value == 7 && manifest->session_entries[1].value == 8,
-            "bounded context did not retain the newest complete turn");
+            "bounded context did not retain the newest complete task");
     require(manifest->omitted_budget_entries == 6 && manifest->omitted_checkpoint_entries == 0,
             "bounded context did not report budget omissions separately");
     require(manifest->provider_history.size() == 2 && manifest->usage.remaining_input_tokens >= 0,
@@ -254,7 +254,7 @@ i32 run_all() {
     test_project_root_discovery();
     test_instruction_read_failure();
     test_manifest_deduplication_and_redacted_description();
-    test_bounded_selection_keeps_complete_recent_turns();
+    test_bounded_selection_keeps_complete_recent_tasks();
     test_reported_usage_accounts_for_trailing_context();
     return 0;
 }

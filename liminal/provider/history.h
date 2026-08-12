@@ -108,7 +108,7 @@ struct StreamCallbacks {
 /// ProviderCallCompletion::stop_detail; the agent decides how to react.
 enum struct StopKind {
     DONE,               ///< terminal response, commit and return to the user
-    NEEDS_TOOL_RESULTS, ///< model requested tool calls; continue the turn
+    NEEDS_TOOL_RESULTS, ///< model requested tool calls; continue the task
     TRUNCATED,          ///< output cut off (max_tokens / incomplete)
     REFUSED,            ///< model refused to answer
     CONTEXT_EXHAUSTED,  ///< conversation no longer fits the context window

@@ -10,7 +10,7 @@
 namespace liminal::provider {
 
 /// Provider-agnostic compaction: asks the model (through `provider->complete()`)
-/// to summarize the transcript, then replaces everything before the last turn
+/// to summarize the transcript, then replaces everything before the last task
 /// boundary with the summary. Works against any conforming provider; providers
 /// with a native compaction endpoint should try that first and use this as the
 /// fallback.

@@ -92,7 +92,7 @@ std::shared_ptr<usize> register_noop_tool(ToolSet &tools) {
     return executions;
 }
 
-void test_successful_turn() {
+void test_successful_task() {
     ToolSet tools(std::filesystem::current_path().string());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>()
@@ -158,7 +158,7 @@ void test_successful_turn() {
     loop.run();
     auto outcome = task.result();
 
-    require(outcome.has_value(), "agent turn failed");
+    require(outcome.has_value(), "agent task failed");
     require(events.size() == 7, "agent emitted an unexpected event count");
     require(std::holds_alternative<AssistantTextDelta>(events[0]), "text delta must be the first response event");
     require(std::holds_alternative<AssistantMessageCompleted>(events[1]), "assistant message must finish before its tool");
@@ -230,7 +230,7 @@ void test_long_tool_loop() {
     loop.run();
 
     require(task.result().has_value(), "a productive tool loop longer than 32 iterations failed");
-    require(*tool_executions == k_tool_calls, "the long-running turn did not execute every requested tool");
+    require(*tool_executions == k_tool_calls, "the long-running task did not execute every requested tool");
     require(agent.session.entries.size() == 3 * k_tool_calls + 4, "the long-running task did not retain its complete semantic history");
     provider_mock.verify();
 }
@@ -274,7 +274,7 @@ void test_tool_starts_before_provider_call_finishes() {
     loop.schedule(task);
     loop.run();
 
-    require(task.result().has_value(), "online scheduling turn failed");
+    require(task.result().has_value(), "online scheduling task failed");
     usize tool_completed = events.size();
     usize after_delta = events.size();
     for (usize index = 0; index < events.size(); ++index) {
@@ -492,7 +492,7 @@ void test_tool_execution_semantics() {
     loop.schedule(task);
     loop.run();
 
-    require(task.result().has_value(), "tool scheduling turn failed");
+    require(task.result().has_value(), "tool scheduling task failed");
     require(probe->max_running == k_parallel_calls, "parallel-safe tool calls were subject to a numeric concurrency cap");
     require(!probe->exclusive_overlapped, "an exclusive tool overlapped the preceding parallel wave");
     require(!probe->trailing_started_early, "a parallel tool crossed an exclusive ordering barrier");
@@ -545,18 +545,18 @@ void test_automatic_compaction() {
     loop.schedule(task);
     loop.run();
 
-    require(task.result().has_value(), "automatic compaction turn failed");
+    require(task.result().has_value(), "automatic compaction task failed");
     require(events.size() == 3 && std::holds_alternative<AssistantMessageCompleted>(events[0]) &&
                 std::holds_alternative<SessionNotice>(events[1]) && std::holds_alternative<TaskCompleted>(events[2]),
             "automatic compaction emitted the wrong lifecycle events");
     require(agent.session.entries.size() == 7 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[4].payload) &&
                 std::holds_alternative<session::TaskFinished>(agent.session.entries[6].payload),
-            "automatic compaction did not commit a semantic checkpoint with the turn");
+            "automatic compaction did not commit a semantic checkpoint with the task");
     provider_mock.verify();
 }
 
-void test_multiple_automatic_compactions_in_one_turn() {
+void test_multiple_automatic_compactions_in_one_task() {
     ToolSet tools(std::filesystem::current_path());
     auto tool_executions = register_noop_tool(tools);
     auto compactions = std::make_shared<usize>(0);
@@ -602,14 +602,14 @@ void test_multiple_automatic_compactions_in_one_turn() {
     loop.schedule(task);
     loop.run();
 
-    require(task.result().has_value(), "a turn requiring multiple automatic compactions failed");
-    require(*compactions == 2, "the long-running turn did not compact as often as needed");
-    require(*tool_executions == 1, "the compacted turn did not execute its tool call");
+    require(task.result().has_value(), "a task requiring multiple automatic compactions failed");
+    require(*compactions == 2, "the long-running task did not compact as often as needed");
+    require(*tool_executions == 1, "the compacted task did not execute its tool call");
     require(agent.session.entries.size() == 11 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
                 std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[7].payload),
-            "the turn did not commit both automatic checkpoints");
+            "the task did not commit both automatic checkpoints");
     require(std::ranges::count_if(events, [](const Event &event) { return std::holds_alternative<SessionNotice>(event); }) == 1,
-            "multiple automatic compactions must emit one committed-turn notice");
+            "multiple automatic compactions must emit one committed-task notice");
     provider_mock.verify();
 }
 
@@ -645,13 +645,13 @@ void test_proactive_compaction_uses_reported_context() {
     loop.schedule(task);
     loop.run();
 
-    require(task.result().has_value(), "proactive automatic compaction turn failed");
+    require(task.result().has_value(), "proactive automatic compaction task failed");
     require(agent.session.entries.size() == 8 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[4].payload),
             "90 percent context usage did not create an automatic checkpoint");
     provider_mock.verify();
 }
 
-void test_failed_turn_does_not_report_staged_compaction() {
+void test_failed_task_does_not_report_staged_compaction() {
     ToolSet tools(std::filesystem::current_path());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompactDispatch>().calls([](provider::History &history, std::string_view) -> lighter::Task<void, Error> {
@@ -721,7 +721,7 @@ void test_context_manifest() {
 }
 
 i32 run_all() {
-    test_successful_turn();
+    test_successful_task();
     test_long_tool_loop();
     test_tool_starts_before_provider_call_finishes();
     test_done_requires_terminal_answer();
@@ -730,9 +730,9 @@ i32 run_all() {
     test_stream_failure_retains_completed_tool_result();
     test_tool_execution_semantics();
     test_automatic_compaction();
-    test_multiple_automatic_compactions_in_one_turn();
+    test_multiple_automatic_compactions_in_one_task();
     test_proactive_compaction_uses_reported_context();
-    test_failed_turn_does_not_report_staged_compaction();
+    test_failed_task_does_not_report_staged_compaction();
     test_context_manifest();
     return 0;
 }

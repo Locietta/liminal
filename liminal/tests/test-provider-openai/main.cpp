@@ -131,7 +131,7 @@ void test_web_search_decoding_citations_and_replay() {
     };
     auto decoded = openai::protocol::decode_stream(events, callbacks, "req_web");
     require(decoded && decoded->stop == provider::StopKind::DONE && outputs.size() == 2 && started.size() == outputs.size(),
-            "OpenAI hosted web search response did not decode as a completed turn");
+            "OpenAI hosted web search response did not decode as a completed task");
     const auto *search = std::get_if<provider::ProviderOpaqueItem>(&outputs[0]);
     const auto *text = std::get_if<provider::AssistantMessageItem>(&outputs[1]);
     require(search && search->part.payload.contains("Liminal CLI"), "web search call was not retained for replay");

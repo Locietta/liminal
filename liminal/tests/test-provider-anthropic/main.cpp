@@ -125,7 +125,7 @@ void test_web_tools_decode_citations_and_replay() {
     };
     auto decoded = anthropic::protocol::decode_stream(events, callbacks, "req_web");
     require(decoded && decoded->stop == provider::StopKind::DONE && outputs.size() == 3 && started.size() == outputs.size(),
-            "Anthropic hosted web response did not decode as a completed turn");
+            "Anthropic hosted web response did not decode as a completed task");
     const auto *search = std::get_if<provider::ProviderOpaqueItem>(&outputs[0]);
     const auto *result = std::get_if<provider::ProviderOpaqueItem>(&outputs[1]);
     const auto *text = std::get_if<provider::AssistantMessageItem>(&outputs[2]);

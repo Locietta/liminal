@@ -333,7 +333,7 @@ void check_multiline_navigation_history_and_projection() {
     tui::SessionScreen active;
     active.apply(AssistantTextDelta{.text = "streaming"});
     active.insert("queued draft");
-    require(active.state == tui::SessionState::STREAMING, "editing a draft during a turn must not overwrite the turn's semantic state");
+    require(active.state == tui::SessionState::STREAMING, "editing a draft during a task must not overwrite the task's semantic state");
 
     active.external_editor_active = true;
     active.resize({40, 8});
@@ -693,7 +693,7 @@ void check_working_indicator() {
     require(screen.viewport_rows() == idle_rows, "the in-flow working status must not shrink the transcript viewport");
     const auto waiting = screen.frame();
     require(waiting.surface.row_text(1) == "go" && waiting.surface.row_text(2).contains("Working…") && waiting.surface.row_text(3).empty(),
-            "a waiting turn must show the unprefixed prompt above its status and leave space before the composer");
+            "a waiting task must show the unprefixed prompt above its status and leave space before the composer");
     const auto status_styles = [&screen] {
         const auto frame = screen.frame();
         std::vector<tui::Style> styles;
@@ -723,7 +723,7 @@ void check_working_indicator() {
     }
 
     screen.apply(AssistantTextDelta{.text = "hi"});
-    require(frame_text(screen.frame()).contains("Working…"), "streaming turns must keep the unified working status");
+    require(frame_text(screen.frame()).contains("Working…"), "streaming tasks must keep the unified working status");
     screen.apply(ToolStarted{.call_id = "tool", .name = "exec_command", .command = "echo hi"});
     require(frame_text(screen.frame()).contains("Working…"), "running tools must keep the unified working status");
     screen.apply(ToolCompleted{.call_id = "tool", .name = "exec_command", .command = "echo hi", .summary = "exit 0"});
@@ -738,9 +738,9 @@ void check_working_indicator() {
     require(frame_text(screen.frame()).contains("Working…"), "returning to the tail must reveal the working status again");
 
     screen.apply(TaskCompleted{});
-    require(!screen.working() && !screen.animating(), "a completed turn must leave the animated working state");
+    require(!screen.working() && !screen.animating(), "a completed task must leave the animated working state");
     const auto completed = screen.frame();
-    require(frame_text(completed).contains("Finished (3s)"), "a completed turn must retain its final elapsed status");
+    require(frame_text(completed).contains("Finished (3s)"), "a completed task must retain its final elapsed status");
     i32 finished_row = -1;
     for (i32 row = 0; row < completed.surface.rows; ++row) {
         if (completed.surface.row_text(row).contains("Finished")) finished_row = row;
@@ -754,7 +754,7 @@ void check_working_indicator() {
     require(frame_text(screen.frame()).contains("Finished (3s)"), "editing the next prompt must preserve the finished status");
     screen.apply(PromptSubmitted{.text = "next"});
     require(!frame_text(screen.frame()).contains("Finished") && frame_text(screen.frame()).contains("Working…"),
-            "a new turn must replace the finished status with the working status");
+            "a new task must replace the finished status with the working status");
 
     tui::SessionScreen compact([&now] { return now; });
     compact.resize({40, 4});

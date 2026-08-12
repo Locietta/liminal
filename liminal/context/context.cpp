@@ -76,7 +76,7 @@ void append_entry(provider::History &history, const session::SessionEntry &entry
         entry.payload);
 }
 
-bool starts_semantic_turn(const session::SessionEntry &entry) {
+bool starts_semantic_task(const session::SessionEntry &entry) {
     return std::holds_alternative<session::TaskStarted>(entry.payload) || std::holds_alternative<session::ContextCheckpoint>(entry.payload);
 }
 
@@ -231,7 +231,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
 
         std::vector<usize> unit_starts;
         for (usize index = start; index < branch.size(); ++index) {
-            if (index == start || starts_semantic_turn(*branch[index])) {
+            if (index == start || starts_semantic_task(*branch[index])) {
                 unit_starts.push_back(index);
             }
         }
@@ -244,7 +244,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
             const auto candidate_usage = estimate_usage(candidate, budget, baseline);
             if (*candidate_usage.remaining_input_tokens < 0) {
                 if (unit == unit_starts.rbegin()) {
-                    return lighter::outcome_error(Error::protocol("the latest semantic turn exceeds the model input budget"));
+                    return lighter::outcome_error(Error::protocol("the latest semantic task exceeds the model input budget"));
                 }
                 break;
             }

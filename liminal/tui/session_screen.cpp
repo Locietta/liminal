@@ -338,7 +338,7 @@ std::vector<LayoutRow> visible_rows(const SessionScreen &screen) {
     const auto visible = static_cast<usize>(std::max(screen.viewport_rows(), 0));
     if (visible == 0) return {};
     if (!screen.anchor) {
-        // Turn activity lives in the transcript flow: it follows the newest
+        // Task activity lives in the transcript flow: it follows the newest
         // output while tail-following and scrolls away while browsing.
         auto activity = screen.activity_rows();
         // Prefer the status over its trailing separator when the transcript
