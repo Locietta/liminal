@@ -705,9 +705,9 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
         os.write(master, b"\x1b[B")
         read_pty_until_fresh(master, output, PROMPT_MARKER, 5)
         os.write(master, b"\x1b[<64;1;1M")
-        read_pty_until_fresh(master, output, b"history", 5)
+        read_pty_until_fresh(master, output, b"extra-model-6", 5)
         os.write(master, b"\x1b[<65;1;1M")
-        read_pty_until_fresh(master, output, b"test-model", 5)
+        read_pty_until_fresh(master, output, b"select with /model", 5)
 
         os.write(master, b"\x1b[200~a\nb\x1b[201~")
         read_pty_until(master, output, PROMPT_MARKER + b" a", 5)

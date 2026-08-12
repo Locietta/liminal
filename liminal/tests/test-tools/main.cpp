@@ -245,7 +245,7 @@ lighter::Task<> exercise_shell_task_interaction(ToolSet &tools) {
         tools.execute(make_call("first", "write_stdin", R"({"session_id":1,"chars":"one\n","yield_time_ms":3000})")),
         tools.execute(make_call("second", "write_stdin", R"({"session_id":1,"chars":"two\n","yield_time_ms":3000})")));
     require(interacted.has_value(), "concurrent writes to one exec session failed");
-    auto [first, second] = *std::move(interacted);
+    const auto &[first, second] = *interacted;
     require(first.content.contains("first:one") && !first.content.contains("second:two") && second.content.contains("second:two"),
             "writes to one exec session must remain ordered and drain distinct output");
     auto finished = co_await tools.execute(make_call("finish", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})"));
@@ -291,14 +291,14 @@ lighter::Task<> exercise_distinct_shell_task_interactions(ToolSet &tools, const 
         tools.execute(make_call("write-a", "write_stdin", R"({"session_id":1,"chars":"go\n","yield_time_ms":2000})")),
         tools.execute(make_call("write-b", "write_stdin", R"({"session_id":2,"chars":"go\n","yield_time_ms":2000})")));
     require(interacted.has_value(), "writes to distinct exec sessions failed");
-    auto [first, second] = *std::move(interacted);
+    const auto &[first, second] = *interacted;
     require(first.content.contains("task-a") && second.content.contains("task-b"), "writes to distinct exec sessions blocked each other");
 
     auto finished =
         co_await lighter::WhenAll(tools.execute(make_call("finish-a", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})")),
                                   tools.execute(make_call("finish-b", "write_stdin", R"({"session_id":2,"yield_time_ms":3000})")));
     require(finished.has_value(), "failed to finish distinct exec sessions");
-    auto [first_finished, second_finished] = *std::move(finished);
+    const auto &[first_finished, second_finished] = *finished;
     require(first_finished.content.contains("status: exited") && second_finished.content.contains("status: exited"),
             "distinct exec sessions did not run through completion");
 }
