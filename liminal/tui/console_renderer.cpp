@@ -36,11 +36,11 @@ lighter::Error render_plain(const Event &event) {
                 auto output = std::string("[tool ") + (value.is_error ? "failed] " : "completed] ") + plain_text(description);
                 if (!value.summary.empty()) output += "\n  " + plain_text(value.summary);
                 return write_stdout(output + "\n");
-            } else if constexpr (std::same_as<T, TurnCompleted>) {
+            } else if constexpr (std::same_as<T, TaskCompleted>) {
                 return write_stdout("\n");
-            } else if constexpr (std::same_as<T, TurnCancelled>) {
-                return write_stdout("\n[turn cancelled; discarded from history - command side effects may remain]\n");
-            } else if constexpr (std::same_as<T, TurnFailed>) {
+            } else if constexpr (std::same_as<T, TaskCancelled>) {
+                return write_stdout("\n[task cancelled; completed progress was retained]\n");
+            } else if constexpr (std::same_as<T, TaskFailed>) {
                 return write_stdout("\n[error: " + plain_text(value.message) + "]\n");
             } else if constexpr (std::same_as<T, SessionNotice>) {
                 return write_stdout(plain_text(value.text));

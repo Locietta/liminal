@@ -453,7 +453,7 @@ diff --git a/file.cpp b/file.cpp
     }
     require(partial_text.contains("**strong"), "incomplete streaming markup must remain literal");
     streaming.apply(AssistantTextDelta{.text = "**"});
-    streaming.apply(AssistantSegmentCompleted{});
+    streaming.apply(AssistantMessageCompleted{});
     streaming.layout_block(streaming.transcript.blocks.back());
     streaming.layout_block(streaming.transcript.blocks.back());
     const auto diagnostics = streaming.layout_diagnostics();
@@ -737,7 +737,7 @@ void check_working_indicator() {
     screen.follow_tail();
     require(frame_text(screen.frame()).contains("Working…"), "returning to the tail must reveal the working status again");
 
-    screen.apply(TurnCompleted{});
+    screen.apply(TaskCompleted{});
     require(!screen.working() && !screen.animating(), "a completed turn must leave the animated working state");
     const auto completed = screen.frame();
     require(frame_text(completed).contains("Finished (3s)"), "a completed turn must retain its final elapsed status");
@@ -892,7 +892,7 @@ void check_headless_resize_and_markup_stress() {
             action.type = "advance_time";
             action.milliseconds = next() % 33;
         } else {
-            action.type = "assistant_segment_completed";
+            action.type = "assistant_message_completed";
         }
         require(session.apply(action).has_value(), "bounded stress action must remain valid");
 

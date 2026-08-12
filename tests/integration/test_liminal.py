@@ -365,11 +365,11 @@ def check_conpty_ctrl_c_routes_by_state(tmp_path, base_url):
         process.write(b"\x03")
         read_conpty_frame_without(process, output, b"queued", 5)
         assert b"queued" not in output[cleared_at:]
-        assert b"Turn cancelled" not in output[cleared_at:]
+        assert b"Task cancelled" not in output[cleared_at:]
         assert process.poll() is None
 
         process.write(b"\x03")
-        read_conpty_until(process, output, b"Turn cancelled", 10)
+        read_conpty_until(process, output, b"Task cancelled", 10)
         assert process.poll() is None
 
         process.write(b"\x03")
@@ -958,11 +958,11 @@ def test_ctrl_c_routes_by_ui_state(openai_slow_mock, tmp_path):
         os.kill(process.pid, signal.SIGINT)
         read_pty_frame_without(master, output, b"queued", 5)
         assert b"queued" not in output[cleared_at:]
-        assert b"Turn cancelled" not in output[cleared_at:]
+        assert b"Task cancelled" not in output[cleared_at:]
         assert process.poll() is None
 
         os.kill(process.pid, signal.SIGINT)
-        read_pty_until(master, output, b"Turn cancelled", 10)
+        read_pty_until(master, output, b"Task cancelled", 10)
         assert process.poll() is None
 
         os.kill(process.pid, signal.SIGINT)

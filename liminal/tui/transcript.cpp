@@ -24,17 +24,23 @@ void Transcript::apply_one(const PromptSubmitted &event) {
 }
 
 void Transcript::apply_one(const AssistantTextDelta &event) {
-    if (!blocks.empty() && blocks.back().kind == BlockKind::ASSISTANT && blocks.back().state == BlockState::STREAMING) {
-        blocks.back().text += event.text;
-        return;
+    for (auto block = blocks.rbegin(); block != blocks.rend(); ++block) {
+        if (block->kind == BlockKind::ASSISTANT && block->state == BlockState::STREAMING && block->output_item_id == event.item_id) {
+            block->text += event.text;
+            return;
+        }
     }
-    append({.kind = BlockKind::ASSISTANT, .state = BlockState::STREAMING, .text = event.text});
+    append({
+        .kind = BlockKind::ASSISTANT,
+        .state = BlockState::STREAMING,
+        .text = event.text,
+        .output_item_id = event.item_id,
+    });
 }
 
-void Transcript::apply_one(const AssistantSegmentCompleted &) { finish_streaming(BlockState::COMPLETED); }
+void Transcript::apply_one(const AssistantMessageCompleted &event) { finish_assistant(event.item_id, BlockState::COMPLETED, event.phase); }
 
 void Transcript::apply_one(const ToolStarted &event, std::chrono::steady_clock::time_point now) {
-    finish_streaming(BlockState::COMPLETED);
     append({
         .kind = BlockKind::TOOL,
         .state = BlockState::RUNNING,
@@ -60,19 +66,19 @@ void Transcript::apply_one(const ToolCompleted &event) {
     lighter::panic("completed tool block was not found");
 }
 
-void Transcript::apply_one(const TurnCompleted &) { finish_streaming(BlockState::COMPLETED); }
+void Transcript::apply_one(const TaskCompleted &) { finish_streaming(BlockState::COMPLETED); }
 
-void Transcript::apply_one(const TurnCancelled &) {
+void Transcript::apply_one(const TaskCancelled &) {
     finish_streaming(BlockState::CANCELLED);
     for (auto &block : blocks) {
         if (block.kind == BlockKind::TOOL && block.state == BlockState::RUNNING) {
             block.state = BlockState::CANCELLED;
         }
     }
-    append({.kind = BlockKind::NOTICE, .state = BlockState::CANCELLED, .text = "Turn cancelled"});
+    append({.kind = BlockKind::NOTICE, .state = BlockState::CANCELLED, .text = "Task cancelled"});
 }
 
-void Transcript::apply_one(const TurnFailed &event) {
+void Transcript::apply_one(const TaskFailed &event) {
     finish_streaming(BlockState::FAILED);
     for (auto &block : blocks) {
         if (block.kind == BlockKind::TOOL && block.state == BlockState::RUNNING) {
@@ -93,8 +99,19 @@ void Transcript::apply_one(const ModelSelected &event) {
 }
 
 void Transcript::finish_streaming(BlockState state) {
-    if (!blocks.empty() && blocks.back().kind == BlockKind::ASSISTANT && blocks.back().state == BlockState::STREAMING) {
-        blocks.back().state = state;
+    for (auto &block : blocks) {
+        if (block.kind == BlockKind::ASSISTANT && block.state == BlockState::STREAMING) block.state = state;
+    }
+}
+
+void Transcript::finish_assistant(std::string_view item_id, BlockState state, provider::MessagePhase phase) {
+    for (auto block = blocks.rbegin(); block != blocks.rend(); ++block) {
+        if (block->kind == BlockKind::ASSISTANT && block->output_item_id == item_id) {
+            lighter::check(block->state == BlockState::STREAMING, "completed assistant block was not streaming");
+            block->state = state;
+            block->message_phase = phase;
+            return;
+        }
     }
 }
 

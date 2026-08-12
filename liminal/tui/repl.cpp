@@ -484,7 +484,7 @@ Task<i32> suspend_monitor(lighter::ControlEventSource &controls, TerminalSession
 #endif
 
 template <typename T, typename E>
-Task<lighter::Outcome<T, E, lighter::Cancellation>> guard_turn(Task<T, E> work, TurnControl &control) {
+Task<lighter::Outcome<T, E, lighter::Cancellation>> guard_task(Task<T, E> work, TurnControl &control) {
     CancellationSource source;
     control.active_turn = &source;
     auto outcome = co_await with_token(std::move(work), source.token());
@@ -548,7 +548,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
         if (prompt == "/compact" || prompt.starts_with("/compact ")) {
             auto instructions =
                 prompt == "/compact" ? std::string(k_default_compact_instructions) : prompt.substr(std::string_view("/compact ").size());
-            auto outcome = co_await guard_turn(agent.compact(instructions), control);
+            auto outcome = co_await guard_task(agent.compact(instructions), control);
             lighter::Error render_error;
             if (outcome.is_cancelled()) {
                 render_error = renderer.notice("[compact cancelled; history unchanged]\n");
@@ -561,7 +561,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
             continue;
         }
         if (prompt == "/model" || prompt.starts_with("/model ")) {
-            auto refreshed = co_await guard_turn(models.refresh(), control);
+            auto refreshed = co_await guard_task(models.refresh(), control);
             if (refreshed.is_cancelled()) {
                 if (!rendered(renderer.notice("[model refresh cancelled; selection unchanged]\n"), "cannot render model status"))
                     co_return 1;
@@ -619,15 +619,15 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
             failure.record("cannot render submitted prompt", render_error, control);
             co_return 1;
         }
-        auto outcome = co_await guard_turn(agent.run_turn(std::move(prompt), events), control);
+        auto outcome = co_await guard_task(agent.run_task(std::move(prompt), events), control);
         if (render_error) {
             failure.record("cannot render session", render_error, control);
             co_return 1;
         }
         if (outcome.is_cancelled()) {
-            if (!render_error) render_error = renderer.render(TurnCancelled{});
+            if (!render_error) render_error = renderer.render(TaskCancelled{});
         } else if (outcome.has_error()) {
-            if (!render_error) render_error = renderer.render(TurnFailed{.message = outcome.error().message()});
+            if (!render_error) render_error = renderer.render(TaskFailed{.message = outcome.error().message()});
         }
         if (render_error) {
             failure.record("cannot render session", render_error, control);

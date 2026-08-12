@@ -5,6 +5,8 @@
 #include <string>
 #include <variant>
 
+#include <liminal/provider/history.h>
+
 namespace liminal {
 
 /// Application-level events shared by the agent controller and UI. Provider
@@ -14,10 +16,14 @@ struct PromptSubmitted {
 };
 
 struct AssistantTextDelta {
+    std::string item_id;
     std::string text;
 };
 
-struct AssistantSegmentCompleted {};
+struct AssistantMessageCompleted {
+    std::string item_id;
+    provider::MessagePhase phase = provider::MessagePhase::UNSPECIFIED;
+};
 
 struct ToolStarted {
     std::string call_id;
@@ -35,10 +41,10 @@ struct ToolCompleted {
     bool is_error = false;
 };
 
-struct TurnCompleted {};
-struct TurnCancelled {};
+struct TaskCompleted {};
+struct TaskCancelled {};
 
-struct TurnFailed {
+struct TaskFailed {
     std::string message;
 };
 
@@ -51,8 +57,8 @@ struct ModelSelected {
     std::optional<std::string> effort;
 };
 
-using Event = std::variant<PromptSubmitted, AssistantTextDelta, AssistantSegmentCompleted, ToolStarted, ToolCompleted, TurnCompleted,
-                           TurnCancelled, TurnFailed, SessionNotice, ModelSelected>;
+using Event = std::variant<PromptSubmitted, AssistantTextDelta, AssistantMessageCompleted, ToolStarted, ToolCompleted, TaskCompleted,
+                           TaskCancelled, TaskFailed, SessionNotice, ModelSelected>;
 using EventSink = std::copyable_function<void(const Event &) const>;
 
 } // namespace liminal

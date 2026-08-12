@@ -56,19 +56,19 @@ Result<context::ContextManifest> Agent::context_manifest() const {
     return context::ContextBuilder{}.build(instructions, session, context_budget(model.entry));
 }
 
-Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
+Task<void, Error> Agent::run_task(std::string prompt, EventSink events) {
     const auto task_id = session.start_task(std::move(prompt));
-    auto outcome = co_await run_task(task_id, events);
+    auto outcome = co_await run_task_loop(task_id, events);
     if (!outcome) {
         session.append(session::TaskFinished{.id = task_id, .outcome = session::TaskOutcome::FAILED});
         co_await fail(std::move(outcome).error());
     }
     session.append(session::TaskFinished{.id = task_id, .outcome = session::TaskOutcome::COMPLETED});
     if (*outcome) emit(events, SessionNotice{.text = "[history compacted automatically]\n"});
-    emit(events, TurnCompleted{});
+    emit(events, TaskCompleted{});
 }
 
-Task<bool, Error> Agent::run_task(session::TaskId task_id, const EventSink &events) {
+Task<bool, Error> Agent::run_task_loop(session::TaskId task_id, const EventSink &events) {
     bool automatically_compacted = false;
     while (true) {
         context::ContextBuilder builder;
@@ -106,15 +106,20 @@ Task<bool, Error> Agent::run_task(session::TaskId task_id, const EventSink &even
         usize call_count = 0;
         agent::detail::ToolScheduler scheduler(*tools, events);
         provider::StreamCallbacks stream{
-            .on_assistant_text_delta = [&events](const provider::OutputItemId &,
-                                                 std::string_view text) { emit(events, AssistantTextDelta{.text = std::string(text)}); },
+            .on_assistant_text_delta =
+                [&events](const provider::OutputItemId &item_id, std::string_view text) {
+                    emit(events, AssistantTextDelta{.item_id = item_id.value, .text = std::string(text)});
+                },
             .on_item_completed =
-                [this, task_id, provider_call_id, &scheduler, &call_count](const provider::OutputItem &item) {
+                [this, task_id, provider_call_id, &events, &scheduler, &call_count](const provider::OutputItem &item) {
                     session.append(session::OutputItemCompleted{
                         .task_id = task_id,
                         .provider_call_id = provider_call_id,
                         .item = item,
                     });
+                    if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
+                        emit(events, AssistantMessageCompleted{.item_id = message->id.value, .phase = message->phase});
+                    }
                     if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) {
                         ++call_count;
                         scheduler.submit(call->call);
@@ -139,7 +144,6 @@ Task<bool, Error> Agent::run_task(session::TaskId task_id, const EventSink &even
             .id = provider_call_id,
             .completion = completion,
         });
-        emit(events, AssistantSegmentCompleted{});
         auto results = co_await scheduler.finish();
         if (!results.empty()) {
             session.append(session::ToolResults{

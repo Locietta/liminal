@@ -16,6 +16,7 @@ using namespace lighter::types;
 struct HeadlessAction {
     std::string type;
     std::string text;
+    std::string item_id;
     std::string call_id;
     std::string name;
     std::string command;
@@ -35,6 +36,7 @@ struct SnapshotBlock {
     std::string detail;
     std::string command;
     std::string call_id;
+    std::string output_item_id;
 };
 
 struct SnapshotAnchor {

@@ -38,6 +38,8 @@ struct Block {
     std::string tool_name;
     std::string command;
     std::string call_id;
+    std::string output_item_id;
+    provider::MessagePhase message_phase = provider::MessagePhase::UNSPECIFIED;
     std::chrono::steady_clock::time_point started_at;
 };
 
@@ -49,15 +51,16 @@ struct Transcript {
 private:
     void apply_one(const PromptSubmitted &event);
     void apply_one(const AssistantTextDelta &event);
-    void apply_one(const AssistantSegmentCompleted &event);
+    void apply_one(const AssistantMessageCompleted &event);
     void apply_one(const ToolStarted &event, std::chrono::steady_clock::time_point now);
     void apply_one(const ToolCompleted &event);
-    void apply_one(const TurnCompleted &event);
-    void apply_one(const TurnCancelled &event);
-    void apply_one(const TurnFailed &event);
+    void apply_one(const TaskCompleted &event);
+    void apply_one(const TaskCancelled &event);
+    void apply_one(const TaskFailed &event);
     void apply_one(const SessionNotice &event);
     void apply_one(const ModelSelected &event);
     void finish_streaming(BlockState state);
+    void finish_assistant(std::string_view item_id, BlockState state, provider::MessagePhase phase);
     Block &append(Block block);
 
     u64 next_id = 1;

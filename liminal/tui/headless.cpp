@@ -177,9 +177,9 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
         }
         screen.apply(PromptSubmitted{.text = std::move(prompt)});
     } else if (action.type == "assistant_delta") {
-        screen.apply(AssistantTextDelta{.text = action.text});
-    } else if (action.type == "assistant_segment_completed") {
-        screen.apply(AssistantSegmentCompleted{});
+        screen.apply(AssistantTextDelta{.item_id = action.item_id, .text = action.text});
+    } else if (action.type == "assistant_message_completed") {
+        screen.apply(AssistantMessageCompleted{.item_id = action.item_id});
     } else if (action.type == "tool_started") {
         screen.apply(ToolStarted{.call_id = action.call_id, .name = action.name, .description = action.text, .command = action.command});
     } else if (action.type == "tool_completed") {
@@ -190,12 +190,12 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
             .summary = action.text,
             .is_error = action.is_error,
         });
-    } else if (action.type == "turn_completed") {
-        screen.apply(TurnCompleted{});
-    } else if (action.type == "turn_cancelled") {
-        screen.apply(TurnCancelled{});
-    } else if (action.type == "turn_failed") {
-        screen.apply(TurnFailed{.message = action.text});
+    } else if (action.type == "task_completed") {
+        screen.apply(TaskCompleted{});
+    } else if (action.type == "task_cancelled") {
+        screen.apply(TaskCancelled{});
+    } else if (action.type == "task_failed") {
+        screen.apply(TaskFailed{.message = action.text});
     } else if (action.type == "notice") {
         screen.add_notice(action.text);
     } else if (action.type == "scroll") {
@@ -264,7 +264,8 @@ HeadlessSnapshot HeadlessSession::inspect() const {
                                    .text = block.text,
                                    .detail = block.detail,
                                    .command = block.command,
-                                   .call_id = block.call_id});
+                                   .call_id = block.call_id,
+                                   .output_item_id = block.output_item_id});
     }
     for (i32 row = 0; row < frame.surface.rows; ++row) snapshot.visible_text.push_back(frame.surface.row_text(row));
     for (i32 row = 0; row < frame.surface.rows; ++row) {

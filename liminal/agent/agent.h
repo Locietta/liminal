@@ -21,7 +21,7 @@ struct Agent {
 
     /// Runs one user task. Semantic session entries are appended as their
     /// lifecycle boundaries complete, so partial progress remains resumable.
-    lighter::Task<void, Error> run_turn(std::string prompt, EventSink events);
+    lighter::Task<void, Error> run_task(std::string prompt, EventSink events);
 
     lighter::Task<void, Error> compact(std::string_view instructions);
 
@@ -35,7 +35,7 @@ struct Agent {
     session::Session session;
 
 private:
-    lighter::Task<bool, Error> run_task(session::TaskId task_id, const EventSink &events);
+    lighter::Task<bool, Error> run_task_loop(session::TaskId task_id, const EventSink &events);
 };
 
 } // namespace liminal

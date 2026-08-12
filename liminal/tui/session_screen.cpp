@@ -754,7 +754,7 @@ void SessionScreen::apply(const Event &event) {
     }
     if (const auto *selected = std::get_if<ModelSelected>(&event)) set_model(selected->name, selected->effort);
     if (std::holds_alternative<PromptSubmitted>(event)) {
-        completed_turn_elapsed.reset();
+        completed_task_elapsed.reset();
         state = SessionState::WAITING;
     }
     if (std::holds_alternative<AssistantTextDelta>(event)) state = SessionState::STREAMING;
@@ -764,19 +764,19 @@ void SessionScreen::apply(const Event &event) {
             transcript.blocks, [](const Block &block) { return block.kind == BlockKind::TOOL && block.state == BlockState::RUNNING; });
         state = running ? SessionState::RUNNING_TOOLS : SessionState::STREAMING;
     }
-    if (std::holds_alternative<TurnCompleted>(event)) {
-        completed_turn_elapsed = was_working && now >= turn_started_at ? now - turn_started_at : std::chrono::steady_clock::duration{};
+    if (std::holds_alternative<TaskCompleted>(event)) {
+        completed_task_elapsed = was_working && now >= task_started_at ? now - task_started_at : std::chrono::steady_clock::duration{};
         state = SessionState::COMPLETED;
     }
-    if (std::holds_alternative<TurnCancelled>(event)) {
-        completed_turn_elapsed.reset();
+    if (std::holds_alternative<TaskCancelled>(event)) {
+        completed_task_elapsed.reset();
         state = SessionState::CANCELLED;
     }
-    if (std::holds_alternative<TurnFailed>(event)) {
-        completed_turn_elapsed.reset();
+    if (std::holds_alternative<TaskFailed>(event)) {
+        completed_task_elapsed.reset();
         state = SessionState::FAILED;
     }
-    if (!was_working && working()) turn_started_at = now;
+    if (!was_working && working()) task_started_at = now;
 }
 
 void SessionScreen::add_notice(std::string text) { apply(SessionNotice{.text = trim_notice(std::move(text))}); }
@@ -1045,7 +1045,7 @@ bool SessionScreen::animating() const { return working() || has_elapsed_running_
 std::vector<LayoutRow> SessionScreen::activity_rows() const {
     if (working()) {
         const auto now = monotonic_now();
-        const auto elapsed = now >= turn_started_at ? now - turn_started_at : std::chrono::steady_clock::duration{};
+        const auto elapsed = now >= task_started_at ? now - task_started_at : std::chrono::steady_clock::duration{};
         std::vector<LayoutRow> rows(2);
         append_shimmer(rows.front().spans, "• Working…", elapsed);
         if (elapsed >= k_working_elapsed_threshold) {
@@ -1054,10 +1054,10 @@ std::vector<LayoutRow> SessionScreen::activity_rows() const {
         }
         return rows;
     }
-    if (!completed_turn_elapsed) return {};
+    if (!completed_task_elapsed) return {};
 
     std::vector<LayoutRow> rows(2);
-    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(*completed_turn_elapsed);
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(*completed_task_elapsed);
     append_span(rows.front().spans, "Finished (" + elapsed_text(seconds) + ")", Style::MUTED);
     return rows;
 }

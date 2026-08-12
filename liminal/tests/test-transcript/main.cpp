@@ -23,9 +23,9 @@ void require(bool condition, std::string message) {
 void check_stream_consolidation() {
     tui::Transcript transcript;
     transcript.apply(PromptSubmitted{.text = "hello"});
-    transcript.apply(AssistantTextDelta{.text = "one"});
-    transcript.apply(AssistantTextDelta{.text = " two"});
-    transcript.apply(AssistantSegmentCompleted{});
+    transcript.apply(AssistantTextDelta{.item_id = "message-1", .text = "one"});
+    transcript.apply(AssistantTextDelta{.item_id = "message-1", .text = " two"});
+    transcript.apply(AssistantMessageCompleted{.item_id = "message-1"});
 
     require(transcript.blocks.size() == 2, "adjacent assistant deltas must share one block");
     require(transcript.blocks[0].kind == tui::BlockKind::USER && transcript.blocks[0].text == "hello",
@@ -38,8 +38,8 @@ void check_stream_consolidation() {
 void check_tool_lifecycle() {
     tui::Transcript transcript;
     const auto started_at = std::chrono::steady_clock::time_point(std::chrono::seconds(7));
-    transcript.apply(AssistantTextDelta{.text = "checking"});
-    transcript.apply(AssistantSegmentCompleted{});
+    transcript.apply(AssistantTextDelta{.item_id = "message-1", .text = "checking"});
+    transcript.apply(AssistantMessageCompleted{.item_id = "message-1"});
     transcript.apply(ToolStarted{.call_id = "call-1", .name = "read_file", .description = "Read README.md"}, started_at);
     transcript.apply(ToolCompleted{
         .call_id = "call-1",
@@ -61,16 +61,16 @@ void check_tool_lifecycle() {
 
 void check_cancelled_partial_output() {
     tui::Transcript streaming;
-    streaming.apply(AssistantTextDelta{.text = "partial"});
-    streaming.apply(TurnCancelled{});
+    streaming.apply(AssistantTextDelta{.item_id = "partial", .text = "partial"});
+    streaming.apply(TaskCancelled{});
     require(streaming.blocks[0].state == tui::BlockState::CANCELLED && streaming.blocks[0].text == "partial",
             "streaming assistant output must remain visible after cancellation");
 
     tui::Transcript transcript;
-    transcript.apply(AssistantTextDelta{.text = "partial"});
-    transcript.apply(AssistantSegmentCompleted{});
+    transcript.apply(AssistantTextDelta{.item_id = "partial", .text = "partial"});
+    transcript.apply(AssistantMessageCompleted{.item_id = "partial"});
     transcript.apply(ToolStarted{.call_id = "call-1", .name = "exec_command"});
-    transcript.apply(TurnCancelled{});
+    transcript.apply(TaskCancelled{});
 
     require(transcript.blocks.size() == 3, "cancellation must preserve partial output, tool state, and a notice");
     require(transcript.blocks[0].state == tui::BlockState::COMPLETED && transcript.blocks[0].text == "partial",
@@ -79,6 +79,24 @@ void check_cancelled_partial_output() {
             "an interrupted tool must not remain running");
     require(transcript.blocks[2].kind == tui::BlockKind::NOTICE && transcript.blocks[2].state == tui::BlockState::CANCELLED,
             "cancellation must be recorded as a semantic notice");
+}
+
+void check_item_identity_survives_interleaved_tools() {
+    tui::Transcript transcript;
+    transcript.apply(AssistantTextDelta{.item_id = "commentary", .text = "Starting."});
+    transcript.apply(AssistantMessageCompleted{.item_id = "commentary", .phase = provider::MessagePhase::COMMENTARY});
+    transcript.apply(AssistantTextDelta{.item_id = "final", .text = "Fin"});
+    transcript.apply(ToolStarted{.call_id = "call-1", .name = "read_file"});
+    transcript.apply(AssistantTextDelta{.item_id = "final", .text = "ished."});
+    transcript.apply(AssistantMessageCompleted{.item_id = "final", .phase = provider::MessagePhase::FINAL});
+
+    require(transcript.blocks.size() == 3, "interleaved tool events split or discarded an assistant output item");
+    require(transcript.blocks[1].kind == tui::BlockKind::ASSISTANT && transcript.blocks[1].text == "Finished." &&
+                transcript.blocks[1].state == tui::BlockState::COMPLETED &&
+                transcript.blocks[1].message_phase == provider::MessagePhase::FINAL,
+            "assistant completion did not update the matching output item");
+    require(transcript.blocks[2].kind == tui::BlockKind::TOOL && transcript.blocks[2].state == tui::BlockState::RUNNING,
+            "interleaved tool identity was not retained independently");
 }
 
 void check_typed_model_selection() {
@@ -93,6 +111,7 @@ i32 run_all() {
     check_stream_consolidation();
     check_tool_lifecycle();
     check_cancelled_partial_output();
+    check_item_identity_survives_interleaved_tools();
     check_typed_model_selection();
     return 0;
 }

@@ -153,7 +153,7 @@ void test_successful_turn() {
     EventSink sink = [&events](const Event &event) { events.push_back(event); };
 
     lighter::EventLoop loop;
-    auto task = agent.run_turn("inspect", sink);
+    auto task = agent.run_task("inspect", sink);
     loop.schedule(task);
     loop.run();
     auto outcome = task.result();
@@ -161,12 +161,15 @@ void test_successful_turn() {
     require(outcome.has_value(), "agent turn failed");
     require(events.size() == 7, "agent emitted an unexpected event count");
     require(std::holds_alternative<AssistantTextDelta>(events[0]), "text delta must be the first response event");
-    require(std::holds_alternative<AssistantSegmentCompleted>(events[1]), "assistant segment must finish before its tool");
+    require(std::holds_alternative<AssistantMessageCompleted>(events[1]), "assistant message must finish before its tool");
+    require(std::get<AssistantTextDelta>(events[0]).item_id == "message-1" &&
+                std::get<AssistantMessageCompleted>(events[1]).item_id == "message-1",
+            "agent events did not preserve assistant output-item identity");
     require(std::holds_alternative<ToolStarted>(events[2]), "tool start event is missing");
     require(std::holds_alternative<ToolCompleted>(events[3]), "tool completion event is missing");
     require(std::holds_alternative<AssistantTextDelta>(events[4]), "continuation text delta is missing");
-    require(std::holds_alternative<AssistantSegmentCompleted>(events[5]), "continuation segment completion is missing");
-    require(std::holds_alternative<TurnCompleted>(events[6]), "turn completion event is missing");
+    require(std::holds_alternative<AssistantMessageCompleted>(events[5]), "continuation message completion is missing");
+    require(std::holds_alternative<TaskCompleted>(events[6]), "task completion event is missing");
     require(agent.session.entries.size() == 8, "semantic session has the wrong number of entries");
     require(std::holds_alternative<session::TaskStarted>(agent.session.entries[0].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
@@ -222,7 +225,7 @@ void test_long_tool_loop() {
     Agent agent(std::move(choice), tools);
 
     lighter::EventLoop loop;
-    auto task = agent.run_turn("keep working", {});
+    auto task = agent.run_task("keep working", {});
     loop.schedule(task);
     loop.run();
 
@@ -267,7 +270,7 @@ void test_tool_starts_before_provider_call_finishes() {
     Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
     std::vector<Event> events;
     lighter::EventLoop loop;
-    auto task = agent.run_turn("work online", [&events](const Event &event) { events.push_back(event); });
+    auto task = agent.run_task("work online", [&events](const Event &event) { events.push_back(event); });
     loop.schedule(task);
     loop.run();
 
@@ -345,7 +348,7 @@ void test_tool_execution_semantics() {
     Agent agent(std::move(choice), tools);
 
     lighter::EventLoop loop;
-    auto task = agent.run_turn("schedule tools", {});
+    auto task = agent.run_task("schedule tools", {});
     loop.schedule(task);
     loop.run();
 
@@ -398,13 +401,13 @@ void test_automatic_compaction() {
 
     std::vector<Event> events;
     lighter::EventLoop loop;
-    auto task = agent.run_turn("latest", [&events](const Event &event) { events.push_back(event); });
+    auto task = agent.run_task("latest", [&events](const Event &event) { events.push_back(event); });
     loop.schedule(task);
     loop.run();
 
     require(task.result().has_value(), "automatic compaction turn failed");
-    require(events.size() == 3 && std::holds_alternative<AssistantSegmentCompleted>(events[0]) &&
-                std::holds_alternative<SessionNotice>(events[1]) && std::holds_alternative<TurnCompleted>(events[2]),
+    require(events.size() == 3 && std::holds_alternative<AssistantMessageCompleted>(events[0]) &&
+                std::holds_alternative<SessionNotice>(events[1]) && std::holds_alternative<TaskCompleted>(events[2]),
             "automatic compaction emitted the wrong lifecycle events");
     require(agent.session.entries.size() == 7 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[4].payload) &&
@@ -455,7 +458,7 @@ void test_multiple_automatic_compactions_in_one_turn() {
 
     std::vector<Event> events;
     lighter::EventLoop loop;
-    auto task = agent.run_turn("latest", [&events](const Event &event) { events.push_back(event); });
+    auto task = agent.run_task("latest", [&events](const Event &event) { events.push_back(event); });
     loop.schedule(task);
     loop.run();
 
@@ -498,7 +501,7 @@ void test_proactive_compaction_uses_reported_context() {
     append_session_message(agent.session, "old", "answer", {.input_tokens = 70, .output_tokens = 18, .context_tokens = 88});
 
     lighter::EventLoop loop;
-    auto task = agent.run_turn("latest", {});
+    auto task = agent.run_task("latest", {});
     loop.schedule(task);
     loop.run();
 
@@ -532,7 +535,7 @@ void test_failed_turn_does_not_report_staged_compaction() {
 
     std::vector<Event> events;
     lighter::EventLoop loop;
-    auto task = agent.run_turn("latest", [&events](const Event &event) { events.push_back(event); });
+    auto task = agent.run_task("latest", [&events](const Event &event) { events.push_back(event); });
     loop.schedule(task);
     loop.run();
     auto outcome = task.result();
@@ -542,8 +545,7 @@ void test_failed_turn_does_not_report_staged_compaction() {
     require(agent.session.entries.size() == 6 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
                 std::get<session::TaskFinished>(agent.session.entries.back().payload).outcome == session::TaskOutcome::FAILED,
             "failed task did not retain its resumable semantic progress");
-    require(events.size() == 1 && std::holds_alternative<AssistantSegmentCompleted>(events[0]),
-            "failed turn reported an uncommitted automatic compaction");
+    require(events.empty(), "failed task emitted an assistant-message boundary without an assistant message");
     provider_mock.verify();
 }
 

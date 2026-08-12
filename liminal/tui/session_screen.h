@@ -191,8 +191,8 @@ struct SessionScreen {
     std::optional<SelectionState> selection;
     bool external_editor_active = false;
     SessionState state = SessionState::EDITING;
-    std::chrono::steady_clock::time_point turn_started_at;
-    std::optional<std::chrono::steady_clock::duration> completed_turn_elapsed;
+    std::chrono::steady_clock::time_point task_started_at;
+    std::optional<std::chrono::steady_clock::duration> completed_task_elapsed;
     mutable std::unordered_map<u64, CachedBlockLayout> layout_cache;
     mutable LayoutDiagnostics diagnostics;
 
