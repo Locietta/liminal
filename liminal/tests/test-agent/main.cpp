@@ -54,6 +54,23 @@ void emit_tool_call(const provider::StreamCallbacks &callbacks, std::string id, 
     }
 }
 
+session::TaskId append_session_message(session::Session &log, std::string prompt, std::string text, provider::Usage usage = {}) {
+    const auto task_id = log.start_task(std::move(prompt));
+    log.append(session::OutputItemCompleted{
+        .task_id = task_id,
+        .provider_call_id = {.value = 1},
+        .item = provider::AssistantMessageItem{.id = {.value = "seed"}, .parts = {{.text = std::move(text)}}},
+    });
+    if (usage.context_tokens != 0 || usage.input_tokens != 0 || usage.output_tokens != 0) {
+        log.append(session::ProviderCallCompleted{
+            .task_id = task_id,
+            .id = {.value = 1},
+            .completion = {.usage = usage},
+        });
+    }
+    return task_id;
+}
+
 std::vector<context::InstructionSource> compact_test_instructions() {
     return {{
         .authority = context::InstructionAuthority::APPLICATION,
@@ -95,9 +112,9 @@ void test_successful_turn() {
         })
         .then_calls([](const provider::History &history, const std::vector<provider::ToolDefinition> &,
                        const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
-            require(history.size() == 5 && history[0].role == provider::Role::SYSTEM && history[1].role == provider::Role::DEVELOPER &&
+            require(history.size() == 6 && history[0].role == provider::Role::SYSTEM && history[1].role == provider::Role::DEVELOPER &&
                         history[2].role == provider::Role::USER && history[3].role == provider::Role::ASSISTANT &&
-                        history[4].role == provider::Role::USER,
+                        history[4].role == provider::Role::ASSISTANT && history[5].role == provider::Role::USER,
                     "tool continuation used the wrong message roles");
             emit_message(callbacks, "message-2", "done", true);
             co_return provider::ProviderCallCompletion{
@@ -150,15 +167,17 @@ void test_successful_turn() {
     require(std::holds_alternative<AssistantTextDelta>(events[4]), "continuation text delta is missing");
     require(std::holds_alternative<AssistantSegmentCompleted>(events[5]), "continuation segment completion is missing");
     require(std::holds_alternative<TurnCompleted>(events[6]), "turn completion event is missing");
-    require(agent.session.entries.size() == 4, "transactional session has the wrong number of entries");
-    require(std::holds_alternative<session::UserMessage>(agent.session.entries[0].payload) &&
-                std::holds_alternative<session::AgentOutput>(agent.session.entries[1].payload) &&
-                std::holds_alternative<session::ToolResults>(agent.session.entries[2].payload) &&
-                std::holds_alternative<session::AgentOutput>(agent.session.entries[3].payload),
-            "session entries do not preserve user, agent-output, tool-result, agent-output semantics");
-    const auto &first_output = std::get<session::AgentOutput>(agent.session.entries[1].payload);
-    require(first_output.usage.input_tokens == 10 && first_output.usage.output_tokens == 5 && first_output.model == "fake-model" &&
-                first_output.request_id == "request-1",
+    require(agent.session.entries.size() == 8, "semantic session has the wrong number of entries");
+    require(std::holds_alternative<session::TaskStarted>(agent.session.entries[0].payload) &&
+                std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
+                std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[2].payload) &&
+                std::holds_alternative<session::ProviderCallCompleted>(agent.session.entries[3].payload) &&
+                std::holds_alternative<session::ToolResults>(agent.session.entries[4].payload) &&
+                std::holds_alternative<session::TaskFinished>(agent.session.entries[7].payload),
+            "session entries do not preserve task, output-item, provider-call, tool-result, and finish semantics");
+    const auto &first_call = std::get<session::ProviderCallCompleted>(agent.session.entries[3].payload);
+    require(first_call.completion.usage.input_tokens == 10 && first_call.completion.usage.output_tokens == 5 &&
+                first_call.completion.model == "fake-model" && first_call.completion.request_id == "request-1",
             "session did not retain normalized response usage and provenance");
 
     auto compact = agent.compact("keep decisions");
@@ -166,13 +185,13 @@ void test_successful_turn() {
     compact_loop.schedule(compact);
     compact_loop.run();
     require(compact.result().has_value(), "agent compaction failed");
-    require(agent.session.entries.size() == 5 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries.back().payload),
+    require(agent.session.entries.size() == 9 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries.back().payload),
             "compaction must append a checkpoint without deleting session entries");
     auto compacted_context = agent.context_manifest();
     require(compacted_context && compacted_context->provider_history.size() == 3 &&
                 compacted_context->provider_history[0].role == provider::Role::SYSTEM &&
                 compacted_context->provider_history[1].role == provider::Role::DEVELOPER &&
-                compacted_context->omitted_session_entries == 4 && compacted_context->session_entries.size() == 1,
+                compacted_context->omitted_session_entries == 8 && compacted_context->session_entries.size() == 1,
             "compaction did not reconstruct the instruction prefix");
     provider_mock.verify();
 }
@@ -209,7 +228,7 @@ void test_long_tool_loop() {
 
     require(task.result().has_value(), "a productive tool loop longer than 32 iterations failed");
     require(*tool_executions == k_tool_calls, "the long-running turn did not execute every requested tool");
-    require(agent.session.entries.size() == 2 * k_tool_calls + 2, "the long-running turn did not commit its complete history");
+    require(agent.session.entries.size() == 3 * k_tool_calls + 4, "the long-running task did not retain its complete semantic history");
     provider_mock.verify();
 }
 
@@ -334,7 +353,11 @@ void test_tool_execution_semantics() {
     require(probe->max_running == k_parallel_calls, "parallel-safe tool calls were subject to a numeric concurrency cap");
     require(!probe->exclusive_overlapped, "an exclusive tool overlapped the preceding parallel wave");
     require(!probe->trailing_started_early, "a parallel tool crossed an exclusive ordering barrier");
-    const auto &results = std::get<session::ToolResults>(agent.session.entries[2].payload).results;
+    const auto result_entry = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
+        return std::holds_alternative<session::ToolResults>(entry.payload);
+    });
+    require(result_entry != agent.session.entries.end(), "tool scheduling task did not retain its result batch");
+    const auto &results = std::get<session::ToolResults>(result_entry->payload).results;
     require(results.size() == k_parallel_calls + 2 && results.front().call_id == "parallel-0" &&
                 results[k_parallel_calls - 1].call_id == "parallel-39" && results[k_parallel_calls].call_id == "exclusive" &&
                 results.back().call_id == "trailing",
@@ -371,8 +394,7 @@ void test_automatic_compaction() {
         .entry = {.provider = "fake", .id = "test", .context_window = 80, .max_output_tokens = 10},
     };
     Agent agent(std::move(choice), tools, compact_test_instructions());
-    agent.session.append(session::UserMessage{.text = std::string(100, 'u')});
-    agent.session.append(session::AgentOutput{.parts = {provider::TextPart{.text = std::string(100, 'a')}}});
+    append_session_message(agent.session, std::string(100, 'u'), std::string(100, 'a'));
 
     std::vector<Event> events;
     lighter::EventLoop loop;
@@ -384,8 +406,9 @@ void test_automatic_compaction() {
     require(events.size() == 3 && std::holds_alternative<AssistantSegmentCompleted>(events[0]) &&
                 std::holds_alternative<SessionNotice>(events[1]) && std::holds_alternative<TurnCompleted>(events[2]),
             "automatic compaction emitted the wrong lifecycle events");
-    require(agent.session.entries.size() == 5 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
-                std::holds_alternative<session::AgentOutput>(agent.session.entries[4].payload),
+    require(agent.session.entries.size() == 7 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
+                std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[4].payload) &&
+                std::holds_alternative<session::TaskFinished>(agent.session.entries[6].payload),
             "automatic compaction did not commit a semantic checkpoint with the turn");
     provider_mock.verify();
 }
@@ -428,8 +451,7 @@ void test_multiple_automatic_compactions_in_one_turn() {
         .entry = {.provider = "fake", .id = "test", .context_window = 2'000, .max_output_tokens = 10},
     };
     Agent agent(std::move(choice), tools, compact_test_instructions());
-    agent.session.append(session::UserMessage{.text = std::string(4'000, 'u')});
-    agent.session.append(session::AgentOutput{.parts = {provider::TextPart{.text = std::string(4'000, 'a')}}});
+    append_session_message(agent.session, std::string(4'000, 'u'), std::string(4'000, 'a'));
 
     std::vector<Event> events;
     lighter::EventLoop loop;
@@ -440,8 +462,8 @@ void test_multiple_automatic_compactions_in_one_turn() {
     require(task.result().has_value(), "a turn requiring multiple automatic compactions failed");
     require(*compactions == 2, "the long-running turn did not compact as often as needed");
     require(*tool_executions == 1, "the compacted turn did not execute its tool call");
-    require(agent.session.entries.size() == 8 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
-                std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[6].payload),
+    require(agent.session.entries.size() == 11 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
+                std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[7].payload),
             "the turn did not commit both automatic checkpoints");
     require(std::ranges::count_if(events, [](const Event &event) { return std::holds_alternative<SessionNotice>(event); }) == 1,
             "multiple automatic compactions must emit one committed-turn notice");
@@ -473,11 +495,7 @@ void test_proactive_compaction_uses_reported_context() {
         .entry = {.provider = "fake", .id = "test", .context_window = 100, .max_output_tokens = 1},
     };
     Agent agent(std::move(choice), tools, compact_test_instructions());
-    agent.session.append(session::UserMessage{.text = "old"});
-    agent.session.append(session::AgentOutput{
-        .parts = {provider::TextPart{.text = "answer"}},
-        .usage = {.input_tokens = 70, .output_tokens = 18, .context_tokens = 88},
-    });
+    append_session_message(agent.session, "old", "answer", {.input_tokens = 70, .output_tokens = 18, .context_tokens = 88});
 
     lighter::EventLoop loop;
     auto task = agent.run_turn("latest", {});
@@ -485,7 +503,7 @@ void test_proactive_compaction_uses_reported_context() {
     loop.run();
 
     require(task.result().has_value(), "proactive automatic compaction turn failed");
-    require(agent.session.entries.size() == 5 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload),
+    require(agent.session.entries.size() == 8 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[4].payload),
             "90 percent context usage did not create an automatic checkpoint");
     provider_mock.verify();
 }
@@ -510,8 +528,7 @@ void test_failed_turn_does_not_report_staged_compaction() {
         .entry = {.provider = "fake", .id = "test", .context_window = 80, .max_output_tokens = 10},
     };
     Agent agent(std::move(choice), tools, compact_test_instructions());
-    agent.session.append(session::UserMessage{.text = std::string(100, 'u')});
-    agent.session.append(session::AgentOutput{.parts = {provider::TextPart{.text = std::string(100, 'a')}}});
+    append_session_message(agent.session, std::string(100, 'u'), std::string(100, 'a'));
 
     std::vector<Event> events;
     lighter::EventLoop loop;
@@ -522,7 +539,9 @@ void test_failed_turn_does_not_report_staged_compaction() {
 
     require(outcome.has_error() && outcome.error().detail.contains("context window exhausted"),
             "failed completion did not report context exhaustion");
-    require(agent.session.entries.size() == 2, "failed turn committed its staged compaction checkpoint");
+    require(agent.session.entries.size() == 6 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
+                std::get<session::TaskFinished>(agent.session.entries.back().payload).outcome == session::TaskOutcome::FAILED,
+            "failed task did not retain its resumable semantic progress");
     require(events.size() == 1 && std::holds_alternative<AssistantSegmentCompleted>(events[0]),
             "failed turn reported an uncommitted automatic compaction");
     provider_mock.verify();
@@ -536,7 +555,7 @@ void test_context_manifest() {
         {.authority = context::InstructionAuthority::PROJECT, .origin = "project:duplicate", .content = "project policy"},
     };
     session::Session session_log({.value = 42});
-    session_log.append(session::UserMessage{.text = "change the project"});
+    session_log.start_task("change the project");
 
     auto manifest = context::ContextBuilder{}.build(instructions, session_log);
     require(manifest.has_value(), "failed to build a valid context manifest");

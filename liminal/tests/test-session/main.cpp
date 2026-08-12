@@ -1,6 +1,8 @@
 #include <cstdio>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 
 #include <lighter/types.hpp>
@@ -19,14 +21,25 @@ void require(bool condition, std::string_view message) {
     }
 }
 
+session::EntryId append_message(session::Session &log, session::TaskId task_id, std::string text,
+                                session::ProviderCallId call_id = {.value = 1}) {
+    return log.append(session::OutputItemCompleted{
+        .task_id = task_id,
+        .provider_call_id = call_id,
+        .item = provider::AssistantMessageItem{.id = {.value = "message"}, .parts = {{.text = std::move(text)}}},
+    });
+}
+
 void test_append_only_branching() {
     session::Session log({.value = 7});
-    const auto root = log.append(session::UserMessage{.text = "first task"});
-    const auto original_leaf = log.append(session::AgentOutput{{provider::TextPart{.text = "first answer"}}});
+    const auto first_task = log.start_task("first task");
+    const auto root = session::EntryId{.value = 1};
+    const auto original_leaf = append_message(log, first_task, "first answer");
 
     auto selected = log.select_leaf(root);
     require(selected.has_value(), "failed to select a known session entry");
-    const auto alternate_leaf = log.append(session::UserMessage{.text = "alternate task"});
+    log.start_task("alternate task");
+    const auto alternate_leaf = *log.active_leaf;
 
     require(log.id.value == 7 && log.entries.size() == 3, "branching changed the session identity or deleted entries");
     require(log.find(original_leaf) != nullptr, "branching deleted the original leaf");
@@ -42,14 +55,17 @@ void test_append_only_branching() {
 
 void test_checkpoint_projection() {
     session::Session log({.value = 11});
-    log.append(session::UserMessage{.text = "old task"});
-    log.append(session::AgentOutput{{provider::TextPart{.text = "old answer"}}});
+    const auto old_task = log.start_task("old task");
+    append_message(log, old_task, "old answer");
 
     session::ContextCheckpoint checkpoint;
     checkpoint.items.push_back(session::ContextInput{{provider::TextPart{.text = "summary"}}});
-    checkpoint.items.push_back(session::AgentOutput{{provider::TextPart{.text = "preserved answer"}}});
+    checkpoint.items.push_back(session::CheckpointOutput{
+        .item = provider::AssistantMessageItem{.id = {.value = "checkpoint"}, .parts = {{.text = "preserved answer"}}},
+    });
     const auto checkpoint_id = log.append(std::move(checkpoint));
-    const auto recent_id = log.append(session::UserMessage{.text = "continue"});
+    log.start_task("continue");
+    const auto recent_id = *log.active_leaf;
 
     auto manifest = context::ContextBuilder{}.build({}, log);
     require(manifest.has_value(), "failed to project a checkpointed session");
@@ -65,9 +81,11 @@ void test_checkpoint_projection() {
 
 void test_cumulative_token_usage() {
     session::Session log({.value = 12});
-    const auto first = log.append(session::AgentOutput{.usage = {.input_tokens = 30, .output_tokens = 5, .context_tokens = 40}});
-    log.append(session::UserMessage{.text = "continue"});
-    log.append(session::AgentOutput{.usage = {.input_tokens = 50, .output_tokens = 7}});
+    const auto first = log.append(session::ProviderCallCompleted{
+        .completion = {.usage = {.input_tokens = 30, .output_tokens = 5, .context_tokens = 40}},
+    });
+    log.start_task("continue");
+    log.append(session::ProviderCallCompleted{.completion = {.usage = {.input_tokens = 50, .output_tokens = 7}}});
 
     require(log.tokens_used() == 97, "session token usage did not prefer normalized response totals");
 
@@ -77,16 +95,31 @@ void test_cumulative_token_usage() {
 
 void test_reply_selection() {
     session::Session log({.value = 13});
-    log.append(session::UserMessage{.text = "first"});
-    log.append(session::AgentOutput{.parts = {provider::TextPart{.text = "first answer"}}});
+    const auto first_task = log.start_task("first");
+    append_message(log, first_task, "first answer");
     const auto first_leaf = *log.active_leaf;
-    log.append(session::UserMessage{.text = "second"});
-    log.append(session::AgentOutput{
-        .parts = {provider::TextPart{.text = "checking"}, provider::ToolCall{.id = "call", .name = "read_file"}},
+    const auto second_task = log.start_task("second");
+    append_message(log, second_task, "checking");
+    log.append(session::OutputItemCompleted{
+        .task_id = second_task,
+        .provider_call_id = {.value = 2},
+        .item =
+            provider::ToolCallItem{
+                .id = {.value = "tool"},
+                .call = {.id = "call", .name = "read_file"},
+            },
     });
-    log.append(session::ToolResults{});
-    log.append(session::AgentOutput{
-        .parts = {provider::OpaquePart{.provider_tag = "test", .payload = "private"}, provider::TextPart{.text = "second answer"}}});
+    log.append(session::ToolResults{.task_id = second_task, .provider_call_id = {.value = 2}});
+    log.append(session::OutputItemCompleted{
+        .task_id = second_task,
+        .provider_call_id = {.value = 3},
+        .item =
+            provider::ProviderOpaqueItem{
+                .id = {.value = "opaque"},
+                .part = {.provider_tag = "test", .payload = "private"},
+            },
+    });
+    append_message(log, second_task, "second answer", {.value = 3});
 
     require(log.reply_from_latest() == "checking\n\nsecond answer",
             "latest reply did not join textual tool-round segments or exclude non-text parts");

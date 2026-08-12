@@ -25,21 +25,47 @@ struct EntryId {
     auto operator<=>(const EntryId &) const = default;
 };
 
-struct UserMessage {
+struct TaskId {
+    u64 value = 0;
+    auto operator<=>(const TaskId &) const = default;
+};
+
+struct ProviderCallId {
+    u64 value = 0;
+    auto operator<=>(const ProviderCallId &) const = default;
+};
+
+struct TaskStarted {
+    TaskId id;
     std::string text;
 };
 
-struct AgentOutput {
-    std::vector<provider::Part> parts;
-    provider::Usage usage;
-    std::string model;
-    std::string request_id;
+struct OutputItemCompleted {
+    TaskId task_id;
+    ProviderCallId provider_call_id;
+    provider::OutputItem item;
 };
 
-/// All tool results from one provider round. Context policies must retain this
-/// entry together with the preceding AgentOutput that issued the calls.
+struct ProviderCallCompleted {
+    TaskId task_id;
+    ProviderCallId id;
+    provider::ProviderCallCompletion completion;
+};
+
 struct ToolResults {
+    TaskId task_id;
+    ProviderCallId provider_call_id;
     std::vector<provider::ToolResult> results;
+};
+
+enum struct TaskOutcome {
+    COMPLETED,
+    FAILED,
+};
+
+struct TaskFinished {
+    TaskId id;
+    TaskOutcome outcome = TaskOutcome::COMPLETED;
 };
 
 /// Synthetic, untrusted input produced by compaction. It lowers to a user
@@ -48,7 +74,11 @@ struct ContextInput {
     std::vector<provider::Part> parts;
 };
 
-using CheckpointItem = std::variant<ContextInput, AgentOutput>;
+struct CheckpointOutput {
+    provider::OutputItem item;
+};
+
+using CheckpointItem = std::variant<ContextInput, CheckpointOutput>;
 
 /// A derived context replacement. Earlier entries remain in the append-only
 /// log, but context projection starts here and expands these items.
@@ -56,7 +86,7 @@ struct ContextCheckpoint {
     std::vector<CheckpointItem> items;
 };
 
-using EntryPayload = std::variant<UserMessage, AgentOutput, ToolResults, ContextCheckpoint>;
+using EntryPayload = std::variant<TaskStarted, OutputItemCompleted, ProviderCallCompleted, ToolResults, TaskFinished, ContextCheckpoint>;
 
 struct SessionEntry {
     EntryId id;
@@ -69,6 +99,8 @@ struct Session {
     explicit Session(SessionId id);
 
     EntryId append(EntryPayload payload);
+    TaskId start_task(std::string text);
+    ProviderCallId next_provider_call();
 
     /// Moves the active cursor without modifying entries. Appending after
     /// selecting an ancestor creates another branch.
@@ -84,6 +116,8 @@ struct Session {
     std::vector<SessionEntry> entries;
     std::optional<EntryId> active_leaf;
     u64 next_entry_id = 1;
+    u64 next_task_id = 1;
+    u64 next_provider_call_id = 1;
 };
 
 } // namespace liminal::session

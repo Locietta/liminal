@@ -19,8 +19,8 @@ struct Agent {
     Agent(model::Choice model, ToolSet &tools);
     Agent(model::Choice model, ToolSet &tools, std::vector<context::InstructionSource> instructions);
 
-    /// One transactional user turn. Partial UI output is emitted as typed
-    /// events while provider history commits only after a terminal response.
+    /// Runs one user task. Semantic session entries are appended as their
+    /// lifecycle boundaries complete, so partial progress remains resumable.
     lighter::Task<void, Error> run_turn(std::string prompt, EventSink events);
 
     lighter::Task<void, Error> compact(std::string_view instructions);
@@ -33,6 +33,9 @@ struct Agent {
     ToolSet *tools;
     std::vector<context::InstructionSource> instructions;
     session::Session session;
+
+private:
+    lighter::Task<bool, Error> run_task(session::TaskId task_id, const EventSink &events);
 };
 
 } // namespace liminal

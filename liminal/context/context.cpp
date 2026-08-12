@@ -38,8 +38,8 @@ void append_checkpoint_item(provider::History &history, const session::Checkpoin
             using T = std::remove_cvref_t<decltype(value)>;
             if constexpr (std::same_as<T, session::ContextInput>) {
                 history.push_back({.role = provider::Role::USER, .parts = value.parts});
-            } else if constexpr (std::same_as<T, session::AgentOutput>) {
-                history.push_back({.role = provider::Role::ASSISTANT, .parts = value.parts});
+            } else if constexpr (std::same_as<T, session::CheckpointOutput>) {
+                provider::append_output_item(history, value.item);
             }
         },
         item);
@@ -56,12 +56,14 @@ void append_entry(provider::History &history, const session::SessionEntry &entry
     std::visit(
         [&history, baseline](const auto &payload) {
             using T = std::remove_cvref_t<decltype(payload)>;
-            if constexpr (std::same_as<T, session::UserMessage>) {
+            if constexpr (std::same_as<T, session::TaskStarted>) {
                 provider::append_user(history, payload.text);
-            } else if constexpr (std::same_as<T, session::AgentOutput>) {
-                history.push_back({.role = provider::Role::ASSISTANT, .parts = payload.parts});
-                if (baseline && payload.usage.context_tokens != 0) {
-                    *baseline = UsageBaseline{.history_size = history.size(), .context_tokens = to_usize(payload.usage.context_tokens)};
+            } else if constexpr (std::same_as<T, session::OutputItemCompleted>) {
+                provider::append_output_item(history, payload.item);
+            } else if constexpr (std::same_as<T, session::ProviderCallCompleted>) {
+                if (baseline && payload.completion.usage.context_tokens != 0) {
+                    *baseline =
+                        UsageBaseline{.history_size = history.size(), .context_tokens = to_usize(payload.completion.usage.context_tokens)};
                 }
             } else if constexpr (std::same_as<T, session::ToolResults>) {
                 provider::append_tool_results(history, payload.results);
@@ -75,7 +77,7 @@ void append_entry(provider::History &history, const session::SessionEntry &entry
 }
 
 bool starts_semantic_turn(const session::SessionEntry &entry) {
-    return std::holds_alternative<session::UserMessage>(entry.payload) || std::holds_alternative<session::ContextCheckpoint>(entry.payload);
+    return std::holds_alternative<session::TaskStarted>(entry.payload) || std::holds_alternative<session::ContextCheckpoint>(entry.payload);
 }
 
 bool matches_instruction(const provider::Item &item, const InstructionSource &source) {
@@ -323,11 +325,42 @@ Result<session::ContextCheckpoint> ContextBuilder::take_checkpoint(provider::His
     }
     session::ContextCheckpoint checkpoint;
     checkpoint.items.reserve(history.size() - instruction_count);
+    usize output_index = 0;
     for (usize index = instruction_count; index < history.size(); ++index) {
         auto &item = history[index];
         switch (item.role) {
             case provider::Role::USER: checkpoint.items.push_back(session::ContextInput{.parts = std::move(item.parts)}); break;
-            case provider::Role::ASSISTANT: checkpoint.items.push_back(session::AgentOutput{.parts = std::move(item.parts)}); break;
+            case provider::Role::ASSISTANT: {
+                std::vector<provider::TextPart> text;
+                const auto next_id = [&] { return provider::OutputItemId{.value = "checkpoint:" + std::to_string(output_index++)}; };
+                const auto flush_text = [&] {
+                    if (text.empty()) return;
+                    checkpoint.items.push_back(session::CheckpointOutput{.item = provider::AssistantMessageItem{
+                                                                             .id = next_id(),
+                                                                             .parts = std::exchange(text, {}),
+                                                                             .phase = item.phase,
+                                                                         }});
+                };
+                for (auto &part : item.parts) {
+                    if (auto *value = std::get_if<provider::TextPart>(&part)) {
+                        text.push_back(std::move(*value));
+                    } else if (auto *value = std::get_if<provider::ToolCall>(&part)) {
+                        flush_text();
+                        checkpoint.items.push_back(session::CheckpointOutput{
+                            .item = provider::ToolCallItem{.id = next_id(), .call = std::move(*value)},
+                        });
+                    } else if (auto *value = std::get_if<provider::OpaquePart>(&part)) {
+                        flush_text();
+                        checkpoint.items.push_back(session::CheckpointOutput{
+                            .item = provider::ProviderOpaqueItem{.id = next_id(), .part = std::move(*value)},
+                        });
+                    } else {
+                        return lighter::outcome_error(Error::protocol("assistant checkpoint contained a tool result"));
+                    }
+                }
+                flush_text();
+                break;
+            }
             case provider::Role::SYSTEM:
             case provider::Role::DEVELOPER:
                 return lighter::outcome_error(Error::protocol("provider compaction inserted instructions into conversation context"));

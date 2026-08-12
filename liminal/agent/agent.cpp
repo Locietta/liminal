@@ -4,9 +4,7 @@
 #include "tool_scheduler.h"
 
 #include <string>
-#include <type_traits>
 #include <utility>
-#include <vector>
 
 namespace liminal {
 
@@ -25,29 +23,6 @@ void emit(const EventSink &events, Event event) {
     if (events) {
         events(event);
     }
-}
-
-session::AgentOutput agent_output(const std::vector<provider::OutputItem> &items, provider::ProviderCallCompletion completion) {
-    session::AgentOutput output{
-        .usage = completion.usage,
-        .model = std::move(completion.model),
-        .request_id = std::move(completion.request_id),
-    };
-    for (const auto &item : items) {
-        std::visit(
-            [&output](const auto &value) {
-                using T = std::decay_t<decltype(value)>;
-                if constexpr (std::is_same_v<T, provider::AssistantMessageItem>) {
-                    for (const auto &part : value.parts) output.parts.push_back(part);
-                } else if constexpr (std::is_same_v<T, provider::ToolCallItem>) {
-                    output.parts.push_back(value.call);
-                } else {
-                    output.parts.push_back(value.part);
-                }
-            },
-            item);
-    }
-    return output;
 }
 
 context::ContextBudget context_budget(const model::Entry &model) {
@@ -82,21 +57,27 @@ Result<context::ContextManifest> Agent::context_manifest() const {
 }
 
 Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
-    // Transactional: staged session entries replace committed state only
-    // after a complete terminal response. The UI transcript intentionally
-    // remains.
-    auto staged = session;
-    staged.append(session::UserMessage{.text = std::move(prompt)});
+    const auto task_id = session.start_task(std::move(prompt));
+    auto outcome = co_await run_task(task_id, events);
+    if (!outcome) {
+        session.append(session::TaskFinished{.id = task_id, .outcome = session::TaskOutcome::FAILED});
+        co_await fail(std::move(outcome).error());
+    }
+    session.append(session::TaskFinished{.id = task_id, .outcome = session::TaskOutcome::COMPLETED});
+    if (*outcome) emit(events, SessionNotice{.text = "[history compacted automatically]\n"});
+    emit(events, TurnCompleted{});
+}
 
+Task<bool, Error> Agent::run_task(session::TaskId task_id, const EventSink &events) {
     bool automatically_compacted = false;
     while (true) {
         context::ContextBuilder builder;
-        auto built = builder.build(instructions, staged, context_budget(model.entry));
+        auto built = builder.build(instructions, session, context_budget(model.entry));
         if (!built) {
             co_await fail(std::move(built).error());
         }
         if (needs_automatic_compaction(*built)) {
-            auto full = builder.build(instructions, staged);
+            auto full = builder.build(instructions, session);
             if (!full) {
                 co_await fail(std::move(full).error());
             }
@@ -110,10 +91,10 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
             if (checkpoint->items.empty()) {
                 co_await fail(Error::protocol("automatic compaction produced an empty checkpoint"));
             }
-            staged.append(*std::move(checkpoint));
+            session.append(*std::move(checkpoint));
             automatically_compacted = true;
 
-            built = builder.build(instructions, staged, context_budget(model.entry));
+            built = builder.build(instructions, session, context_budget(model.entry));
             if (!built) {
                 co_await fail(std::move(built).error());
             }
@@ -121,15 +102,19 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
                 co_await fail(Error::protocol("automatic compaction did not reduce context below its threshold"));
             }
         }
-        std::vector<provider::OutputItem> items;
+        const auto provider_call_id = session.next_provider_call();
         usize call_count = 0;
         agent::detail::ToolScheduler scheduler(*tools, events);
         provider::StreamCallbacks stream{
             .on_assistant_text_delta = [&events](const provider::OutputItemId &,
                                                  std::string_view text) { emit(events, AssistantTextDelta{.text = std::string(text)}); },
             .on_item_completed =
-                [&items, &scheduler, &call_count](const provider::OutputItem &item) {
-                    items.push_back(item);
+                [this, task_id, provider_call_id, &scheduler, &call_count](const provider::OutputItem &item) {
+                    session.append(session::OutputItemCompleted{
+                        .task_id = task_id,
+                        .provider_call_id = provider_call_id,
+                        .item = item,
+                    });
                     if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) {
                         ++call_count;
                         scheduler.submit(call->call);
@@ -138,22 +123,36 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
         };
         auto completed = co_await model.handle->complete(built->provider_history, tools->definitions(), stream);
         if (!completed) {
-            co_await scheduler.finish();
+            auto results = co_await scheduler.finish();
+            if (!results.empty()) {
+                session.append(session::ToolResults{
+                    .task_id = task_id,
+                    .provider_call_id = provider_call_id,
+                    .results = std::move(results),
+                });
+            }
             co_await fail(std::move(completed).error());
         }
         auto completion = *std::move(completed);
+        session.append(session::ProviderCallCompleted{
+            .task_id = task_id,
+            .id = provider_call_id,
+            .completion = completion,
+        });
         emit(events, AssistantSegmentCompleted{});
         auto results = co_await scheduler.finish();
+        if (!results.empty()) {
+            session.append(session::ToolResults{
+                .task_id = task_id,
+                .provider_call_id = provider_call_id,
+                .results = std::move(results),
+            });
+        }
 
         switch (completion.stop) {
             case provider::StopKind::DONE:
-                staged.append(agent_output(items, std::move(completion)));
-                session = std::move(staged);
-                if (automatically_compacted) {
-                    emit(events, SessionNotice{.text = "[history compacted automatically]\n"});
-                }
-                emit(events, TurnCompleted{});
-                co_return;
+                if (call_count == 0) co_return automatically_compacted;
+                break;
             case provider::StopKind::NEEDS_TOOL_RESULTS: break;
             case provider::StopKind::TRUNCATED:
                 co_await fail(Error::protocol("response truncated (" + completion.stop_detail + "); raise max_tokens"));
@@ -164,9 +163,6 @@ Task<void, Error> Agent::run_turn(std::string prompt, EventSink events) {
         if (call_count == 0) {
             co_await fail(Error::protocol("provider requested tool results without any tool calls"));
         }
-
-        staged.append(agent_output(items, std::move(completion)));
-        staged.append(session::ToolResults{.results = std::move(results)});
     }
 }
 
@@ -183,9 +179,7 @@ Task<void, Error> Agent::compact(std::string_view instructions) {
         co_await fail(std::move(checkpoint).error());
     }
     if (!checkpoint->items.empty()) {
-        auto staged = session;
-        staged.append(*std::move(checkpoint));
-        session = std::move(staged);
+        session.append(*std::move(checkpoint));
     }
 }
 

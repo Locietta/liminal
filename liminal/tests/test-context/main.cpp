@@ -28,6 +28,23 @@ void require(bool condition, std::string message) {
     }
 }
 
+void append_message(session::Session &log, session::TaskId task_id, std::string text, session::ProviderCallId call_id = {.value = 1}) {
+    log.append(session::OutputItemCompleted{
+        .task_id = task_id,
+        .provider_call_id = call_id,
+        .item = provider::AssistantMessageItem{.id = {.value = "message"}, .parts = {{.text = std::move(text)}}},
+    });
+}
+
+void append_tool_call(session::Session &log, session::TaskId task_id, std::string id, std::string name,
+                      session::ProviderCallId call_id = {.value = 1}) {
+    log.append(session::OutputItemCompleted{
+        .task_id = task_id,
+        .provider_call_id = call_id,
+        .item = provider::ToolCallItem{.id = {.value = "item-" + id}, .call = {.id = std::move(id), .name = std::move(name)}},
+    });
+}
+
 std::vector<context::InstructionSource> resolve_fixture() {
     const std::filesystem::path root = "workspace";
     const auto active = root / "src" / "module";
@@ -151,11 +168,11 @@ void test_manifest_deduplication_and_redacted_description() {
         },
     };
     session::Session session_log({.value = 7});
-    session_log.append(session::UserMessage{.text = "OLD SECRET"});
+    session_log.start_task("OLD SECRET");
     session::ContextCheckpoint checkpoint;
     checkpoint.items.push_back(session::ContextInput{.parts = {provider::TextPart{.text = "SUMMARY SECRET"}}});
     const auto checkpoint_id = session_log.append(std::move(checkpoint));
-    session_log.append(session::UserMessage{.text = "CURRENT SECRET"});
+    session_log.start_task("CURRENT SECRET");
 
     auto manifest = context::ContextBuilder{}.build(
         instructions, session_log, {.context_window_tokens = 100, .reserved_output_tokens = 10, .safety_margin_tokens = 5});
@@ -182,14 +199,18 @@ void test_manifest_deduplication_and_redacted_description() {
 
 void test_bounded_selection_keeps_complete_recent_turns() {
     session::Session session_log({.value = 11});
-    session_log.append(session::UserMessage{.text = std::string(80, 'a')});
-    session_log.append(session::AgentOutput{.parts = {provider::TextPart{.text = std::string(80, 'b')}}});
-    session_log.append(session::UserMessage{.text = "use a tool"});
-    session_log.append(session::AgentOutput{.parts = {provider::ToolCall{.id = "call", .name = "read", .input = {}}}});
-    session_log.append(session::ToolResults{.results = {{.call_id = "call", .content = std::string(80, 'r')}}});
-    session_log.append(session::AgentOutput{.parts = {provider::TextPart{.text = "tool conclusion"}}});
-    session_log.append(session::UserMessage{.text = "latest"});
-    session_log.append(session::AgentOutput{.parts = {provider::TextPart{.text = "answer"}}});
+    const auto old_task = session_log.start_task(std::string(80, 'a'));
+    append_message(session_log, old_task, std::string(80, 'b'));
+    const auto tool_task = session_log.start_task("use a tool");
+    append_tool_call(session_log, tool_task, "call", "read");
+    session_log.append(session::ToolResults{
+        .task_id = tool_task,
+        .provider_call_id = {.value = 1},
+        .results = {{.call_id = "call", .content = std::string(80, 'r')}},
+    });
+    append_message(session_log, tool_task, "tool conclusion", {.value = 2});
+    const auto latest_task = session_log.start_task("latest");
+    append_message(session_log, latest_task, "answer", {.value = 3});
 
     auto manifest = context::ContextBuilder{}.build({}, session_log,
                                                     {.context_window_tokens = 60, .reserved_output_tokens = 10, .safety_margin_tokens = 0});
@@ -204,13 +225,19 @@ void test_bounded_selection_keeps_complete_recent_turns() {
 
 void test_reported_usage_accounts_for_trailing_context() {
     session::Session session_log({.value = 12});
-    session_log.append(session::UserMessage{.text = std::string(200, 'u')});
-    session_log.append(session::AgentOutput{
-        .parts = {provider::TextPart{.text = std::string(200, 'a')}},
-        .usage = {.input_tokens = 50, .output_tokens = 20, .context_tokens = 70},
+    const auto task_id = session_log.start_task(std::string(200, 'u'));
+    append_message(session_log, task_id, std::string(200, 'a'));
+    session_log.append(session::ProviderCallCompleted{
+        .task_id = task_id,
+        .id = {.value = 1},
+        .completion = {.usage = {.input_tokens = 50, .output_tokens = 20, .context_tokens = 70}},
     });
-    session_log.append(session::ToolResults{.results = {{.call_id = "c", .content = std::string(15, 'r')}}});
-    session_log.append(session::UserMessage{.text = "tail"});
+    session_log.append(session::ToolResults{
+        .task_id = task_id,
+        .provider_call_id = {.value = 1},
+        .results = {{.call_id = "c", .content = std::string(15, 'r')}},
+    });
+    session_log.start_task("tail");
 
     auto manifest = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 100});
     require(manifest.has_value(), "reported usage rejected a valid context");

@@ -30,6 +30,14 @@ EntryId Session::append(EntryPayload payload) {
     return entry_id;
 }
 
+TaskId Session::start_task(std::string text) {
+    const TaskId task_id{.value = next_task_id++};
+    append(TaskStarted{.id = task_id, .text = std::move(text)});
+    return task_id;
+}
+
+ProviderCallId Session::next_provider_call() { return {.value = next_provider_call_id++}; }
+
 Result<void> Session::select_leaf(std::optional<EntryId> id) {
     if (id && !find(*id)) {
         return lighter::outcome_error(Error::protocol("cannot select an unknown session entry"));
@@ -66,29 +74,28 @@ std::optional<std::string> Session::reply_from_latest(usize ordinal) const {
 
     std::vector<std::string> replies;
     std::string reply;
-    bool in_turn = false;
-    const auto finish_turn = [&] {
+    bool in_task = false;
+    const auto finish_task = [&] {
         if (!reply.empty()) replies.push_back(std::exchange(reply, {}));
     };
     for (const auto *entry : active_branch()) {
-        if (std::holds_alternative<UserMessage>(entry->payload)) {
-            if (in_turn) finish_turn();
-            in_turn = true;
+        if (std::holds_alternative<TaskStarted>(entry->payload)) {
+            if (in_task) finish_task();
+            in_task = true;
             continue;
         }
-        if (!in_turn) continue;
-        const auto *output = std::get_if<AgentOutput>(&entry->payload);
+        if (!in_task) continue;
+        const auto *output = std::get_if<OutputItemCompleted>(&entry->payload);
         if (!output) continue;
-
+        const auto *message = std::get_if<provider::AssistantMessageItem>(&output->item);
+        if (!message) continue;
         std::string segment;
-        for (const auto &part : output->parts) {
-            if (const auto *text = std::get_if<provider::TextPart>(&part)) segment += text->text;
-        }
+        for (const auto &part : message->parts) segment += part.text;
         if (segment.empty()) continue;
         if (!reply.empty()) reply += "\n\n";
         reply += segment;
     }
-    if (in_turn) finish_turn();
+    if (in_task) finish_task();
     if (ordinal > replies.size()) return std::nullopt;
     return replies[replies.size() - ordinal];
 }
@@ -96,12 +103,13 @@ std::optional<std::string> Session::reply_from_latest(usize ordinal) const {
 u64 Session::tokens_used() const noexcept {
     u64 total = 0;
     for (const auto &entry : entries) {
-        const auto *output = std::get_if<AgentOutput>(&entry.payload);
-        if (!output) continue;
-        const auto uncached_tokens = output->usage.output_tokens > std::numeric_limits<u64>::max() - output->usage.input_tokens ?
+        const auto *call = std::get_if<ProviderCallCompleted>(&entry.payload);
+        if (!call) continue;
+        const auto &usage = call->completion.usage;
+        const auto uncached_tokens = usage.output_tokens > std::numeric_limits<u64>::max() - usage.input_tokens ?
                                          std::numeric_limits<u64>::max() :
-                                         output->usage.input_tokens + output->usage.output_tokens;
-        const auto response_tokens = output->usage.context_tokens != 0 ? output->usage.context_tokens : uncached_tokens;
+                                         usage.input_tokens + usage.output_tokens;
+        const auto response_tokens = usage.context_tokens != 0 ? usage.context_tokens : uncached_tokens;
         total = response_tokens > std::numeric_limits<u64>::max() - total ? std::numeric_limits<u64>::max() : total + response_tokens;
     }
     return total;
