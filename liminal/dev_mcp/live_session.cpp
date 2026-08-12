@@ -136,7 +136,7 @@ struct TerminalMirror {
             case 'J':
                 if (value(0, 0) == 2 || value(0, 0) == 3) surface.clear();
                 break;
-            case 'K': clear_row(); break;
+            case 'K': clear_row(value(0, 0)); break;
             case 'h':
                 if (parameters == "?25") cursor.visible = true;
                 if (parameters == "?1049") surface.clear();
@@ -167,10 +167,27 @@ struct TerminalMirror {
         return values;
     }
 
-    void clear_row() {
+    void clear_row(i32 mode) {
         if (cursor.row < 0 || cursor.row >= surface.rows) return;
-        const auto begin = surface.cells.begin() + static_cast<isize>(cursor.row * surface.columns);
-        std::fill(begin, begin + surface.columns, tui::Cell{});
+        const auto [begin, end] = [&] -> std::pair<i32, i32> {
+            switch (mode) {
+                case 0: return {std::clamp(cursor.column, 0, surface.columns), surface.columns};
+                case 1: return {0, std::clamp(cursor.column + 1, 0, surface.columns)};
+                case 2: return {0, surface.columns};
+                default: return {0, 0};
+            }
+        }();
+        const auto cell = [this](i32 column) -> tui::Cell & {
+            return surface.cells[static_cast<usize>(cursor.row * surface.columns + column)];
+        };
+        for (auto column = begin; column < end; ++column) {
+            auto owner = column;
+            while (owner > 0 && cell(owner).continuation) --owner;
+            cell(owner) = {};
+            for (auto continuation = owner + 1; continuation < surface.columns && cell(continuation).continuation; ++continuation) {
+                cell(continuation) = {};
+            }
+        }
     }
 
     tui::Surface surface;

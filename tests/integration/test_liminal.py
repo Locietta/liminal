@@ -43,9 +43,15 @@ def anthropic_mock():
     server, state = mock_anthropic.make_server()
     import threading
 
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{server.server_port}", state
-    server.shutdown()
+    server.daemon_threads = False
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", state
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 def openai_mock_fixture(**kwargs):
@@ -54,9 +60,15 @@ def openai_mock_fixture(**kwargs):
         server, state = mock_openai.make_server(**kwargs)
         import threading
 
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        yield f"http://127.0.0.1:{server.server_port}/v1", state
-        server.shutdown()
+        server.daemon_threads = False
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}/v1", state
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
 
     return fixture
 
@@ -71,9 +83,15 @@ def codex_auth_mock():
     server, state = mock_codex_auth.make_server()
     import threading
 
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{server.server_port}", state
-    server.shutdown()
+    server.daemon_threads = False
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", state
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 def configured_provider(api, base_url, api_key, models):
