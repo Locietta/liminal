@@ -2,6 +2,8 @@
 
 Liminal's interactive terminal interface keeps the transcript and prompt composer available at the same time. Tool activity updates in place, and long drafts can be handed to an external editor.
 
+Assistant replies use a soft, normal-weight neutral foreground. Markdown headings and strong text become bold white, emphasis becomes italic without getting brighter, and links remain underlined and distinct. Blockquotes render with a green `│` gutter and green text while preserving inline code, links, bold, and italic styling. Code and diffs keep their existing semantic palette, while labels and secondary status details use a stable muted neutral rather than terminal dim text.
+
 ## Turn activity
 
 While a turn is active, `• Working…` follows the newest output directly in the transcript, with one blank line after it separating turn activity from the prompt composer. A soft highlight shimmers across the label while its elapsed timer remains muted. When the turn completes, the line becomes a persistent muted `Finished (3s)` summary until the next turn begins and keeps the same trailing separation. It scrolls away naturally while browsing history. Scrolling does not replace the footer's model, workspace, context, and token metadata. Very short terminals drop the blank separator before hiding the activity itself.

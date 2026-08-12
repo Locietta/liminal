@@ -44,6 +44,10 @@ std::string_view trim(std::string_view text) {
 
 bool word_byte(char value) { return std::isalnum(static_cast<unsigned char>(value)) != 0; }
 
+Style emphasis_style(Style base) { return base == Style::QUOTE ? Style::QUOTE_EMPHASIS : Style::EMPHASIS; }
+
+Style italic_style(Style base) { return base == Style::QUOTE ? Style::QUOTE_ITALIC : Style::ITALIC; }
+
 std::vector<StyledSpan> parse_inline(std::string_view text, Style base) {
     std::vector<StyledSpan> spans;
     usize offset = 0;
@@ -84,7 +88,7 @@ std::vector<StyledSpan> parse_inline(std::string_view text, Style base) {
             const bool closes_inside_word =
                 delimiter == "__" && end != std::string_view::npos && end + 2 < text.size() && word_byte(text[end + 2]);
             if (end != std::string_view::npos && end > offset + 2 && !closes_inside_word) {
-                append_span(spans, text.substr(offset + 2, end - offset - 2), Style::EMPHASIS);
+                append_span(spans, text.substr(offset + 2, end - offset - 2), emphasis_style(base));
                 offset = end + 2;
                 continue;
             }
@@ -94,7 +98,7 @@ std::vector<StyledSpan> parse_inline(std::string_view text, Style base) {
             const bool closes_inside_word =
                 text[offset] == '_' && end != std::string_view::npos && end + 1 < text.size() && word_byte(text[end + 1]);
             if (end != std::string_view::npos && end > offset + 1 && !closes_inside_word) {
-                append_span(spans, text.substr(offset + 1, end - offset - 1), Style::ITALIC);
+                append_span(spans, text.substr(offset + 1, end - offset - 1), italic_style(base));
                 offset = end + 1;
                 continue;
             }
@@ -136,6 +140,15 @@ std::optional<usize> ordered_prefix(std::string_view line) {
 LogicalLine prose_line(std::string_view line, usize source_offset) {
     LogicalLine result{.source_offset = source_offset, .source_size = line.size()};
     auto content = trim_left(line);
+    if (content.starts_with('>')) {
+        content.remove_prefix(1);
+        if (content.starts_with(' ')) content.remove_prefix(1);
+        append_span(result.spans, "│ ", Style::QUOTE);
+        auto body = parse_inline(trim(content), Style::QUOTE);
+        result.spans.insert(result.spans.end(), std::make_move_iterator(body.begin()), std::make_move_iterator(body.end()));
+        result.continuation.push_back({.text = "│ ", .style = Style::QUOTE});
+        return result;
+    }
     usize heading = 0;
     while (heading < content.size() && heading < 6 && content[heading] == '#') ++heading;
     if (heading > 0 && heading < content.size() && content[heading] == ' ') {
@@ -145,25 +158,25 @@ LogicalLine prose_line(std::string_view line, usize source_offset) {
 
     if (content.size() >= 2 && (content.starts_with("- ") || content.starts_with("* ") || content.starts_with("+ "))) {
         append_span(result.spans, "• ", Style::MUTED);
-        auto body = parse_inline(content.substr(2), Style::NORMAL);
+        auto body = parse_inline(content.substr(2), Style::ASSISTANT);
         result.spans.insert(result.spans.end(), std::make_move_iterator(body.begin()), std::make_move_iterator(body.end()));
         result.continuation.push_back({.text = "  ", .style = Style::MUTED});
         return result;
     }
     if (const auto prefix = ordered_prefix(content)) {
         append_span(result.spans, content.substr(0, *prefix), Style::MUTED);
-        auto body = parse_inline(content.substr(*prefix), Style::NORMAL);
+        auto body = parse_inline(content.substr(*prefix), Style::ASSISTANT);
         result.spans.insert(result.spans.end(), std::make_move_iterator(body.begin()), std::make_move_iterator(body.end()));
         result.continuation.push_back({.text = "  ", .style = Style::MUTED});
         return result;
     }
     if (looks_like_diff(content)) {
-        append_span(result.spans, content, diff_style(content).value_or(Style::NORMAL));
+        append_span(result.spans, content, diff_style(content).value_or(Style::ASSISTANT));
         result.continuation.push_back({.text = "  ", .style = Style::MUTED});
         result.preserve_whitespace = true;
         return result;
     }
-    result.spans = parse_inline(trim(line), Style::NORMAL);
+    result.spans = parse_inline(trim(line), Style::ASSISTANT);
     return result;
 }
 

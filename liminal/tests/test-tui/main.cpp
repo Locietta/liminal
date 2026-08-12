@@ -118,6 +118,27 @@ void check_surface_cells_and_encoding() {
     require(encoded.ends_with("\x1b[1;4H\x1b[?25h"), "frame must restore the requested visible cursor");
     require(tui::encode_frame_diff(&frame, frame).empty(), "an unchanged frame must not emit terminal operations");
 
+    tui::Frame transcript_palette{.surface = tui::Surface(8, 1)};
+    transcript_palette.surface.write(0, 0, "T", tui::Style::ASSISTANT);
+    transcript_palette.surface.write(0, 1, "S", tui::Style::EMPHASIS);
+    transcript_palette.surface.write(0, 2, "I", tui::Style::ITALIC);
+    transcript_palette.surface.write(0, 3, "Q", tui::Style::QUOTE);
+    transcript_palette.surface.write(0, 4, "S", tui::Style::QUOTE_EMPHASIS);
+    transcript_palette.surface.write(0, 5, "I", tui::Style::QUOTE_ITALIC);
+    transcript_palette.surface.write(0, 6, "M", tui::Style::MUTED);
+    transcript_palette.surface.write(0, 7, "L", tui::Style::LINK);
+    const auto encoded_transcript = tui::encode_frame(transcript_palette);
+    require(encoded_transcript.contains("\x1b[0;22;38;2;204;204;204mT"), "assistant prose must use the softer normal-weight foreground");
+    require(encoded_transcript.contains("\x1b[0;1;38;2;255;255;255mS") && encoded_transcript.contains("\x1b[0;22;3;38;2;204;204;204mI"),
+            "strong and italic assistant text must apply only their Markdown attributes");
+    require(encoded_transcript.contains("\x1b[0;22;38;2;166;227;161mQ") && encoded_transcript.contains("\x1b[0;1;38;2;166;227;161mS") &&
+                encoded_transcript.contains("\x1b[0;22;3;38;2;166;227;161mI"),
+            "blockquotes must keep green normal, strong, and italic variants");
+    require(encoded_transcript.contains("\x1b[0;22;38;2;166;173;200mM") && !encoded_transcript.contains("\x1b[2m"),
+            "secondary text must use a stable neutral instead of terminal-dependent dim intensity");
+    require(encoded_transcript.contains("\x1b[0;22;4;38;2;137;220;235mL"),
+            "links must set their bright color and attributes independently of adjacent spans");
+
     tui::Frame palette{.surface = tui::Surface(12, 1)};
     constexpr tui::Style syntax_styles[] = {
         tui::Style::CODE,        tui::Style::CODE_BLOCK,    tui::Style::CODE_KEYWORD,  tui::Style::CODE_PREPROCESSOR,
@@ -128,10 +149,10 @@ void check_surface_cells_and_encoding() {
         palette.surface.write(0, static_cast<i32>(index), "K", syntax_styles[index]);
     }
     const auto encoded_palette = tui::encode_frame(palette);
-    require(encoded_palette.contains("\x1b[1;38;2;203;166;247mK"), "code keywords must use bold, high-luminance mauve");
-    require(encoded_palette.contains("\x1b[1;38;2;250;179;135mK"), "code preprocessors must use distinct bold, high-luminance peach");
-    require(encoded_palette.contains("\x1b[22;38;2;205;214;244mK"), "generic block code must use a calm near-foreground tint");
-    require(encoded_palette.contains("\x1b[22;38;2;249;226;175mK"), "inline code must keep a warm accent distinct from prose");
+    require(encoded_palette.contains("\x1b[0;1;38;2;203;166;247mK"), "code keywords must use bold, high-luminance mauve");
+    require(encoded_palette.contains("\x1b[0;1;38;2;250;179;135mK"), "code preprocessors must use distinct bold, high-luminance peach");
+    require(encoded_palette.contains("\x1b[0;22;38;2;205;214;244mK"), "generic block code must use a calm near-foreground tint");
+    require(encoded_palette.contains("\x1b[0;22;38;2;249;226;175mK"), "inline code must keep a warm accent distinct from prose");
     require(!encoded_palette.contains("\x1b[2m") && !encoded_palette.contains("\x1b[90m"),
             "syntax highlighting must not dim text or use a dark comment color");
 
@@ -140,8 +161,8 @@ void check_surface_cells_and_encoding() {
     diff_palette.surface.write(0, 1, "-", tui::Style::DIFF_DELETION);
     diff_palette.surface.write(0, 2, "@", tui::Style::DIFF_HUNK);
     const auto encoded_diff = tui::encode_frame(diff_palette);
-    require(encoded_diff.contains("\x1b[22;38;2;166;227;161m+") && encoded_diff.contains("\x1b[22;38;2;243;139;168m-") &&
-                encoded_diff.contains("\x1b[1;38;2;116;199;236m@"),
+    require(encoded_diff.contains("\x1b[0;22;38;2;166;227;161m+") && encoded_diff.contains("\x1b[0;22;38;2;243;139;168m-") &&
+                encoded_diff.contains("\x1b[0;1;38;2;116;199;236m@"),
             "diff styles must use fixed truecolor so brightness never depends on terminal ANSI definitions");
 
     tui::Frame footer_palette{.surface = tui::Surface(4, 1)};
@@ -155,15 +176,15 @@ void check_surface_cells_and_encoding() {
         footer_palette.surface.write(0, static_cast<i32>(index), "F", footer_styles[index]);
     }
     const auto encoded_footer = tui::encode_frame(footer_palette);
-    require(encoded_footer.contains("\x1b[22;38;2;249;226;175mF") && encoded_footer.contains("\x1b[22;38;2;166;227;161mF") &&
-                encoded_footer.contains("\x1b[22;38;2;250;179;135mF") && encoded_footer.contains("\x1b[22;38;2;137;180;250mF"),
+    require(encoded_footer.contains("\x1b[0;22;38;2;249;226;175mF") && encoded_footer.contains("\x1b[0;22;38;2;166;227;161mF") &&
+                encoded_footer.contains("\x1b[0;22;38;2;250;179;135mF") && encoded_footer.contains("\x1b[0;22;38;2;137;180;250mF"),
             "footer metadata fields must encode four distinct high-luminance colors");
 
     tui::Frame shimmer_palette{.surface = tui::Surface(2, 1)};
     shimmer_palette.surface.write(0, 0, "S", tui::Style::WORKING_BASE);
     shimmer_palette.surface.write(0, 1, "S", tui::Style::WORKING_PEAK);
     const auto encoded_shimmer = tui::encode_frame(shimmer_palette);
-    require(encoded_shimmer.contains("\x1b[22;38;2;108;112;134mS") && encoded_shimmer.contains("\x1b[22;38;2;205;214;244mS"),
+    require(encoded_shimmer.contains("\x1b[0;22;38;2;108;112;134mS") && encoded_shimmer.contains("\x1b[0;22;38;2;205;214;244mS"),
             "working shimmer endpoints must encode a visible neutral brightness range");
 
     tui::Frame composer{.surface = tui::Surface(4, 1)};
@@ -171,7 +192,7 @@ void check_surface_cells_and_encoding() {
     composer.surface.write(0, 0, ">", tui::Style::COMPOSER);
     require(std::ranges::all_of(composer.surface.cells, [](const tui::Cell &cell) { return cell.style == tui::Style::COMPOSER; }),
             "a filled composer row must retain its background style across every cell");
-    require(tui::encode_frame(composer).contains("\x1b[22;39;48;2;38;38;38m>   "),
+    require(tui::encode_frame(composer).contains("\x1b[0;22;39;48;2;38;38;38m>   "),
             "the composer style must encode an opaque neutral background across trailing cells");
 
     auto changed = frame;
@@ -324,6 +345,7 @@ void check_rich_output_and_concurrent_tools() {
     constexpr std::string_view fixture = R"md(# Rich output
 Paragraph with **strong**, *emphasis*, `inline code`, and [docs](https://example.com/docs).
 The foo_bar_baz identifier stays literal.
+> Quoted **strong words**, *italic words*, `inline quote code`, and [reference](https://example.com/quote) with enough words to wrap.
 - first list item with enough words to wrap cleanly
 1. ordered item
 ```cpp
@@ -355,12 +377,21 @@ diff --git a/file.cpp b/file.cpp
     }
     require(wide_text.contains("assistant: Rich output") && !wide_text.contains("# Rich output"),
             "headings must render without their Markdown marker");
+    require(text_has_style(wide, "Paragraph with ", tui::Style::ASSISTANT) &&
+                text_has_style(wide, "first list item", tui::Style::ASSISTANT),
+            "ordinary assistant prose and list bodies must use the soft neutral transcript style");
     require(wide_text.contains("strong") && !wide_text.contains("**strong**") && has_style(wide, tui::Style::EMPHASIS) &&
                 has_style(wide, tui::Style::ITALIC),
             "strong and emphasis markup must become terminal styles");
     require(wide_text.contains("foo_bar_baz"), "intraword underscores in code-like identifiers must remain literal");
     require(wide_text.contains("docs") && wide_text.contains("<https://example.com/docs>") && has_style(wide, tui::Style::LINK),
             "links must retain a visible, styled target");
+    require(wide_text.contains("│ Quoted") && !wide_text.contains("> Quoted") && text_has_style(wide, "│ Quoted ", tui::Style::QUOTE) &&
+                text_has_style(wide, "strong words", tui::Style::QUOTE_EMPHASIS) &&
+                text_has_style(wide, "italic words", tui::Style::QUOTE_ITALIC) &&
+                text_has_style(wide, "inline quote code", tui::Style::CODE) && text_has_style(wide, "reference", tui::Style::LINK),
+            "blockquotes must render green prose with contextual inline Markdown styles");
+    require(narrow_text.contains("\n│ "), "wrapped blockquotes must retain their green quote gutter");
     require(wide_text.contains("• first list item") && narrow_text.contains("  enough words"),
             "lists must retain a bullet and continuation indentation when wrapped");
     require(wide_text.contains("┌ cpp") && wide_text.contains("│     run();") && wide_text.contains("└") &&

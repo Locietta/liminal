@@ -43,8 +43,12 @@ std::string_view name(BlockState state) {
 std::string_view name(Style style) {
     switch (style) {
         case Style::NORMAL: return "normal";
+        case Style::ASSISTANT: return "assistant";
         case Style::EMPHASIS: return "emphasis";
         case Style::ITALIC: return "italic";
+        case Style::QUOTE: return "quote";
+        case Style::QUOTE_EMPHASIS: return "quote_emphasis";
+        case Style::QUOTE_ITALIC: return "quote_italic";
         case Style::MUTED: return "muted";
         case Style::ACCENT: return "accent";
         case Style::CODE: return "code";

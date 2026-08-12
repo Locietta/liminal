@@ -12,8 +12,12 @@ using namespace lighter::types;
 
 enum struct Style {
     NORMAL,
+    ASSISTANT,
     EMPHASIS,
     ITALIC,
+    QUOTE,
+    QUOTE_EMPHASIS,
+    QUOTE_ITALIC,
     MUTED,
     ACCENT,
     CODE,
