@@ -49,8 +49,8 @@ struct ExecCommandInput {
     std::optional<usize> max_output_chars;
 };
 
-struct InteractWithShellTaskInput {
-    std::string shell_task_id;
+struct WriteStdinInput {
+    u64 session_id;
     std::optional<std::string> chars;
     std::optional<i64> yield_time_ms;
     std::optional<usize> max_output_chars;
@@ -113,9 +113,9 @@ std::optional<std::string_view> field(std::string_view content, std::string_view
 }
 
 std::string summarize_exec(const provider::ToolResult &result) {
-    const auto task = field(result.content, "shell_task_id").value_or("?");
+    const auto session = field(result.content, "session_id").value_or("?");
     const auto status = field(result.content, "status").value_or(result.is_error ? "failed" : "completed");
-    std::string summary = "shell task " + std::string(task) + " · ";
+    std::string summary = "exec session " + std::string(session) + " · ";
     if (const auto code = field(result.content, "exit_code")) {
         summary += "exit " + std::string(*code);
     } else {
@@ -132,7 +132,7 @@ std::string summarize_exec(const provider::ToolResult &result) {
 
 struct ShellTaskManager {
     struct ShellTask {
-        std::string id;
+        u64 session_id;
         std::string command;
         std::optional<Process::SpawnResult> child;
         lighter::Mutex interaction;
@@ -176,8 +176,8 @@ struct ShellTaskManager {
 
     explicit ShellTaskManager(std::filesystem::path working_directory) : working_directory(std::move(working_directory)) {}
     ~ShellTaskManager() {
-        for (const auto &[id, task] : tasks) {
-            std::ignore = id;
+        for (const auto &[session_id, task] : tasks) {
+            std::ignore = session_id;
             if (task->running && task->child) {
 #ifdef _WIN32
                 std::ignore = task->child->proc.kill(SIGTERM);
@@ -189,11 +189,11 @@ struct ShellTaskManager {
     }
 
     Task<ShellTaskResponse, Error> start(ExecCommandInput input);
-    Task<ShellTaskResponse, Error> interact(InteractWithShellTaskInput input);
+    Task<ShellTaskResponse, Error> write_stdin(WriteStdinInput input);
 
     std::filesystem::path working_directory;
     u64 next_id = 1;
-    std::unordered_map<std::string, std::shared_ptr<ShellTask>> tasks;
+    std::unordered_map<u64, std::shared_ptr<ShellTask>> tasks;
 };
 
 namespace {
@@ -309,14 +309,13 @@ std::string take_output(ShellTaskManager::ShellTask &task, usize limit) {
     result += visible_output(std::string_view(task.output).substr(index, count));
     task.delivered_offset += count;
     if (task.delivered_offset < available) {
-        result += "\n[" + std::to_string(available - task.delivered_offset) +
-                  " bytes remain; poll with interact_with_shell_task and empty chars]\n";
+        result += "\n[" + std::to_string(available - task.delivered_offset) + " bytes remain; poll with write_stdin and empty chars]\n";
     }
     return result;
 }
 
 ShellTaskResponse response_for(ShellTaskManager::ShellTask &task, usize limit) {
-    std::string result = "shell_task_id: " + task.id;
+    std::string result = "session_id: " + std::to_string(task.session_id);
     bool is_error = false;
     if (task.running) {
         result += "\nstatus: running";
@@ -365,23 +364,23 @@ Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input) {
     if (!spawned) co_await fail(Error::tool("failed to spawn command shell: " + std::string(spawned.error().message())));
 
     auto task = std::make_shared<ShellTask>();
-    task->id = std::to_string(next_id++);
+    task->session_id = next_id++;
     task->command = std::move(input.cmd);
     task->child = *std::move(spawned);
-    const auto id = task->id;
+    const auto session_id = task->session_id;
     auto *state = task.get();
-    tasks.emplace(id, task);
+    tasks.emplace(session_id, task);
     lighter::EventLoop::current().schedule(pump_shell_task(std::move(task)));
 
     co_await wait_for_finish(*state, duration);
     co_return response_for(*state, limit);
 }
 
-Task<ShellTaskResponse, Error> ShellTaskManager::interact(InteractWithShellTaskInput input) {
+Task<ShellTaskResponse, Error> ShellTaskManager::write_stdin(WriteStdinInput input) {
     auto duration = co_await or_fail(yield_duration(input.yield_time_ms));
     const auto limit = co_await or_fail(output_limit(input.max_output_chars));
-    const auto found = tasks.find(input.shell_task_id);
-    if (found == tasks.end()) co_await fail(Error::tool("unknown shell task: " + input.shell_task_id));
+    const auto found = tasks.find(input.session_id);
+    if (found == tasks.end()) co_await fail(Error::tool("unknown exec session: " + std::to_string(input.session_id)));
     const auto task_pointer = found->second;
     // Interactions with different tasks may overlap, but one task's input,
     // output cursor, and lifecycle must be observed in call order.
@@ -391,9 +390,9 @@ Task<ShellTaskResponse, Error> ShellTaskManager::interact(InteractWithShellTaskI
     const auto version = task.version;
 
     if (input.chars && !input.chars->empty()) {
-        if (!task.running) co_await fail(Error::tool("shell task has already exited: " + input.shell_task_id));
+        if (!task.running) co_await fail(Error::tool("exec session has already exited: " + std::to_string(input.session_id)));
         auto written = co_await task.child->stdin_pipe.write(std::span<const char>(input.chars->data(), input.chars->size()));
-        if (!written) co_await fail(Error::tool("failed to write shell task input: " + std::string(written.error().message())));
+        if (!written) co_await fail(Error::tool("failed to write exec session input: " + std::string(written.error().message())));
     }
     const auto available = task.output_offset + task.output.size();
     if (task.delivered_offset >= available) co_await wait_for_change(task, version, duration);
@@ -412,15 +411,13 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
             {
                 .name = "exec_command",
 #ifdef _WIN32
-                .description =
-                    "Run a PowerShell command. Returns an exit status, or a shell task ID when still running. Use "
-                    "interact_with_shell_task to send input or poll that task. Prefer ripgrep (rg) for text search and uutils commands "
-                    "for ordinary filesystem work.",
+                .description = "Run a PowerShell command. Returns an exit status, or a session ID when still running. Use "
+                               "write_stdin to send input or poll that session. Prefer ripgrep (rg) for text search and uutils commands "
+                               "for ordinary filesystem work.",
 #else
-                .description =
-                    "Run a POSIX shell command. Returns an exit status, or a shell task ID when still running. Use "
-                    "interact_with_shell_task to send input or poll that task. Prefer ripgrep (rg) for text search and uutils commands "
-                    "for ordinary filesystem work.",
+                .description = "Run a POSIX shell command. Returns an exit status, or a session ID when still running. Use "
+                               "write_stdin to send input or poll that session. Prefer ripgrep (rg) for text search and uutils commands "
+                               "for ordinary filesystem work.",
 #endif
                 .input_schema =
                     {
@@ -450,40 +447,41 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
         .summarize = [](const provider::ToolCall &, const provider::ToolResult &result) { return summarize_exec(result); },
     };
 
-    auto interact = ToolRegistration{
+    auto write_stdin = ToolRegistration{
         .definition =
             {
-                .name = "interact_with_shell_task",
-                .description = "Send characters to a running exec_command shell task, or poll it by passing an empty chars string.",
+                .name = "write_stdin",
+                .description =
+                    "Write characters to an existing exec session and return incremental output. Empty or omitted chars polls only.",
                 .input_schema =
                     {
                         .properties =
                             {
-                                {"shell_task_id", {.type = "string", .description = "Shell task ID returned by exec_command."}},
+                                {"session_id", {.type = "integer", .description = "Session ID returned by exec_command."}},
                                 {"chars", {.type = "string", .description = "Characters to write. Empty or omitted means poll only."}},
                                 {"yield_time_ms", {.type = "integer", .description = "Wait up to 30000 ms for new output; default 10000."}},
                                 {"max_output_chars",
                                  {.type = "integer", .description = "Maximum output bytes returned now; 1024-131072, default 32768."}},
                             },
-                        .required = {"shell_task_id"},
+                        .required = {"session_id"},
                     },
             },
         .execution_mode = ToolExecutionMode::PARALLEL,
         .execute = [&tasks](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
-            auto input = co_await or_fail(parse_input<InteractWithShellTaskInput>(call.input));
-            auto response = co_await tasks.interact(std::move(input)).or_fail();
+            auto input = co_await or_fail(parse_input<WriteStdinInput>(call.input));
+            auto response = co_await tasks.write_stdin(std::move(input)).or_fail();
             co_return provider::ToolResult{.call_id = call.id, .content = std::move(response.content), .is_error = response.is_error};
         },
         .describe =
             [](const provider::ToolCall &call) {
-                const auto input = parse_input<InteractWithShellTaskInput>(call.input);
-                if (!input) return ToolCallPresentation{.description = "Interact with shell task"};
-                const auto action = input->chars && !input->chars->empty() ? "Send input to shell task " : "Poll shell task ";
-                return ToolCallPresentation{.description = action + bounded_text(input->shell_task_id)};
+                const auto input = parse_input<WriteStdinInput>(call.input);
+                if (!input) return ToolCallPresentation{.description = "Write to exec session"};
+                const auto action = input->chars && !input->chars->empty() ? "Write to exec session " : "Poll exec session ";
+                return ToolCallPresentation{.description = action + std::to_string(input->session_id)};
             },
         .summarize = [](const provider::ToolCall &, const provider::ToolResult &result) { return summarize_exec(result); },
     };
-    return {std::move(exec), std::move(interact)};
+    return {std::move(exec), std::move(write_stdin)};
 }
 
 } // namespace liminal

@@ -49,12 +49,16 @@ void test_tools_are_available_by_default() {
     ToolSet tools(std::filesystem::current_path() / "liminal");
     auto definitions = tools.definitions();
     require(definitions.size() == 6 && definitions[0].name == "read_file" && definitions[1].name == "apply_patch" &&
-                definitions[2].name == "exec_command" && definitions[3].name == "interact_with_shell_task" &&
+                definitions[2].name == "exec_command" && definitions[3].name == "write_stdin" &&
                 definitions[4].kind == provider::ToolKind::WEB_SEARCH && definitions[5].kind == provider::ToolKind::WEB_FETCH,
             "default tools must include file reading, patch editing, interactive shell execution, and hosted web access");
+    const auto &write_stdin = definitions[3];
+    require(write_stdin.input_schema.properties.at("session_id").type == "integer" && write_stdin.input_schema.required.size() == 1 &&
+                write_stdin.input_schema.required.front() == "session_id",
+            "write_stdin must require the numeric session ID returned by exec_command");
     require(tools.execution_mode("read_file") == ToolExecutionMode::PARALLEL &&
                 tools.execution_mode("exec_command") == ToolExecutionMode::PARALLEL &&
-                tools.execution_mode("interact_with_shell_task") == ToolExecutionMode::PARALLEL &&
+                tools.execution_mode("write_stdin") == ToolExecutionMode::PARALLEL &&
                 tools.execution_mode("apply_patch") == ToolExecutionMode::EXCLUSIVE &&
                 tools.execution_mode("unknown") == ToolExecutionMode::EXCLUSIVE,
             "built-in and unknown tools must expose conservative execution semantics");
@@ -109,12 +113,12 @@ void test_tool_presentations_are_specific_and_bounded() {
             "exec_command presentation must retain the exact multiline command as semantic data");
     const provider::ToolResult command_result{
         .call_id = "command",
-        .content = "shell_task_id: 2\nstatus: exited\nexit_code: 7\n\noutput:\nconfigured\nbuilt\none test failed\n",
+        .content = "session_id: 2\nstatus: exited\nexit_code: 7\n\noutput:\nconfigured\nbuilt\none test failed\n",
         .is_error = true,
     };
     const auto summary = tools.summarize(command, command_result);
-    require(summary.contains("shell task 2 · exit 7") && summary.contains("configured") && summary.contains("one test failed"),
-            "exec_command completion must expose shell task state and a bounded output preview");
+    require(summary.contains("exec session 2 · exit 7") && summary.contains("configured") && summary.contains("one test failed"),
+            "exec_command completion must expose exec session state and a bounded output preview");
 }
 
 void test_read_file_is_bounded_and_regular() {
@@ -233,21 +237,20 @@ lighter::Task<> exercise_shell_task_interaction(ToolSet &tools) {
         R"({"cmd":"IFS= read -r first; sleep 0.1; echo first:$first; IFS= read -r second; sleep 0.1; echo second:$second","yield_time_ms":25})";
 #endif
     auto started = co_await tools.execute(make_call("start", "exec_command", command));
-    require(started.has_value() && !started->is_error && started->content.contains("shell_task_id: 1") &&
+    require(started.has_value() && !started->is_error && started->content.contains("session_id: 1") &&
                 started->content.contains("status: running"),
-            "exec_command must return a shell task ID for a command awaiting input");
+            "exec_command must return a session ID for a command awaiting input");
 
     auto interacted = co_await lighter::WhenAll(
-        tools.execute(make_call("first", "interact_with_shell_task", R"({"shell_task_id":"1","chars":"one\n","yield_time_ms":3000})")),
-        tools.execute(make_call("second", "interact_with_shell_task", R"({"shell_task_id":"1","chars":"two\n","yield_time_ms":3000})")));
-    require(interacted.has_value(), "concurrent interactions with one shell task failed");
+        tools.execute(make_call("first", "write_stdin", R"({"session_id":1,"chars":"one\n","yield_time_ms":3000})")),
+        tools.execute(make_call("second", "write_stdin", R"({"session_id":1,"chars":"two\n","yield_time_ms":3000})")));
+    require(interacted.has_value(), "concurrent writes to one exec session failed");
     auto [first, second] = *std::move(interacted);
     require(first.content.contains("first:one") && !first.content.contains("second:two") && second.content.contains("second:two"),
-            "interactions with one shell task must remain ordered and drain distinct output");
-    auto finished =
-        co_await tools.execute(make_call("finish", "interact_with_shell_task", R"({"shell_task_id":"1","yield_time_ms":3000})"));
+            "writes to one exec session must remain ordered and drain distinct output");
+    auto finished = co_await tools.execute(make_call("finish", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})"));
     require(finished && !finished->is_error && finished->content.contains("status: exited") && finished->content.contains("exit_code: 0"),
-            "the ordered shell task interactions did not run through completion");
+            "the ordered exec session writes did not run through completion");
 }
 
 void test_shell_task_interaction() {
@@ -280,25 +283,24 @@ lighter::Task<> exercise_distinct_shell_task_interactions(ToolSet &tools, const 
     auto first_started = co_await tools.execute(make_call("start-a", "exec_command", exec_command_input(first_command, working_directory)));
     auto second_started =
         co_await tools.execute(make_call("start-b", "exec_command", exec_command_input(second_command, working_directory)));
-    require(first_started && second_started && first_started->content.contains("shell_task_id: 1") &&
-                second_started->content.contains("shell_task_id: 2"),
-            "failed to start distinct shell tasks for concurrent interaction");
+    require(first_started && second_started && first_started->content.contains("session_id: 1") &&
+                second_started->content.contains("session_id: 2"),
+            "failed to start distinct exec sessions for concurrent writes");
 
     auto interacted = co_await lighter::WhenAll(
-        tools.execute(make_call("interact-a", "interact_with_shell_task", R"({"shell_task_id":"1","chars":"go\n","yield_time_ms":2000})")),
-        tools.execute(make_call("interact-b", "interact_with_shell_task", R"({"shell_task_id":"2","chars":"go\n","yield_time_ms":2000})")));
-    require(interacted.has_value(), "interactions with distinct shell tasks failed");
+        tools.execute(make_call("write-a", "write_stdin", R"({"session_id":1,"chars":"go\n","yield_time_ms":2000})")),
+        tools.execute(make_call("write-b", "write_stdin", R"({"session_id":2,"chars":"go\n","yield_time_ms":2000})")));
+    require(interacted.has_value(), "writes to distinct exec sessions failed");
     auto [first, second] = *std::move(interacted);
-    require(first.content.contains("task-a") && second.content.contains("task-b"),
-            "interactions with distinct shell tasks blocked each other");
+    require(first.content.contains("task-a") && second.content.contains("task-b"), "writes to distinct exec sessions blocked each other");
 
-    auto finished = co_await lighter::WhenAll(
-        tools.execute(make_call("finish-a", "interact_with_shell_task", R"({"shell_task_id":"1","yield_time_ms":3000})")),
-        tools.execute(make_call("finish-b", "interact_with_shell_task", R"({"shell_task_id":"2","yield_time_ms":3000})")));
-    require(finished.has_value(), "failed to finish distinct shell tasks");
+    auto finished =
+        co_await lighter::WhenAll(tools.execute(make_call("finish-a", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})")),
+                                  tools.execute(make_call("finish-b", "write_stdin", R"({"session_id":2,"yield_time_ms":3000})")));
+    require(finished.has_value(), "failed to finish distinct exec sessions");
     auto [first_finished, second_finished] = *std::move(finished);
     require(first_finished.content.contains("status: exited") && second_finished.content.contains("status: exited"),
-            "distinct shell tasks did not run through completion");
+            "distinct exec sessions did not run through completion");
 }
 
 void test_distinct_shell_tasks_interact_concurrently() {
