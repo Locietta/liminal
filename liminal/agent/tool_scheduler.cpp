@@ -40,6 +40,7 @@ struct ToolScheduler::State {
     std::vector<std::optional<provider::ToolResult>> results;
     std::shared_ptr<lighter::Event> last_exclusive = std::make_shared<lighter::Event>(true);
     std::shared_ptr<ParallelBatch> parallel_batch = std::make_shared<ParallelBatch>();
+    lighter::CancellationSource cancellation;
     lighter::Event all_done{true};
     usize pending = 0;
 
@@ -85,20 +86,34 @@ Task<provider::ToolResult> execute_one(const std::shared_ptr<ToolScheduler::Stat
     co_return result;
 }
 
+Task<provider::ToolResult> execute_parallel(std::shared_ptr<ToolScheduler::State> state, provider::ToolCall call,
+                                            std::shared_ptr<lighter::Event> predecessor) {
+    co_await predecessor->wait();
+    co_return co_await execute_one(state, call);
+}
+
 Task<> run_parallel(std::shared_ptr<ToolScheduler::State> state, usize slot, provider::ToolCall call,
                     std::shared_ptr<lighter::Event> predecessor, std::shared_ptr<ParallelBatch> batch) {
-    co_await predecessor->wait();
-    state->results[slot] = co_await execute_one(state, call);
+    auto result =
+        co_await lighter::with_token(execute_parallel(state, std::move(call), std::move(predecessor)), state->cancellation.token());
+    if (result.has_value()) state->results[slot] = *std::move(result);
     batch->complete();
     state->complete();
+}
+
+Task<provider::ToolResult> execute_exclusive(std::shared_ptr<ToolScheduler::State> state, provider::ToolCall call,
+                                             std::shared_ptr<lighter::Event> predecessor, std::shared_ptr<ParallelBatch> preceding_batch) {
+    co_await predecessor->wait();
+    co_await preceding_batch->done.wait();
+    co_return co_await execute_one(state, call);
 }
 
 Task<> run_exclusive(std::shared_ptr<ToolScheduler::State> state, usize slot, provider::ToolCall call,
                      std::shared_ptr<lighter::Event> predecessor, std::shared_ptr<ParallelBatch> preceding_batch,
                      std::shared_ptr<lighter::Event> completed) {
-    co_await predecessor->wait();
-    co_await preceding_batch->done.wait();
-    state->results[slot] = co_await execute_one(state, call);
+    auto result = co_await lighter::with_token(
+        execute_exclusive(state, std::move(call), std::move(predecessor), std::move(preceding_batch)), state->cancellation.token());
+    if (result.has_value()) state->results[slot] = *std::move(result);
     completed->set();
     state->complete();
 }
@@ -125,6 +140,8 @@ void ToolScheduler::submit(provider::ToolCall call) {
     state->last_exclusive = std::move(completed);
     state->parallel_batch = std::make_shared<ParallelBatch>();
 }
+
+void ToolScheduler::cancel() { state->cancellation.cancel(); }
 
 Task<std::vector<provider::ToolResult>> ToolScheduler::finish() {
     co_await state->all_done.wait();

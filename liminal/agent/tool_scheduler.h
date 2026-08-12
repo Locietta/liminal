@@ -20,6 +20,7 @@ struct ToolScheduler {
     ToolScheduler(const ToolSet &tools, EventSink events);
 
     void submit(provider::ToolCall call);
+    void cancel();
     lighter::Task<std::vector<provider::ToolResult>> finish();
 
 private:

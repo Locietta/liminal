@@ -6,8 +6,11 @@
 #include <string>
 #include <utility>
 
+#include <lighter/async/vocab/cancellation.h>
+
 namespace liminal {
 
+using lighter::cancel;
 using lighter::fail;
 using lighter::Task;
 
@@ -45,6 +48,13 @@ bool needs_automatic_compaction(const context::ContextManifest &manifest) {
     return manifest.usage.estimated_input_tokens >= threshold;
 }
 
+template <typename T, typename E>
+Task<lighter::Outcome<T, E, lighter::Cancellation>> observe_cancellation(Task<T, E> work,
+                                                                         const std::optional<lighter::CancellationToken> &cancellation) {
+    if (cancellation) co_return co_await lighter::with_token(std::move(work), *cancellation);
+    co_return co_await std::move(work).catch_cancel();
+}
+
 } // namespace
 
 Agent::Agent(model::Choice model, ToolSet &tools) : Agent(std::move(model), tools, default_agent_instructions()) {}
@@ -56,19 +66,25 @@ Result<context::ContextManifest> Agent::context_manifest() const {
     return context::ContextBuilder{}.build(instructions, session, context_budget(model.entry));
 }
 
-Task<void, Error> Agent::run_task(std::string prompt, EventSink events) {
+Task<void, Error, lighter::Cancellation> Agent::run_task(std::string prompt, EventSink events,
+                                                         std::optional<lighter::CancellationToken> cancellation) {
     const auto task_id = session.start_task(std::move(prompt));
-    auto outcome = co_await run_task_loop(task_id, events);
-    if (!outcome) {
+    auto outcome = co_await run_task_loop(task_id, events, cancellation);
+    if (outcome.is_cancelled()) {
+        session.append(session::TaskFinished{.id = task_id, .outcome = session::TaskOutcome::CANCELLED});
+        co_await cancel();
+    }
+    if (outcome.has_error()) {
         session.append(session::TaskFinished{.id = task_id, .outcome = session::TaskOutcome::FAILED});
         co_await fail(std::move(outcome).error());
     }
     session.append(session::TaskFinished{.id = task_id, .outcome = session::TaskOutcome::COMPLETED});
-    if (*outcome) emit(events, SessionNotice{.text = "[history compacted automatically]\n"});
+    if (outcome.has_value() && *outcome) emit(events, SessionNotice{.text = "[history compacted automatically]\n"});
     emit(events, TaskCompleted{});
 }
 
-Task<bool, Error> Agent::run_task_loop(session::TaskId task_id, const EventSink &events) {
+Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId task_id, const EventSink &events,
+                                                              const std::optional<lighter::CancellationToken> &cancellation) {
     bool automatically_compacted = false;
     while (true) {
         context::ContextBuilder builder;
@@ -83,7 +99,10 @@ Task<bool, Error> Agent::run_task_loop(session::TaskId task_id, const EventSink 
             }
             auto full_manifest = *std::move(full);
             auto compacted = std::move(full_manifest.provider_history);
-            co_await model.handle->compact(compacted, k_automatic_compact_instructions).or_fail();
+            auto compacted_result =
+                co_await observe_cancellation(model.handle->compact(compacted, k_automatic_compact_instructions), cancellation);
+            if (compacted_result.is_cancelled()) co_await cancel();
+            if (compacted_result.has_error()) co_await fail(std::move(compacted_result).error());
             auto checkpoint = builder.take_checkpoint(std::move(compacted), full_manifest);
             if (!checkpoint) {
                 co_await fail(std::move(checkpoint).error());
@@ -104,6 +123,7 @@ Task<bool, Error> Agent::run_task_loop(session::TaskId task_id, const EventSink 
         }
         const auto provider_call_id = session.next_provider_call();
         usize call_count = 0;
+        bool has_terminal_answer = false;
         agent::detail::ToolScheduler scheduler(*tools, events);
         provider::StreamCallbacks stream{
             .on_assistant_text_delta =
@@ -111,7 +131,8 @@ Task<bool, Error> Agent::run_task_loop(session::TaskId task_id, const EventSink 
                     emit(events, AssistantTextDelta{.item_id = item_id.value, .text = std::string(text)});
                 },
             .on_item_completed =
-                [this, task_id, provider_call_id, &events, &scheduler, &call_count](const provider::OutputItem &item) {
+                [this, task_id, provider_call_id, &events, &scheduler, &call_count,
+                 &has_terminal_answer](const provider::OutputItem &item) {
                     session.append(session::OutputItemCompleted{
                         .task_id = task_id,
                         .provider_call_id = provider_call_id,
@@ -119,6 +140,10 @@ Task<bool, Error> Agent::run_task_loop(session::TaskId task_id, const EventSink 
                     });
                     if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
                         emit(events, AssistantMessageCompleted{.item_id = message->id.value, .phase = message->phase});
+                        if (message->phase != provider::MessagePhase::COMMENTARY &&
+                            std::ranges::any_of(message->parts, [](const provider::TextPart &part) { return !part.text.empty(); })) {
+                            has_terminal_answer = true;
+                        }
                     }
                     if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) {
                         ++call_count;
@@ -126,8 +151,22 @@ Task<bool, Error> Agent::run_task_loop(session::TaskId task_id, const EventSink 
                     }
                 },
         };
-        auto completed = co_await model.handle->complete(built->provider_history, tools->definitions(), stream);
-        if (!completed) {
+        auto completed =
+            co_await observe_cancellation(model.handle->complete(built->provider_history, tools->definitions(), stream), cancellation);
+        if (completed.is_cancelled()) {
+            scheduler.cancel();
+            auto results = co_await scheduler.finish();
+            if (!results.empty()) {
+                session.append(session::ToolResults{
+                    .task_id = task_id,
+                    .provider_call_id = provider_call_id,
+                    .results = std::move(results),
+                });
+            }
+            co_await cancel();
+        }
+        if (completed.has_error()) {
+            scheduler.cancel();
             auto results = co_await scheduler.finish();
             if (!results.empty()) {
                 session.append(session::ToolResults{
@@ -144,7 +183,13 @@ Task<bool, Error> Agent::run_task_loop(session::TaskId task_id, const EventSink 
             .id = provider_call_id,
             .completion = completion,
         });
-        auto results = co_await scheduler.finish();
+        auto settled = co_await observe_cancellation(scheduler.finish(), cancellation);
+        const bool cancelled_while_settling = settled.is_cancelled();
+        if (settled.is_cancelled()) {
+            scheduler.cancel();
+            settled = co_await observe_cancellation(scheduler.finish(), std::nullopt);
+        }
+        auto results = settled.has_value() ? *std::move(settled) : std::vector<provider::ToolResult>{};
         if (!results.empty()) {
             session.append(session::ToolResults{
                 .task_id = task_id,
@@ -152,10 +197,16 @@ Task<bool, Error> Agent::run_task_loop(session::TaskId task_id, const EventSink 
                 .results = std::move(results),
             });
         }
+        if (cancelled_while_settling) co_await cancel();
 
         switch (completion.stop) {
             case provider::StopKind::DONE:
-                if (call_count == 0) co_return automatically_compacted;
+                if (call_count == 0) {
+                    if (!has_terminal_answer) {
+                        co_await fail(Error::protocol("provider completed the task without a terminal assistant answer"));
+                    }
+                    co_return automatically_compacted;
+                }
                 break;
             case provider::StopKind::NEEDS_TOOL_RESULTS: break;
             case provider::StopKind::TRUNCATED:

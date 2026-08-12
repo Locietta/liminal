@@ -45,16 +45,16 @@ namespace {
 
 using namespace std::chrono_literals;
 
-struct TurnControl {
-    CancellationSource *active_turn = nullptr;
+struct TaskControl {
+    CancellationSource *active_task = nullptr;
 };
 
 struct SessionFailure {
     std::string message;
 
-    void record(std::string_view context, lighter::Error error, TurnControl &control) {
+    void record(std::string_view context, lighter::Error error, TaskControl &control) {
         if (message.empty()) message = std::string(context) + ": " + std::string(error.message());
-        if (control.active_turn) control.active_turn->cancel();
+        if (control.active_task) control.active_task->cancel();
     }
 };
 
@@ -149,7 +149,7 @@ std::string finish_prompt(std::string line) {
 }
 
 /// Splits redirected stdin on LF. Interactive input is delivered continuously
-/// by terminal_input_loop, including while a provider turn is active.
+/// by terminal_input_loop, including while a provider task is active.
 struct PromptReader {
     Stream *input = nullptr;
     PromptQueue *prompts = nullptr;
@@ -191,7 +191,7 @@ struct PromptReader {
 
 lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, ConsoleRenderer &renderer, PromptQueue &prompts,
                                     ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
-                                    TurnControl &turn_control, i32 &held_mouse_buttons) {
+                                    TaskControl &task_control, i32 &held_mouse_buttons) {
     switch (event.kind) {
         case TerminalEventKind::TEXT:
         case TerminalEventKind::PASTE: return renderer.insert(event.text);
@@ -201,7 +201,7 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             const bool shift = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::SHIFT);
             const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
             if (event.key == TerminalKey::ESCAPE) {
-                if (turn_control.active_turn) turn_control.active_turn->cancel();
+                if (task_control.active_task) task_control.active_task->cancel();
                 return {};
             }
             if (event.key == TerminalKey::CHARACTER && control && !alt_gr && event.text == "g") {
@@ -264,7 +264,7 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
 
 Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &renderer, PromptQueue &prompts,
                               ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
-                              TurnControl &control, SessionFailure &failure) {
+                              TaskControl &control, SessionFailure &failure) {
     i32 held_mouse_buttons = 0;
     while (true) {
         auto event = co_await terminal.next_event();
@@ -290,7 +290,7 @@ Task<lighter::Error> copy_reply_with_feedback(Agent &agent, usize ordinal, Conso
 }
 
 Task<i32> copy_reply_loop(CopyRequests &requests, SelectionCopies &selection_copies, Agent &agent, ConsoleRenderer &renderer,
-                          TurnControl &control, SessionFailure &failure) {
+                          TaskControl &control, SessionFailure &failure) {
     while (true) {
         co_await requests.next();
         if (renderer.has_selection()) {
@@ -309,7 +309,7 @@ Task<i32> copy_reply_loop(CopyRequests &requests, SelectionCopies &selection_cop
     }
 }
 
-Task<i32> selection_copy_loop(SelectionCopies &copies, ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure) {
+Task<i32> selection_copy_loop(SelectionCopies &copies, ConsoleRenderer &renderer, TaskControl &control, SessionFailure &failure) {
     while (true) {
         auto text = co_await copies.next();
         auto copied = co_await copy_to_clipboard(std::move(text));
@@ -322,7 +322,7 @@ Task<i32> selection_copy_loop(SelectionCopies &copies, ConsoleRenderer &renderer
     }
 }
 
-Task<i32> external_editor_loop(ExternalEditorRequests &requests, TerminalSession &terminal, ConsoleRenderer &renderer, TurnControl &control,
+Task<i32> external_editor_loop(ExternalEditorRequests &requests, TerminalSession &terminal, ConsoleRenderer &renderer, TaskControl &control,
                                SessionFailure &failure) {
     while (true) {
         co_await requests.next();
@@ -379,7 +379,7 @@ Task<i32> external_editor_loop(ExternalEditorRequests &requests, TerminalSession
     }
 }
 
-Task<i32> render_monitor(lighter::Event &requested, ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure) {
+Task<i32> render_monitor(lighter::Event &requested, ConsoleRenderer &renderer, TaskControl &control, SessionFailure &failure) {
     while (true) {
         co_await requested.wait();
         co_await lighter::yield();
@@ -391,17 +391,17 @@ Task<i32> render_monitor(lighter::Event &requested, ConsoleRenderer &renderer, T
     }
 }
 
-Task<i32> animation_monitor(ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure) {
+Task<i32> animation_monitor(ConsoleRenderer &renderer, TaskControl &control, SessionFailure &failure) {
     auto timer = lighter::Timer::create();
     timer.start(100ms, 100ms);
     while (true) {
         auto tick = co_await timer.wait();
         if (!tick) {
-            failure.record("cannot refresh turn activity", tick.error(), control);
+            failure.record("cannot refresh task activity", tick.error(), control);
             co_return 1;
         }
         if (auto error = renderer.refresh_animation()) {
-            failure.record("cannot render turn activity", error, control);
+            failure.record("cannot render task activity", error, control);
             co_return 1;
         }
     }
@@ -411,7 +411,7 @@ constexpr std::string_view k_default_compact_instructions =
     "Compact the conversation while preserving the user's goals, constraints, decisions, "
     "important tool results, modified files, unresolved issues, and the context needed to continue.";
 
-Task<i32> signal_monitor(InterruptSource &interrupts, ConsoleRenderer &renderer, TurnControl &control, SessionFailure &failure,
+Task<i32> signal_monitor(InterruptSource &interrupts, ConsoleRenderer &renderer, TaskControl &control, SessionFailure &failure,
                          SelectionCopies *selection_copies = nullptr) {
     while (true) {
         auto signal = co_await interrupts.next();
@@ -440,8 +440,8 @@ Task<i32> signal_monitor(InterruptSource &interrupts, ConsoleRenderer &renderer,
                 }
                 continue;
             }
-            if (control.active_turn) {
-                control.active_turn->cancel();
+            if (control.active_task) {
+                control.active_task->cancel();
                 continue;
             }
         }
@@ -450,7 +450,7 @@ Task<i32> signal_monitor(InterruptSource &interrupts, ConsoleRenderer &renderer,
 }
 
 #ifndef _WIN32
-Task<i32> suspend_monitor(lighter::ControlEventSource &controls, TerminalSession &terminal, ConsoleRenderer &renderer, TurnControl &control,
+Task<i32> suspend_monitor(lighter::ControlEventSource &controls, TerminalSession &terminal, ConsoleRenderer &renderer, TaskControl &control,
                           SessionFailure &failure) {
     while (true) {
         auto event = co_await controls.next();
@@ -484,21 +484,21 @@ Task<i32> suspend_monitor(lighter::ControlEventSource &controls, TerminalSession
 #endif
 
 template <typename T, typename E>
-Task<lighter::Outcome<T, E, lighter::Cancellation>> guard_task(Task<T, E> work, TurnControl &control) {
+Task<lighter::Outcome<T, E, lighter::Cancellation>> guard_task(Task<T, E> work, TaskControl &control) {
     CancellationSource source;
-    control.active_turn = &source;
+    control.active_task = &source;
     auto outcome = co_await with_token(std::move(work), source.token());
-    control.active_turn = nullptr;
+    control.active_task = nullptr;
     co_return outcome;
 }
 
-Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &renderer, TurnControl &control, model::Catalog &models,
+Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &renderer, TaskControl &control, model::Catalog &models,
                     SessionFailure &failure) {
     lighter::Error render_error;
     EventSink events = [&renderer, &render_error, &control](const Event &event) {
         if (render_error) return;
         render_error = renderer.render(event);
-        if (render_error && control.active_turn) control.active_turn->cancel();
+        if (render_error && control.active_task) control.active_task->cancel();
     };
     auto rendered = [&failure, &control](lighter::Error error, std::string_view context) {
         if (!error) return true;
@@ -619,7 +619,10 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
             failure.record("cannot render submitted prompt", render_error, control);
             co_return 1;
         }
-        auto outcome = co_await guard_task(agent.run_task(std::move(prompt), events), control);
+        CancellationSource task_cancellation;
+        control.active_task = &task_cancellation;
+        auto outcome = co_await agent.run_task(std::move(prompt), events, task_cancellation.token());
+        control.active_task = nullptr;
         if (render_error) {
             failure.record("cannot render session", render_error, control);
             co_return 1;
@@ -677,7 +680,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
     }
 
     ConsoleRenderer renderer(interactive ? &terminal : nullptr, mirror_plain_output);
-    TurnControl control;
+    TaskControl control;
     SessionFailure failure;
     i32 exit_code = 0;
 #ifndef _WIN32
@@ -751,7 +754,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
         }
     }
 
-    control.active_turn = nullptr;
+    control.active_task = nullptr;
     if (terminal.active()) {
         if (auto error = terminal.suspend(); error && failure.message.empty()) {
             failure.message = "cannot restore terminal: " + std::string(error.message());

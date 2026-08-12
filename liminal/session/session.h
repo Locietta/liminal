@@ -60,6 +60,7 @@ struct ToolResults {
 
 enum struct TaskOutcome {
     COMPLETED,
+    CANCELLED,
     FAILED,
 };
 

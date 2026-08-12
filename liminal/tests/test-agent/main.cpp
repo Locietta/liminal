@@ -287,6 +287,146 @@ void test_tool_starts_before_provider_call_finishes() {
     provider_mock.verify();
 }
 
+void test_done_requires_terminal_answer() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [](const provider::History &, const std::vector<provider::ToolDefinition> &,
+           const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            callbacks.on_item_completed(provider::AssistantMessageItem{
+                .id = {.value = "commentary"},
+                .parts = {{.text = "Still working."}},
+                .phase = provider::MessagePhase::COMMENTARY,
+            });
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        });
+    provider_mock.expect<provider::CompactDispatch>().never();
+
+    Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
+    lighter::EventLoop loop;
+    auto task = agent.run_task("finish the task", {});
+    loop.schedule(task);
+    loop.run();
+
+    auto outcome = task.result();
+    require(outcome.has_error() && outcome.error().detail.contains("without a terminal assistant answer"),
+            "a provider DONE without a terminal answer completed the task");
+    require(std::get<session::TaskFinished>(agent.session.entries.back().payload).outcome == session::TaskOutcome::FAILED,
+            "missing terminal output did not fail the semantic task");
+    provider_mock.verify();
+}
+
+void test_final_phase_does_not_bypass_tool_follow_up() {
+    ToolSet tools(std::filesystem::current_path());
+    auto tool_executions = register_noop_tool(tools);
+    auto completions = std::make_shared<usize>(0);
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([completions](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                             const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            if ((*completions)++ == 0) {
+                provider::OutputItemId item_id{.value = "premature-final"};
+                callbacks.on_item_completed(provider::AssistantMessageItem{
+                    .id = std::move(item_id),
+                    .parts = {{.text = "I found the answer."}},
+                    .phase = provider::MessagePhase::FINAL,
+                });
+                emit_tool_call(callbacks, "call", "test_noop");
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+            }
+            emit_message(callbacks, "actual-final", "Done.");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        })
+        .times(2);
+    provider_mock.expect<provider::CompactDispatch>().never();
+
+    Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
+    lighter::EventLoop loop;
+    auto task = agent.run_task("verify it", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "a final-phase message with tools did not continue to the actual final answer");
+    require(*tool_executions == 1 && *completions == 2, "message phase incorrectly overrode task control flow");
+    provider_mock.verify();
+}
+
+lighter::Task<> cancel_after(lighter::CancellationSource &source, std::chrono::milliseconds delay) {
+    co_await lighter::sleep(delay);
+    source.cancel();
+}
+
+void test_cancelled_task_retains_semantic_progress() {
+    ToolSet tools(std::filesystem::current_path());
+    auto registered = tools.register_tool({
+        .definition = {.name = "test_slow", .description = "Test cancellation"},
+        .execute = [](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
+            co_await lighter::sleep(1s);
+            co_return provider::ToolResult{.call_id = call.id, .content = "late"};
+        },
+    });
+    require(registered.has_value(), "failed to register the cancellable test tool");
+
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [](const provider::History &, const std::vector<provider::ToolDefinition> &,
+           const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            emit_message(callbacks, "progress", "I started the slow work.");
+            emit_tool_call(callbacks, "slow-call", "test_slow");
+            co_await lighter::sleep(1s);
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+        });
+    provider_mock.expect<provider::CompactDispatch>().never();
+
+    Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
+    lighter::CancellationSource cancellation;
+    lighter::EventLoop loop;
+    auto task = agent.run_task("start slow work", {}, cancellation.token());
+    loop.schedule(task);
+    loop.schedule(cancel_after(cancellation, 5ms));
+    loop.run();
+
+    auto outcome = task.result();
+    require(outcome.is_cancelled(), "task cancellation did not propagate to the caller");
+    require(agent.session.entries.size() == 4 && std::holds_alternative<session::TaskStarted>(agent.session.entries[0].payload) &&
+                std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
+                std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[2].payload) &&
+                std::get<session::TaskFinished>(agent.session.entries[3].payload).outcome == session::TaskOutcome::CANCELLED,
+            "cancelled task did not retain completed output items and its terminal outcome");
+    provider_mock.verify();
+}
+
+void test_stream_failure_retains_completed_tool_result() {
+    ToolSet tools(std::filesystem::current_path());
+    auto tool_executions = register_noop_tool(tools);
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [tool_executions](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                          const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            emit_tool_call(callbacks, "completed-before-failure", "test_noop");
+            co_await lighter::sleep(1ms);
+            require(*tool_executions == 1, "online tool did not complete before the simulated stream failure");
+            co_await lighter::fail(Error::protocol("simulated stream failure"));
+        });
+    provider_mock.expect<provider::CompactDispatch>().never();
+
+    Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
+    lighter::EventLoop loop;
+    auto task = agent.run_task("do fragile work", {});
+    loop.schedule(task);
+    loop.run();
+
+    auto outcome = task.result();
+    require(outcome.has_error() && outcome.error().detail == "simulated stream failure",
+            "provider stream failure did not reach the caller");
+    require(agent.session.entries.size() == 4 && std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
+                std::holds_alternative<session::ToolResults>(agent.session.entries[2].payload) &&
+                std::get<session::ToolResults>(agent.session.entries[2].payload).results.front().call_id == "completed-before-failure" &&
+                std::get<session::TaskFinished>(agent.session.entries[3].payload).outcome == session::TaskOutcome::FAILED,
+            "stream failure rolled back a completed tool call or result");
+    provider_mock.verify();
+}
+
 struct ToolSchedulingProbe {
     usize running = 0;
     usize max_running = 0;
@@ -584,6 +724,10 @@ i32 run_all() {
     test_successful_turn();
     test_long_tool_loop();
     test_tool_starts_before_provider_call_finishes();
+    test_done_requires_terminal_answer();
+    test_final_phase_does_not_bypass_tool_follow_up();
+    test_cancelled_task_retains_semantic_progress();
+    test_stream_failure_retains_completed_tool_result();
     test_tool_execution_semantics();
     test_automatic_compaction();
     test_multiple_automatic_compactions_in_one_turn();
