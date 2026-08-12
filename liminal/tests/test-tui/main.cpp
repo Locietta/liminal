@@ -375,8 +375,8 @@ diff --git a/file.cpp b/file.cpp
         for (const auto &span : row.spans) text += span.text;
         require(tui::text_width(text) <= 24, "every rich row must fit its terminal width");
     }
-    require(wide_text.contains("assistant: Rich output") && !wide_text.contains("# Rich output"),
-            "headings must render without their Markdown marker");
+    require(wide_text.starts_with("Rich output") && !wide_text.contains("assistant: ") && !wide_text.contains("# Rich output"),
+            "headings must render without a role prefix or their Markdown marker");
     require(text_has_style(wide, "Paragraph with ", tui::Style::ASSISTANT) &&
                 text_has_style(wide, "first list item", tui::Style::ASSISTANT),
             "ordinary assistant prose and list bodies must use the soft neutral transcript style");
@@ -413,7 +413,7 @@ diff --git a/file.cpp b/file.cpp
 
     const auto nested_fence = tui::layout_rich_text("````markdown\n```nested```\n````", 40);
     const auto nested_text = styled_rows_text(nested_fence);
-    require(nested_text.contains("assistant: ┌ markdown") && nested_text.contains("│ ```nested```") && nested_text.ends_with("└"),
+    require(nested_text.starts_with("┌ markdown") && nested_text.contains("│ ```nested```") && nested_text.ends_with("└"),
             "a longer Markdown fence must retain shorter fence sequences as code");
 
     const auto multiline_comment = tui::layout_rich_text("```cpp\n/* first\nstill */ return 7;\n```", 40);
@@ -692,9 +692,8 @@ void check_working_indicator() {
     require(screen.working() && screen.animating(), "a submitted prompt must enter the animated working state");
     require(screen.viewport_rows() == idle_rows, "the in-flow working status must not shrink the transcript viewport");
     const auto waiting = screen.frame();
-    require(waiting.surface.row_text(1) == "you: go" && waiting.surface.row_text(2).contains("Working…") &&
-                waiting.surface.row_text(3).empty(),
-            "a waiting turn must show the status directly below the newest output and leave space before the composer");
+    require(waiting.surface.row_text(1) == "go" && waiting.surface.row_text(2).contains("Working…") && waiting.surface.row_text(3).empty(),
+            "a waiting turn must show the unprefixed prompt above its status and leave space before the composer");
     const auto status_styles = [&screen] {
         const auto frame = screen.frame();
         std::vector<tui::Style> styles;

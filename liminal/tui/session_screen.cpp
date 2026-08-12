@@ -192,8 +192,8 @@ std::vector<LayoutRow> wrap_command_block(const Block &block, i32 columns, std::
 
 BlockPresentation present_block(const Block &block) {
     switch (block.kind) {
-        case BlockKind::USER: return {.text = "you: " + block.text};
-        case BlockKind::ASSISTANT: return {.text = "assistant: " + block.text};
+        case BlockKind::USER:
+        case BlockKind::ASSISTANT: return {.text = block.text};
         case BlockKind::TOOL: {
             auto result = std::string("✓ ") + block.text;
             if (block.state == BlockState::RUNNING) result = "• " + block.text + " (running)";

@@ -717,7 +717,8 @@ def test_rich_output_is_readable_at_narrow_and_wide_sizes():
     for snapshot in (narrow, wide):
         visible = "\n".join(snapshot["visible_text"])
         styles = {cell["style"] for cell in snapshot["cells"]}
-        assert "assistant: Rich output" in visible
+        assert "Rich output" in visible
+        assert "assistant: " not in visible
         assert "# Rich output" not in visible
         assert "docs" in visible and "<https://example.com/docs>" in visible
         assert "• list item" in visible

@@ -395,7 +395,6 @@ std::vector<StyledRow> layout_rich_text(std::string_view source, i32 columns) {
         offset = end + 1;
     }
     if (lines.empty()) lines.push_back({});
-    lines.front().spans.insert(lines.front().spans.begin(), {.text = "assistant: ", .style = Style::MUTED});
 
     std::vector<StyledRow> rows;
     const auto width = std::max(columns, 1);
