@@ -3,6 +3,7 @@ set -euo pipefail
 
 source_root=${1:?usage: test-wsl.sh <source-root>}
 mode=${2:-normal}
+jobs=${LIMINAL_WSL_JOBS:-6}
 test -d "$source_root/.git"
 test -d "$source_root/xmake"
 
@@ -39,24 +40,29 @@ copy_worktree "$source_root/xmake" "$audit_root/xmake"
 
 echo "Testing worktree snapshot from $(git -C "$source_root" rev-parse --short HEAD) in $audit_root"
 cd "$audit_root"
+
+build_and_test() {
+    pixi run xmake build -y -j "$jobs"
+    pixi run xmake test -j "$jobs"
+    pixi run python -m pytest tests/integration -v
+}
+
 case "$mode" in
     normal)
         pixi run configure
-        pixi run build
-        pixi run test-all
+        build_and_test
         ;;
     release)
         pixi run configure-release
-        pixi run build
-        pixi run test-all
+        build_and_test
         ;;
     sanitize)
         pixi run configure-sanitize
         # Sanitizer compiles use substantially more memory than normal builds.
         # Keep the disposable WSL validation lane within typical laptop and CI
         # runner memory limits.
-        pixi run xmake build -y
-        pixi run xmake test -vvvD
+        pixi run xmake build -y -j "$jobs"
+        pixi run xmake test -j "$jobs" -vvvD
         ;;
     *)
         echo "unknown test mode: $mode" >&2
