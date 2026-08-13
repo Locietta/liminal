@@ -12,6 +12,7 @@
 #include <lighter/async/async.h>
 #include <lighter/codec/json/json.h>
 #include <lighter/http/http.h>
+#include <lighter/http/inflight_request.h>
 #include <lighter/types.hpp>
 
 namespace {
@@ -62,9 +63,9 @@ Task<> serve_sse_stream(Tcp::Acceptor listener) {
 
     // deliberately awkward chunk boundaries: mid-line, mid-event
     co_await write_all(connection, ": warm-up\n\nevent: delta\ndata: {\"tex");
-    co_await sleep(10ms);
+    co_await yield();
     co_await write_all(connection, "t\":\"Hel\"}\n\nevent: delta\ndata");
-    co_await sleep(10ms);
+    co_await yield();
     co_await write_all(connection, ": {\"text\":\"lo\"}\n\nevent: done\ndata: {}\n\n");
     connection = {};
 }
@@ -153,7 +154,7 @@ Task<> serve_stalling_stream(Tcp::Acceptor listener, bool *observed_disconnect) 
     connection = {};
 }
 
-Task<usize, http::Error> consume_until_cancelled(http::sse::EventStream events, usize *events_seen) {
+Task<usize, http::Error> consume_until_cancelled(http::sse::EventStream events, usize *events_seen, Event &first_event) {
     while (true) {
         auto next_result = co_await events.next();
         require(static_cast<bool>(next_result), next_result ? std::string() : next_result.error().message());
@@ -162,11 +163,12 @@ Task<usize, http::Error> consume_until_cancelled(http::sse::EventStream events, 
             break;
         }
         *events_seen += 1;
+        if (*events_seen == 1) first_event.set();
     }
     co_return *events_seen;
 }
 
-Task<> consume_with_interrupt(i32 port, CancellationToken token, usize *events_seen) {
+Task<> consume_with_interrupt(i32 port, CancellationToken token, usize *events_seen, Event &first_event) {
     http::Client client;
     auto stream_result = co_await client.on().get("http://127.0.0.1:" + std::to_string(port) + "/v1/stream").stream();
     require(static_cast<bool>(stream_result), stream_result ? std::string() : stream_result.error().message());
@@ -174,14 +176,14 @@ Task<> consume_with_interrupt(i32 port, CancellationToken token, usize *events_s
     require(streamed.status == 200, "stalling stream must resolve headers");
 
     http::sse::EventStream events(std::move(streamed));
-    auto outcome = co_await with_token(consume_until_cancelled(std::move(events), events_seen), token);
+    auto outcome = co_await with_token(consume_until_cancelled(std::move(events), events_seen, first_event), token);
 
     require(outcome.is_cancelled(), "interrupt must surface as cancellation, not error/value");
     // unwinding consume_until_cancelled destroyed the EventStream -> transfer aborted
 }
 
-Task<> fire_interrupt(CancellationSource &source) {
-    co_await sleep(40ms);
+Task<> fire_interrupt(CancellationSource &source, Event &first_event) {
+    co_await first_event.wait();
     source.cancel();
 }
 
@@ -245,8 +247,9 @@ Task<> consume_large_body(i32 port, std::string_view payload) {
     auto streamed = std::move(*stream_result);
     require(streamed.status == 200, "large body status mismatch");
 
-    // let the producer run far ahead so the high-water pause engages
-    co_await sleep(60ms);
+    // Give delivery callbacks an iteration before pulling. The precise
+    // backpressure threshold is verified directly below.
+    co_await yield();
 
     std::string received;
     received.reserve(payload.size());
@@ -263,6 +266,19 @@ Task<> consume_large_body(i32 port, std::string_view payload) {
 
     require(received.size() == payload.size(), "large body size mismatch: got " + std::to_string(received.size()));
     require(received == payload, "large body content mismatch");
+}
+
+void check_backpressure_threshold(EventLoop &loop) {
+    http::Client client;
+    http::detail::InflightRequest request(client.on(loop).get("http://127.0.0.1/unused"));
+    request.enable_streaming();
+    auto &conduit = *request.conduit;
+    conduit.buffer.assign(http::detail::StreamConduit::k_high_water, 'x');
+
+    char byte = 'y';
+    const auto accepted = http::detail::InflightRequest::on_write(&byte, 1, 1, &request);
+    require(accepted == CURL_WRITEFUNC_PAUSE && conduit.paused && conduit.buffer.size() == http::detail::StreamConduit::k_high_water,
+            "streaming backpressure did not pause before accepting bytes above the high-water mark");
 }
 
 // --- scenario 6: proxy CONNECT headers are not origin response headers -----
@@ -302,6 +318,7 @@ Tcp::Acceptor make_listener(EventLoop &loop) {
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     EventLoop loop;
+    check_backpressure_threshold(loop);
 
     // scenario 1
     std::printf("scenario 1\n");
@@ -341,9 +358,10 @@ int main() {
         bool disconnected = false;
         usize events_seen = 0;
         CancellationSource interrupt;
+        Event first_event;
         auto server = serve_stalling_stream(std::move(listener), &disconnected);
-        auto client = consume_with_interrupt(port, interrupt.token(), &events_seen);
-        auto trigger = fire_interrupt(interrupt);
+        auto client = consume_with_interrupt(port, interrupt.token(), &events_seen, first_event);
+        auto trigger = fire_interrupt(interrupt, first_event);
         loop.schedule(server);
         loop.schedule(client);
         loop.schedule(trigger);

@@ -20,7 +20,7 @@ void require(bool condition, std::string message) {
 
 /// Finishes well inside any budget used below.
 Task<i32, Error> quick(i32 value) {
-    co_await sleep(1ms);
+    co_await yield();
     co_return value;
 }
 
@@ -30,13 +30,14 @@ Task<i32, Error> immediate(i32 value) { co_return value; }
 /// the Task was allowed to run to completion, which is how the tests detect a
 /// Task that outlived its timeout.
 Task<i32, Error> slow(bool &finished) {
-    co_await sleep(2s);
+    Event parked;
+    co_await parked.wait();
     finished = true;
     co_return 7;
 }
 
 Task<i32, Error> fails_fast() {
-    co_await sleep(1ms);
+    co_await yield();
     co_await fail(Error::k_permission_denied);
     co_return 0;
 }
@@ -64,14 +65,20 @@ Task<void, Error> error_beats_timeout(bool &ok) {
 /// stay distinguishable at the call site.
 Task<void, Error> outer_cancel_wins(bool &ok) {
     CancellationSource source;
+    Event started;
+    Event parked;
 
-    auto canceller = [](CancellationSource &source) -> Task<void, Error> {
-        co_await sleep(5ms);
+    auto workload = [&started, &parked]() -> Task<i32, Error> {
+        started.set();
+        co_await parked.wait();
+        co_return 7;
+    };
+    auto canceller = [&started](CancellationSource &source) -> Task<void, Error> {
+        co_await started.wait();
         source.cancel();
     };
 
-    bool inner_finished = false;
-    auto guarded = with_token(with_timeout(slow(inner_finished), 5s), source.token());
+    auto guarded = with_token(with_timeout(workload(), 5s), source.token());
     auto result = co_await WhenAll(std::move(guarded), canceller(source));
 
     ok = result.is_cancelled();
@@ -105,7 +112,7 @@ Task<void, Error> negative_budget(bool &ok) {
 
 /// A void-valued Task round-trips through with_timeout().
 Task<void, Error> void_value(bool &ok) {
-    auto body = []() -> Task<void, Error> { co_await sleep(1ms); };
+    auto body = []() -> Task<void, Error> { co_await yield(); };
     auto result = co_await with_timeout(body(), 1s);
     ok = result.has_value();
 }

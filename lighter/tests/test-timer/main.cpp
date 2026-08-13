@@ -54,25 +54,29 @@ Task<void, Error> sleeps_at_least(std::chrono::milliseconds budget, std::chrono:
 
 /// Cancelling a Task suspended on Timer::wait() must unwind it rather than
 /// leave the frame parked on a Timer that has been stopped underneath it.
-Task<void, Error, Cancellation> cancelled_wait(bool &resumed) {
-    co_await sleep(1s);
-    // Only reached if Cancellation failed to interrupt the sleep.
+Task<void, Error, Cancellation> cancelled_wait(bool &resumed, Event &started) {
+    auto timer = Timer::create();
+    timer.start(1h);
+    started.set();
+    co_await timer.wait().or_fail();
+    // Only reached if Cancellation failed to interrupt the timer wait.
     resumed = true;
 }
 
 /// Fires the token from a sibling Task so the cancel lands while the other side
 /// is genuinely parked on the Timer, not before it ever suspends.
-Task<void, Error> cancel_after(CancellationSource &source, std::chrono::milliseconds delay) {
-    co_await sleep(delay);
+Task<void, Error> cancel_after(CancellationSource &source, Event &started) {
+    co_await started.wait();
     source.cancel();
 }
 
 Task<void, Error> cancel_pending_wait(bool &resumed, bool &observed_cancel) {
     CancellationSource source;
+    Event started;
 
     // with_token() already returns a Cancellation-channel Task, so the
     // aggregate exposes Cancellation rather than propagating it into this frame.
-    auto result = co_await WhenAll(with_token(cancelled_wait(resumed), source.token()), cancel_after(source, 5ms));
+    auto result = co_await WhenAll(with_token(cancelled_wait(resumed, started), source.token()), cancel_after(source, started));
 
     observed_cancel = result.is_cancelled();
 }
@@ -85,15 +89,16 @@ Task<void, Error> cancel_pending_wait(bool &resumed, bool &observed_cancel) {
 Task<void, Error> rejects_second_waiter(bool &first_ok, bool &second_rejected) {
     auto timer = Timer::create();
     timer.start(20ms);
+    Event first_waiting;
 
-    auto second = [](Timer &timer, bool &rejected) -> Task<void, Error> {
-        // Let the first wait claim the slot before racing it.
-        co_await sleep(2ms);
+    auto second = [&first_waiting](Timer &timer, bool &rejected) -> Task<void, Error> {
+        co_await first_waiting.wait();
         auto result = co_await timer.wait().catch_cancel();
         rejected = result.has_error() && result.error() == Error::k_connection_already_in_progress;
     };
 
-    auto first = [](Timer &timer, bool &ok) -> Task<void, Error> {
+    auto first = [&first_waiting](Timer &timer, bool &ok) -> Task<void, Error> {
+        first_waiting.set();
         auto result = co_await timer.wait().catch_cancel();
         ok = result.has_value();
     };

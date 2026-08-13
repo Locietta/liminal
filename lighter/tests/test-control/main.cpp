@@ -1,6 +1,6 @@
-#include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <semaphore>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -19,8 +19,6 @@
 namespace {
 
 using namespace lighter;
-using namespace std::chrono_literals;
-
 void require(bool condition, std::string message) {
     if (!condition) {
         throw std::runtime_error(std::move(message));
@@ -84,7 +82,7 @@ void check_source_does_not_block_shutdown() {
 
     bool ran = false;
     auto work = [](bool &ran) -> Task<void, Error> {
-        co_await sleep(5ms);
+        co_await yield();
         ran = true;
     };
     loop.schedule(work(ran));
@@ -122,11 +120,16 @@ Task<void, Error> reports_control(ControlEventKind &received) {
     auto source = ControlEventSource::create({ControlEventKind::INTERRUPT, ControlEventKind::TERMINATE}, EventLoop::current());
     require(source.has_value(), "ControlEventSource::create failed");
 
-    auto raiser = []() -> Task<void, Error> {
-        co_await sleep(5ms);
+    Event waiting;
+    auto waiter = [&source, &waiting]() -> Task<ControlEventKind, Error> {
+        waiting.set();
+        co_return co_await source->next().or_fail();
+    };
+    auto raiser = [&waiting]() -> Task<void, Error> {
+        co_await waiting.wait();
         std::raise(SIGTERM);
     };
-    auto result = co_await WhenAll(source->next(), raiser());
+    auto result = co_await WhenAll(waiter(), raiser());
     received = std::get<0>(*result);
 }
 
@@ -136,7 +139,6 @@ Task<void, Error> queues_controls(std::vector<ControlEventKind> &received) {
 
     std::raise(SIGINT);
     std::raise(SIGTERM);
-    co_await sleep(10ms);
     received.push_back(co_await source->next().or_fail());
     received.push_back(co_await source->next().or_fail());
 }
@@ -145,9 +147,14 @@ Task<void, Error> interrupt_cancels_work(bool &cancelled, i32 &count) {
     auto interrupts = InterruptSource::create(EventLoop::current());
     require(interrupts.has_value(), "InterruptSource::create failed");
 
-    auto workload = []() -> Task<void, Error> { co_await sleep(2s); };
-    auto raiser = []() -> Task<void, Error> {
-        co_await sleep(5ms);
+    Event started;
+    Event parked;
+    auto workload = [&started, &parked]() -> Task<void, Error> {
+        started.set();
+        co_await parked.wait();
+    };
+    auto raiser = [&started]() -> Task<void, Error> {
+        co_await started.wait();
         std::raise(SIGINT);
     };
     auto result = co_await WhenAll(with_token(workload(), interrupts->token()), raiser());
@@ -159,12 +166,15 @@ Task<void, Error> wait_keeps_loop_alive(bool &resumed) {
     auto source = ControlEventSource::create({ControlEventKind::INTERRUPT}, EventLoop::current());
     require(source.has_value(), "ControlEventSource::create failed");
 
-    std::thread([] {
-        std::this_thread::sleep_for(20ms);
+    std::binary_semaphore start_signal{0};
+    std::thread signal_thread([&start_signal] {
+        start_signal.acquire();
         ::kill(::getpid(), SIGINT);
-    }).detach();
+    });
 
+    start_signal.release();
     auto event = co_await source->next().catch_cancel();
+    signal_thread.join();
     resumed = event.has_value() && *event == ControlEventKind::INTERRUPT;
 }
 

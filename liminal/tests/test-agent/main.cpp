@@ -357,17 +357,13 @@ void test_final_phase_does_not_bypass_tool_follow_up() {
     provider_mock.verify();
 }
 
-lighter::Task<> cancel_after(lighter::CancellationSource &source, std::chrono::milliseconds delay) {
-    co_await lighter::sleep(delay);
-    source.cancel();
-}
-
 void test_cancelled_task_retains_semantic_progress() {
     ToolSet tools(std::filesystem::current_path());
     auto registered = tools.register_tool({
         .definition = {.name = "test_slow", .description = "Test cancellation"},
         .execute = [](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
-            co_await lighter::sleep(1s);
+            lighter::Event parked;
+            co_await parked.wait();
             co_return provider::ToolResult{.call_id = call.id, .content = "late"};
         },
     });
@@ -379,7 +375,8 @@ void test_cancelled_task_retains_semantic_progress() {
            const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             emit_message(callbacks, "progress", "I started the slow work.");
             emit_tool_call(callbacks, "slow-call", "test_slow");
-            co_await lighter::sleep(1s);
+            lighter::Event parked;
+            co_await parked.wait();
             co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
         });
     provider_mock.expect<provider::CompactDispatch>().never();
@@ -387,9 +384,13 @@ void test_cancelled_task_retains_semantic_progress() {
     Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
     lighter::CancellationSource cancellation;
     lighter::EventLoop loop;
-    auto task = agent.run_task("start slow work", {}, cancellation.token());
+    auto task = agent.run_task(
+        "start slow work",
+        [&cancellation](const Event &event) {
+            if (std::holds_alternative<ToolStarted>(event)) cancellation.cancel();
+        },
+        cancellation.token());
     loop.schedule(task);
-    loop.schedule(cancel_after(cancellation, 5ms));
     loop.run();
 
     auto outcome = task.result();
@@ -489,6 +490,7 @@ struct ToolSchedulingProbe {
     bool exclusive_overlapped = false;
     bool exclusive_finished = false;
     bool trailing_started_early = false;
+    lighter::Event parallel_wave_started;
 };
 
 void test_tool_execution_semantics() {
@@ -499,10 +501,14 @@ void test_tool_execution_semantics() {
         .definition = {.name = "test_parallel", .description = "Test parallel scheduling"},
         .execution_mode = ToolExecutionMode::PARALLEL,
         .execute = [probe](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
-            if (call.id == "trailing" && !probe->exclusive_finished) probe->trailing_started_early = true;
+            if (call.id == "trailing") {
+                if (!probe->exclusive_finished) probe->trailing_started_early = true;
+                co_return provider::ToolResult{.call_id = call.id, .content = "parallel"};
+            }
             ++probe->running;
             probe->max_running = std::max(probe->max_running, probe->running);
-            co_await lighter::sleep(5ms);
+            if (probe->running == k_parallel_calls) probe->parallel_wave_started.set();
+            co_await probe->parallel_wave_started.wait();
             --probe->running;
             co_return provider::ToolResult{.call_id = call.id, .content = "parallel"};
         },
@@ -512,7 +518,6 @@ void test_tool_execution_semantics() {
         .definition = {.name = "test_exclusive", .description = "Test exclusive scheduling"},
         .execute = [probe](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
             probe->exclusive_overlapped = probe->running != 0;
-            co_await lighter::sleep(1ms);
             probe->exclusive_finished = true;
             co_return provider::ToolResult{.call_id = call.id, .content = "exclusive"};
         },

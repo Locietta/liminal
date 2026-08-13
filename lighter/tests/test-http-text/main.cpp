@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdio>
 #include <span>
 #include <stdexcept>
@@ -39,7 +40,13 @@ Task<> accept_one(Tcp::Acceptor &listener, Tcp &out) {
 
 // "中文" is E4 B8 AD, E6 96 87; the emoji is F0 9F 98 80. Every write below
 // ends mid-sequence, so raw read_chunk() views would tear characters.
-Task<> serve_torn_utf8(Tcp::Acceptor listener) {
+struct TornUtf8Barriers {
+    Event first_piece;
+    Event second_piece;
+    Event third_piece;
+};
+
+Task<> serve_torn_utf8(Tcp::Acceptor listener, TornUtf8Barriers &barriers) {
     Tcp connection;
     co_await accept_one(listener, connection);
 
@@ -49,16 +56,16 @@ Task<> serve_torn_utf8(Tcp::Acceptor listener) {
                                    "\r\n");
 
     co_await write_all(connection, "ok \xE4");
-    co_await sleep(std::chrono::milliseconds(10));
+    co_await barriers.first_piece.wait();
     co_await write_all(connection, "\xB8\xAD\xE6\x96");
-    co_await sleep(std::chrono::milliseconds(10));
+    co_await barriers.second_piece.wait();
     co_await write_all(connection, "\x87 \xF0\x9F");
-    co_await sleep(std::chrono::milliseconds(10));
+    co_await barriers.third_piece.wait();
     co_await write_all(connection, "\x98\x80 end");
     connection = {};
 }
 
-Task<> consume_torn_utf8(i32 port) {
+Task<> consume_torn_utf8(i32 port, TornUtf8Barriers &barriers) {
     http::Client client;
     auto stream_result = co_await client.on().get("http://127.0.0.1:" + std::to_string(port) + "/text").stream();
     require(static_cast<bool>(stream_result), stream_result ? std::string() : stream_result.error().message());
@@ -67,6 +74,8 @@ Task<> consume_torn_utf8(i32 port) {
     require(text.http_response().status == 200, "status mismatch");
 
     std::string assembled;
+    usize piece_index = 0;
+    constexpr std::array expected_pieces{"ok ", "\xE4\xB8\xAD", "\xE6\x96\x87 ", "\xF0\x9F\x98\x80 end"};
     while (true) {
         auto piece = co_await text.next();
         require(static_cast<bool>(piece), piece ? std::string() : piece.error().message());
@@ -75,10 +84,16 @@ Task<> consume_torn_utf8(i32 port) {
         }
         // the guarantee under test: every piece is well-formed on its own
         require(encoding::utf8::is_valid(*piece), "TextStream piece must be complete UTF-8");
+        require(piece_index < expected_pieces.size() && *piece == expected_pieces[piece_index],
+                "TextStream did not preserve a deterministic torn UTF-8 boundary");
         assembled += *piece;
+        if (piece_index == 0) barriers.first_piece.set();
+        if (piece_index == 1) barriers.second_piece.set();
+        if (piece_index == 2) barriers.third_piece.set();
+        ++piece_index;
     }
 
-    require(assembled == "ok 中文 \xF0\x9F\x98\x80 end", "reassembled text mismatch");
+    require(piece_index == expected_pieces.size() && assembled == "ok 中文 \xF0\x9F\x98\x80 end", "reassembled text mismatch");
 }
 
 // --- scenario 2: connection drops mid-sequence -> replacement, not garbage --
@@ -137,8 +152,9 @@ int main() {
     {
         auto listener = make_listener(loop);
         auto port = listen_port(listener);
-        auto server = serve_torn_utf8(std::move(listener));
-        auto client = consume_torn_utf8(port);
+        TornUtf8Barriers barriers;
+        auto server = serve_torn_utf8(std::move(listener), barriers);
+        auto client = consume_torn_utf8(port, barriers);
         loop.schedule(server);
         loop.schedule(client);
         loop.run();
