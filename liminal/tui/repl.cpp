@@ -25,6 +25,7 @@
 
 #include <liminal/tui/console_renderer.h>
 #include <liminal/tui/clipboard.h>
+#include <liminal/tui/command.h>
 #include <liminal/tui/external_editor.h>
 #include <liminal/tui/hydration.h>
 #include <liminal/session/persistence.h>
@@ -533,48 +534,74 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
             co_return 0;
         }
         auto prompt = *std::move(*line);
-        if (prompt.empty()) {
+        auto input = parse_repl_input(std::move(prompt));
+        if (!input) {
+            if (!rendered(renderer.notice("[command error: " + input.error().detail + "]\n"), "cannot render command error")) co_return 1;
             continue;
         }
-        if (prompt == "/quit" || prompt == "/exit") {
-            co_return 0;
-        }
-        auto copy_command = parse_copy_command(prompt);
-        if (!copy_command) {
-            if (!rendered(renderer.notice("[copy error: " + copy_command.error().detail + "]\n"), "cannot render copy error")) co_return 1;
-            continue;
-        }
-        if (copy_command->has_value()) {
-            if (!rendered(co_await copy_reply_with_feedback(agent, **copy_command, renderer), "cannot render clipboard status"))
-                co_return 1;
-            continue;
-        }
-        if (prompt == "/context") {
-            auto manifest = agent.context_manifest();
-            if (!manifest) {
-                if (!rendered(renderer.notice("[context error: " + manifest.error().message() + "]\n"), "cannot render context error"))
+        if (auto *user_prompt = std::get_if<UserPrompt>(&*input)) {
+            prompt = std::move(user_prompt->text);
+            if (prompt.empty()) continue;
+        } else {
+            auto command_line = std::move(*std::get_if<CommandLine>(&*input));
+            auto command = resolve_command(command_line.name);
+            if (!command) {
+                if (!rendered(renderer.notice("[command error: " + command.error().detail + "]\n"), "cannot render command error"))
                     co_return 1;
-            } else if (!rendered(renderer.notice(context::describe(*manifest)), "cannot render context manifest")) {
-                co_return 1;
+                continue;
             }
-            continue;
-        }
-        if (prompt == "/compact" || prompt.starts_with("/compact ")) {
-            auto instructions =
-                prompt == "/compact" ? std::string(k_default_compact_instructions) : prompt.substr(std::string_view("/compact ").size());
-            auto outcome = co_await guard_task(agent.compact(instructions), control);
-            lighter::Error render_error;
-            if (outcome.is_cancelled()) {
-                render_error = renderer.notice("[compact cancelled; history unchanged]\n");
-            } else if (outcome.has_error()) {
-                render_error = renderer.notice("[compact error: " + outcome.error().message() + "]\n");
-            } else {
-                render_error = renderer.notice("[history compacted]\n");
+            if (*command == CommandKind::QUIT) {
+                auto arguments = require_no_arguments(command_line.name, command_line.arguments);
+                if (!arguments) {
+                    if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"), "cannot render command error"))
+                        co_return 1;
+                    continue;
+                }
+                co_return 0;
             }
-            if (!rendered(render_error, "cannot render compaction status")) co_return 1;
-            continue;
-        }
-        if (prompt == "/model" || prompt.starts_with("/model ")) {
+            if (*command == CommandKind::COPY) {
+                auto arguments = parse_copy_arguments(command_line.arguments);
+                if (!arguments) {
+                    if (!rendered(renderer.notice("[copy error: " + arguments.error().detail + "]\n"), "cannot render copy error"))
+                        co_return 1;
+                    continue;
+                }
+                if (!rendered(co_await copy_reply_with_feedback(agent, arguments->ordinal, renderer), "cannot render clipboard status"))
+                    co_return 1;
+                continue;
+            }
+            if (*command == CommandKind::CONTEXT) {
+                auto arguments = require_no_arguments(command_line.name, command_line.arguments);
+                if (!arguments) {
+                    if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"), "cannot render command error"))
+                        co_return 1;
+                    continue;
+                }
+                auto manifest = agent.context_manifest();
+                if (!manifest) {
+                    if (!rendered(renderer.notice("[context error: " + manifest.error().message() + "]\n"), "cannot render context error"))
+                        co_return 1;
+                } else if (!rendered(renderer.notice(context::describe(*manifest)), "cannot render context manifest")) {
+                    co_return 1;
+                }
+                continue;
+            }
+            if (*command == CommandKind::COMPACT) {
+                auto instructions =
+                    command_line.arguments.empty() ? std::string(k_default_compact_instructions) : std::move(command_line.arguments);
+                auto outcome = co_await guard_task(agent.compact(instructions), control);
+                lighter::Error render_error;
+                if (outcome.is_cancelled()) {
+                    render_error = renderer.notice("[compact cancelled; history unchanged]\n");
+                } else if (outcome.has_error()) {
+                    render_error = renderer.notice("[compact error: " + outcome.error().message() + "]\n");
+                } else {
+                    render_error = renderer.notice("[history compacted]\n");
+                }
+                if (!rendered(render_error, "cannot render compaction status")) co_return 1;
+                continue;
+            }
+
             auto refreshed = co_await guard_task(models.refresh(), control);
             if (refreshed.is_cancelled()) {
                 if (!rendered(renderer.notice("[model refresh cancelled; selection unchanged]\n"), "cannot render model status"))
@@ -590,8 +617,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                 if (!rendered(renderer.notice("[model warning: " + warning + "]\n"), "cannot render model warning")) co_return 1;
             }
 
-            const auto selector =
-                prompt == "/model" ? std::string_view{} : std::string_view(prompt).substr(std::string_view("/model ").size());
+            const auto selector = std::string_view(command_line.arguments);
             if (selector.empty()) {
                 std::string listing = "models (configure " + models.providers_file().string() + "):\n";
                 for (const auto &entry : models.entries()) {

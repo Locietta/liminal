@@ -1,8 +1,6 @@
 #include "clipboard.h"
 
 #include <algorithm>
-#include <charconv>
-#include <cctype>
 #include <cstdlib>
 #include <limits>
 #include <span>
@@ -118,25 +116,6 @@ std::vector<ClipboardCommand> clipboard_commands() {
 #endif
 
 } // namespace
-
-Result<std::optional<usize>> parse_copy_command(std::string_view prompt) {
-    constexpr std::string_view prefix = "/copy";
-    if (!prompt.starts_with(prefix)) return std::optional<usize>{};
-    prompt.remove_prefix(prefix.size());
-    if (!prompt.empty() && std::isspace(static_cast<unsigned char>(prompt.front())) == 0) return std::optional<usize>{};
-
-    while (!prompt.empty() && std::isspace(static_cast<unsigned char>(prompt.front())) != 0) prompt.remove_prefix(1);
-    if (prompt.empty()) return std::optional<usize>{1};
-
-    usize ordinal = 0;
-    const auto parsed = std::from_chars(prompt.data(), prompt.data() + prompt.size(), ordinal);
-    auto remainder = std::string_view(parsed.ptr, static_cast<usize>(prompt.data() + prompt.size() - parsed.ptr));
-    while (!remainder.empty() && std::isspace(static_cast<unsigned char>(remainder.front())) != 0) remainder.remove_prefix(1);
-    if (parsed.ec != std::errc{} || ordinal == 0 || !remainder.empty()) {
-        return lighter::outcome_error(Error::protocol("usage: /copy [positive reply number]"));
-    }
-    return std::optional<usize>{ordinal};
-}
 
 Task<void, Error> copy_to_clipboard(std::string text) {
 #ifdef _WIN32

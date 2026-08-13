@@ -442,6 +442,23 @@ def test_redirected_eof_exits_cleanly(tmp_path):
     assert "liminal - model: test-model" in out
 
 
+def test_slash_commands_are_exact_and_can_be_escaped(openai_mock, tmp_path):
+    url, state = openai_mock
+    out = run_liminal(
+        "/copycat\n//copycat\n/quit\n",
+        {
+            "openai": configured_provider(
+                "openai-responses", url, mock_openai.API_KEY, [{"id": "test-model"}]
+            )
+        },
+        tmp_path,
+    )
+
+    check(state, ["429", "tools-turn", "continuation"])
+    assert "[command error: unknown command '/copycat']" in out
+    assert "/copycat" in json.dumps(state["request_bodies"][0])
+
+
 def test_anthropic_full_cycle(anthropic_mock, tmp_path):
     """429 retry, SSE reassembly, thinking replay, parallel tools, compaction."""
     url, state = anthropic_mock

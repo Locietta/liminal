@@ -15,6 +15,7 @@
 
 #include <liminal/event.h>
 #include <liminal/tui/clipboard.h>
+#include <liminal/tui/command.h>
 #include <liminal/tui/headless.h>
 #include <liminal/tui/external_editor.h>
 #include <liminal/tui/rich_text.h>
@@ -610,17 +611,37 @@ void check_clipboard_helper() {
 #endif
 }
 
-void check_copy_command_and_status() {
-    const auto newest = tui::parse_copy_command("/copy");
-    const auto older = tui::parse_copy_command("/copy  3\t");
-    const auto unrelated = tui::parse_copy_command("/copycat");
-    const auto zero = tui::parse_copy_command("/copy 0");
-    const auto trailing = tui::parse_copy_command("/copy 2 more");
-    require(newest.has_value() && *newest == std::optional<usize>{1}, "/copy must select the newest reply");
-    require(older.has_value() && *older == std::optional<usize>{3}, "/copy N must use a newest-first positive ordinal");
-    require(unrelated.has_value() && !unrelated->has_value(),
-            "slash commands that merely share the copy prefix must remain ordinary prompts");
+void check_command_parsing_and_status() {
+    auto input = tui::parse_repl_input("ordinary prompt");
+    const auto *prompt = input ? std::get_if<tui::UserPrompt>(&*input) : nullptr;
+    require(prompt && prompt->text == "ordinary prompt", "ordinary input must remain a user prompt");
+
+    input = tui::parse_repl_input("/copy  3\t");
+    const auto *copy = input ? std::get_if<tui::CommandLine>(&*input) : nullptr;
+    require(copy && copy->name == "copy" && copy->arguments == "3", "slash input must split its exact name and arguments");
+    auto command = tui::resolve_command(copy->name);
+    require(command && *command == tui::CommandKind::COPY, "the copy command must resolve centrally");
+
+    const auto newest = tui::parse_copy_arguments("");
+    const auto older = tui::parse_copy_arguments("  3\t");
+    const auto zero = tui::parse_copy_arguments("0");
+    const auto trailing = tui::parse_copy_arguments("2 more");
+    require(newest && newest->ordinal == 1, "/copy must select the newest reply");
+    require(older && older->ordinal == 3, "/copy N must use a newest-first positive ordinal");
     require(!zero && !trailing && zero.error().detail.contains("usage"), "malformed copy ordinals must report the command usage");
+
+    input = tui::parse_repl_input("/copycat");
+    const auto *unknown = input ? std::get_if<tui::CommandLine>(&*input) : nullptr;
+    require(unknown && !tui::resolve_command(unknown->name), "an unknown slash command must not become a user prompt");
+    input = tui::parse_repl_input("//copycat");
+    prompt = input ? std::get_if<tui::UserPrompt>(&*input) : nullptr;
+    require(prompt && prompt->text == "/copycat", "a double slash must escape a slash-prefixed user prompt");
+    require(!tui::parse_repl_input("/") && !tui::parse_repl_input("/ arguments"), "empty slash commands must fail lexically");
+
+    command = tui::resolve_command("exit");
+    require(command && *command == tui::CommandKind::QUIT, "command aliases must be registered centrally");
+    require(tui::require_no_arguments("quit", " ") && !tui::require_no_arguments("quit", "now"),
+            "argument-free commands must reject unexpected arguments");
 
     tui::SessionScreen screen;
     screen.resize({80, 10});
@@ -933,7 +954,7 @@ i32 run_all(std::string_view executable) {
     check_rich_output_and_concurrent_tools();
     check_external_editor_round_trip(executable);
     check_clipboard_helper();
-    check_copy_command_and_status();
+    check_command_parsing_and_status();
     check_scroll_resize_state();
     check_working_indicator();
     check_mouse_selection();
