@@ -758,8 +758,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
         os.write(master, b"\x0f")
         read_pty_until_fresh(master, output, b"Copied latest reply to clipboard", 5)
         copied_reply = clipboard_output.read_text(encoding="utf-8")
-        assert "Let me inspect the repository." in copied_reply
-        assert "The working directory is the liminal repository." in copied_reply
+        assert copied_reply == "The working directory is the liminal repository."
 
         # Ctrl+O must not consume the queued draft. Submitting it creates a
         # second reply, after which /copy 2 selects the original tool round.
