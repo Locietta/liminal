@@ -130,10 +130,11 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "error: cannot resolve working directory: %s\n", cwd_error.message().c_str());
         return 1;
     }
+    // Loop-bound services such as exec sessions must release their libuv
+    // handles before the loop itself is torn down.
+    lighter::EventLoop loop;
     ToolSet tools(std::move(cwd));
     model::Catalog models(provider::default_providers_file(), codex::default_auth_file());
-
-    lighter::EventLoop loop;
     auto interrupts = lighter::InterruptSource::create(loop);
     if (!interrupts) {
         std::fprintf(stderr, "error: cannot watch process controls: %s\n", std::string(interrupts.error().message()).c_str());
