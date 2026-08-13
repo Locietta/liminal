@@ -317,6 +317,9 @@ void test_done_requires_terminal_answer() {
     auto outcome = task.result();
     require(outcome.has_error() && outcome.error().detail.contains("without a terminal assistant answer"),
             "a provider DONE without a terminal answer completed the task");
+    require(std::get<session::ProviderCallCompleted>(agent.session.entries[2].payload).loop_outcome ==
+                session::ProviderCallLoopOutcome::FAILED,
+            "rejected provider completion was not recorded as a failed loop outcome");
     require(std::get<session::TaskFinished>(agent.session.entries.back().payload).outcome == session::TaskOutcome::FAILED,
             "missing terminal output did not fail the semantic task");
     provider_mock.verify();
@@ -354,6 +357,19 @@ void test_final_phase_does_not_bypass_tool_follow_up() {
 
     require(task.result().has_value(), "a final-phase message with tools did not continue to the actual final answer");
     require(*tool_executions == 1 && *completions == 2, "message phase incorrectly overrode task control flow");
+    require(agent.session.reply_from_latest() == "Done.", "copyable reply included text from the earlier tool-bearing provider call");
+    const auto &premature =
+        std::get<provider::AssistantMessageItem>(std::get<session::OutputItemCompleted>(agent.session.entries[1].payload).item);
+    require(premature.phase == provider::MessagePhase::FINAL && premature.parts[0].text == "I found the answer.",
+            "terminal-reply projection changed the provider's original message semantics");
+    const auto &first_call = std::get<session::ProviderCallCompleted>(agent.session.entries[3].payload);
+    const auto &tool_results = std::get<session::ToolResults>(agent.session.entries[4].payload);
+    const auto &terminal_call = std::get<session::ProviderCallCompleted>(agent.session.entries[6].payload);
+    require(first_call.loop_outcome == session::ProviderCallLoopOutcome::FOLLOW_UP &&
+                terminal_call.loop_outcome == session::ProviderCallLoopOutcome::TERMINAL,
+            "provider calls did not record the agent loop's follow-up and terminal decisions");
+    require(tool_results.results.size() == 1 && tool_results.results[0].content == "ok",
+            "tool-bearing provider call did not retain its tool result before follow-up");
     provider_mock.verify();
 }
 

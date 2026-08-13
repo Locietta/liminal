@@ -46,10 +46,17 @@ struct OutputItemCompleted {
     provider::OutputItem item;
 };
 
+enum struct ProviderCallLoopOutcome {
+    FOLLOW_UP,
+    TERMINAL,
+    FAILED,
+};
+
 struct ProviderCallCompleted {
     TaskId task_id;
     ProviderCallId id;
     provider::ProviderCallCompletion completion;
+    ProviderCallLoopOutcome loop_outcome = ProviderCallLoopOutcome::FAILED;
 };
 
 enum struct ProviderCallAbortReason {

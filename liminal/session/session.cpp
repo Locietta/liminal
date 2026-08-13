@@ -72,15 +72,21 @@ std::vector<const SessionEntry *> Session::active_branch() const {
 std::optional<std::string> Session::reply_from_latest(usize ordinal) const {
     if (ordinal == 0) return std::nullopt;
 
+    struct ReplyCandidate {
+        ProviderCallId call_id;
+        std::string explicit_final;
+        std::string last_unphased;
+    };
+
     std::vector<std::string> replies;
     std::optional<TaskId> active_task;
-    std::string explicit_final;
-    std::string last_unphased;
+    std::optional<ProviderCallId> terminal_call;
+    std::vector<ReplyCandidate> candidates;
     for (const auto *entry : active_branch()) {
         if (const auto *started = std::get_if<TaskStarted>(&entry->payload)) {
             active_task = started->id;
-            explicit_final.clear();
-            last_unphased.clear();
+            terminal_call.reset();
+            candidates.clear();
             continue;
         }
         if (!active_task) continue;
@@ -91,18 +97,32 @@ std::optional<std::string> Session::reply_from_latest(usize ordinal) const {
             std::string text;
             for (const auto &part : message->parts) text += part.text;
             if (text.empty()) continue;
-            if (message->phase == provider::MessagePhase::FINAL) {
-                if (!explicit_final.empty()) explicit_final += "\n\n";
-                explicit_final += text;
-            } else {
-                last_unphased = std::move(text);
+            auto candidate = std::ranges::find(candidates, output->provider_call_id, &ReplyCandidate::call_id);
+            if (candidate == candidates.end()) {
+                candidate = candidates.insert(candidates.end(), ReplyCandidate{.call_id = output->provider_call_id});
             }
+            if (message->phase == provider::MessagePhase::FINAL) {
+                if (!candidate->explicit_final.empty()) candidate->explicit_final += "\n\n";
+                candidate->explicit_final += text;
+            } else {
+                candidate->last_unphased = std::move(text);
+            }
+            continue;
+        }
+        const auto *call = std::get_if<ProviderCallCompleted>(&entry->payload);
+        if (call && call->task_id == *active_task && call->loop_outcome == ProviderCallLoopOutcome::TERMINAL) {
+            terminal_call = call->id;
             continue;
         }
         const auto *finished = std::get_if<TaskFinished>(&entry->payload);
         if (!finished || finished->id != *active_task) continue;
-        if (finished->outcome == TaskOutcome::COMPLETED) {
-            auto reply = !explicit_final.empty() ? std::move(explicit_final) : std::move(last_unphased);
+        if (finished->outcome == TaskOutcome::COMPLETED && terminal_call) {
+            const auto candidate = std::ranges::find(candidates, *terminal_call, &ReplyCandidate::call_id);
+            if (candidate == candidates.end()) {
+                active_task.reset();
+                continue;
+            }
+            auto reply = !candidate->explicit_final.empty() ? std::move(candidate->explicit_final) : std::move(candidate->last_unphased);
             if (!reply.empty()) replies.push_back(std::move(reply));
         }
         active_task.reset();

@@ -98,10 +98,16 @@ void test_reply_selection() {
     session::Session log({.value = 13});
     const auto first_task = log.start_task("first");
     append_message(log, first_task, "first answer");
+    log.append(session::ProviderCallCompleted{
+        .task_id = first_task,
+        .id = {.value = 1},
+        .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
+    });
     log.append(session::TaskFinished{.id = first_task});
     const auto first_leaf = *log.active_leaf;
     const auto second_task = log.start_task("second");
-    append_message(log, second_task, "checking", {.value = 1}, provider::MessagePhase::COMMENTARY);
+    append_message(log, second_task, "checking", {.value = 2}, provider::MessagePhase::COMMENTARY);
+    append_message(log, second_task, "premature answer", {.value = 2}, provider::MessagePhase::FINAL);
     log.append(session::OutputItemCompleted{
         .task_id = second_task,
         .provider_call_id = {.value = 2},
@@ -110,6 +116,11 @@ void test_reply_selection() {
                 .id = {.value = "tool"},
                 .call = {.id = "call", .name = "read_file"},
             },
+    });
+    log.append(session::ProviderCallCompleted{
+        .task_id = second_task,
+        .id = {.value = 2},
+        .loop_outcome = session::ProviderCallLoopOutcome::FOLLOW_UP,
     });
     log.append(session::ToolResults{.task_id = second_task, .provider_call_id = {.value = 2}});
     log.append(session::OutputItemCompleted{
@@ -121,7 +132,14 @@ void test_reply_selection() {
                 .part = {.provider_tag = "test", .payload = "private"},
             },
     });
+    append_message(log, second_task, "terminal commentary", {.value = 3}, provider::MessagePhase::COMMENTARY);
+    append_message(log, second_task, "unphased fallback", {.value = 3});
     append_message(log, second_task, "second answer", {.value = 3}, provider::MessagePhase::FINAL);
+    log.append(session::ProviderCallCompleted{
+        .task_id = second_task,
+        .id = {.value = 3},
+        .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
+    });
     log.append(session::TaskFinished{.id = second_task});
 
     require(log.reply_from_latest() == "second answer", "latest reply did not select only the explicit final answer");
@@ -133,8 +151,23 @@ void test_reply_selection() {
 
     const auto failed_task = log.start_task("failed");
     append_message(log, failed_task, "unfinished output");
+    log.append(session::ProviderCallCompleted{
+        .task_id = failed_task,
+        .id = {.value = 1},
+        .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
+    });
     log.append(session::TaskFinished{.id = failed_task, .outcome = session::TaskOutcome::FAILED});
     require(log.reply_from_latest() == "first answer", "failed task displaced the newest completed reply");
+
+    const auto cancelled_task = log.start_task("cancelled");
+    append_message(log, cancelled_task, "cancelled output");
+    log.append(session::ProviderCallCompleted{
+        .task_id = cancelled_task,
+        .id = {.value = 1},
+        .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
+    });
+    log.append(session::TaskFinished{.id = cancelled_task, .outcome = session::TaskOutcome::CANCELLED});
+    require(log.reply_from_latest() == "first answer", "cancelled task displaced the newest completed reply");
 }
 
 i32 run_all() {

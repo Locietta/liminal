@@ -50,6 +50,18 @@ bool needs_automatic_compaction(const context::ContextManifest &manifest) {
     return manifest.usage.estimated_input_tokens >= threshold;
 }
 
+session::ProviderCallLoopOutcome loop_outcome(const provider::ProviderCallCompletion &completion, usize call_count,
+                                              bool has_terminal_answer) {
+    if (completion.stop == provider::StopKind::DONE) {
+        if (call_count != 0) return session::ProviderCallLoopOutcome::FOLLOW_UP;
+        return has_terminal_answer ? session::ProviderCallLoopOutcome::TERMINAL : session::ProviderCallLoopOutcome::FAILED;
+    }
+    if (completion.stop == provider::StopKind::NEEDS_TOOL_RESULTS && call_count != 0) {
+        return session::ProviderCallLoopOutcome::FOLLOW_UP;
+    }
+    return session::ProviderCallLoopOutcome::FAILED;
+}
+
 template <typename T, typename E>
 Task<lighter::Outcome<T, E, lighter::Cancellation>> observe_cancellation(Task<T, E> work,
                                                                          const std::optional<lighter::CancellationToken> &cancellation) {
@@ -210,6 +222,7 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
             .task_id = task_id,
             .id = provider_call_id,
             .completion = completion,
+            .loop_outcome = loop_outcome(completion, call_count, has_terminal_answer),
         });
         auto settled = co_await observe_cancellation(scheduler.finish(), cancellation);
         const bool cancelled_while_settling = settled.is_cancelled();
