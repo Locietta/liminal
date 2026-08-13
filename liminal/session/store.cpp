@@ -168,6 +168,9 @@ Result<void> migrate(sqlite3 *database) {
         return lighter::outcome_error(
             Error::storage("state database schema version " + std::to_string(schema_version) + " is newer than this Liminal build"));
     }
+    if (schema_version != 0 && application_id != k_application_id) {
+        return lighter::outcome_error(Error::storage("state database does not have Liminal's application identity"));
+    }
     if (schema_version == k_schema_version) return {};
     if (schema_version != 0) return lighter::outcome_error(Error::storage("unsupported state database schema version"));
     constexpr std::string_view migration = R"sql(
@@ -226,6 +229,7 @@ Result<void> configure(sqlite3 *database) {
     }
     if (auto result = execute(database, "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;"); !result)
         return result;
+    if (auto migrated = migrate(database); !migrated) return migrated;
     auto wal = prepare(database, "PRAGMA journal_mode=WAL");
     if (!wal) return lighter::outcome_error(std::move(wal).error());
     if (sqlite3_step(wal->value) != SQLITE_ROW || text(wal->value, 0) != "wal") {
@@ -233,7 +237,7 @@ Result<void> configure(sqlite3 *database) {
     }
     sqlite3_finalize(wal->value);
     wal->value = nullptr;
-    return migrate(database);
+    return {};
 }
 
 Result<void> begin(sqlite3 *database) { return execute(database, "BEGIN IMMEDIATE"); }
@@ -523,6 +527,7 @@ struct DurableHead {
     u64 next_provider_call_id = 1;
     u64 tokens_used = 0;
     i64 created_at_ms = 0;
+    i64 updated_at_ms = 0;
 };
 
 Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) {
@@ -530,7 +535,7 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
         return lighter::outcome_error(Error::storage("cannot materialize a session without a semantic entry"));
     }
     if (delta.metadata.created_at_ms <= 0 || delta.metadata.updated_at_ms < delta.metadata.created_at_ms ||
-        (head.exists && delta.metadata.created_at_ms != head.created_at_ms)) {
+        (head.exists && (delta.metadata.created_at_ms != head.created_at_ms || delta.metadata.updated_at_ms < head.updated_at_ms))) {
         return lighter::outcome_error(Error::storage("session delta has invalid catalog timestamps"));
     }
     if (delta.metadata.preview.size() > 240 || !lighter::encoding::utf8::is_valid(delta.metadata.preview)) {
@@ -596,9 +601,9 @@ Result<void> SessionWriter::commit(const SessionDelta &delta) {
     if (!started) return lighter::outcome_error(std::move(started).error());
     Rollback rollback{store->database};
 
-    auto revision =
-        prepare(store->database, "SELECT revision, entry_count, next_task_id, next_provider_call_id, tokens_used, created_at_ms "
-                                 "FROM sessions WHERE id=?1");
+    auto revision = prepare(store->database,
+                            "SELECT revision, entry_count, next_task_id, next_provider_call_id, tokens_used, created_at_ms, updated_at_ms "
+                            "FROM sessions WHERE id=?1");
     if (!revision) return lighter::outcome_error(std::move(revision).error());
     bind_id(revision->value, 1, id);
     auto row = sqlite3_step(revision->value);
@@ -618,6 +623,7 @@ Result<void> SessionWriter::commit(const SessionDelta &delta) {
             .next_provider_call_id = static_cast<u64>(sqlite3_column_int64(revision->value, 3)),
             .tokens_used = static_cast<u64>(sqlite3_column_int64(revision->value, 4)),
             .created_at_ms = sqlite3_column_int64(revision->value, 5),
+            .updated_at_ms = sqlite3_column_int64(revision->value, 6),
         };
     }
     if (auto valid = validate_delta(delta, head); !valid) return valid;

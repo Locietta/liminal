@@ -19,7 +19,7 @@ struct PersistenceStatus {
     std::string detail;
 };
 
-struct PersistenceQueue : std::enable_shared_from_this<PersistenceQueue> {
+struct PersistenceQueue {
     using Commit = std::copyable_function<Result<void>(const SessionDelta &) const>;
 
     static std::shared_ptr<PersistenceQueue> create(SessionWriter writer);

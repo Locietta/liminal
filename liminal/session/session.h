@@ -2,7 +2,6 @@
 
 #include <array>
 #include <compare>
-#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -160,6 +159,10 @@ i64 unix_milliseconds_now() noexcept;
 struct Session {
     Session();
     explicit Session(SessionId id);
+    Session(Session &&) noexcept = default;
+    Session &operator=(Session &&) noexcept = default;
+    Session(const Session &) = delete;
+    Session &operator=(const Session &) = delete;
 
     EntryId append(EntryPayload payload);
     TaskId start_task(std::string text);

@@ -33,6 +33,9 @@ using namespace liminal;
 
 static_assert(!std::default_initializable<session::Store>);
 static_assert(!std::default_initializable<session::SessionWriter>);
+static_assert(std::movable<session::Session>);
+static_assert(!std::copy_constructible<session::Session>);
+static_assert(!std::assignable_from<session::Session &, const session::Session &>);
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -230,6 +233,44 @@ void test_store_preserves_caller_owned_directory_permissions() {
                 (std::filesystem::status(wal).permissions() & public_permissions) == std::filesystem::perms::none,
             "SQLite WAL sidecar was created with public permissions");
 #endif
+}
+
+void test_established_database_requires_application_identity() {
+    TemporaryDatabase database;
+    sqlite3 *raw = nullptr;
+    require(sqlite3_open(database.path.string().c_str(), &raw) == SQLITE_OK, "failed to create foreign database fixture");
+    require(sqlite3_exec(raw, "PRAGMA user_version=1", nullptr, nullptr, nullptr) == SQLITE_OK,
+            "failed to set foreign database schema version");
+    sqlite3_close(raw);
+
+    auto opened = session::Store::open(database.path);
+    require(!opened && opened.error().detail.contains("application identity"),
+            "an established database without Liminal's application identity was accepted");
+
+    require(sqlite3_open(database.path.string().c_str(), &raw) == SQLITE_OK, "failed to reopen rejected database fixture");
+    sqlite3_stmt *journal = nullptr;
+    require(sqlite3_prepare_v2(raw, "PRAGMA journal_mode", -1, &journal, nullptr) == SQLITE_OK && sqlite3_step(journal) == SQLITE_ROW,
+            "failed to inspect rejected database journal mode");
+    const auto mode = std::string(reinterpret_cast<const char *>(sqlite3_column_text(journal, 0)));
+    sqlite3_finalize(journal);
+    sqlite3_close(raw);
+    require(mode != "wal", "Store::open changed a rejected foreign database to WAL mode");
+}
+
+void test_writer_rejects_updated_at_regression() {
+    TemporaryDatabase database;
+    auto store = session::Store::open(database.path);
+    require(store.has_value(), "failed to open timestamp test store");
+    session::Session value;
+    value.metadata.working_directory = database.directory.generic_string();
+    value.start_task("timestamp test");
+    value.metadata.updated_at_ms = value.metadata.created_at_ms + 100;
+    auto writer = store->lease(value.id);
+    require(writer && writer->commit(session::make_delta(value, value.entries)), "failed to seed timestamp test session");
+
+    value.metadata.updated_at_ms -= 50;
+    auto regressed = writer->commit(session::make_delta(value, {}));
+    require(!regressed && regressed.error().detail.contains("timestamps"), "writer accepted a regressing durable update timestamp");
 }
 
 void test_windows_workspace_key_uses_unicode_case_mapping() {
@@ -606,6 +647,8 @@ void test_transcript_hydration() {
 i32 run_all() {
     test_uuid_v7();
     test_store_preserves_caller_owned_directory_permissions();
+    test_established_database_requires_application_identity();
+    test_writer_rejects_updated_at_regression();
     test_windows_workspace_key_uses_unicode_case_mapping();
     test_store_round_trip_and_restart_branching();
     test_unknown_payload_version_isolated_from_catalog();
