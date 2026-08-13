@@ -153,9 +153,11 @@ Task<void, Error> interrupt_cancels_work(bool &cancelled, i32 &count) {
         started.set();
         co_await parked.wait();
     };
-    auto raiser = [&started]() -> Task<void, Error> {
+    auto raiser = [&started, &interrupts]() -> Task<void, Error> {
         co_await started.wait();
         std::raise(SIGINT);
+        auto received = co_await interrupts->next().or_fail();
+        require(received == ControlEventKind::INTERRUPT, "InterruptSource must observe the raised control");
     };
     auto result = co_await WhenAll(with_token(workload(), interrupts->token()), raiser());
     cancelled = result.is_cancelled();
