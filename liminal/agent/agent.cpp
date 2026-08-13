@@ -3,6 +3,7 @@
 #include "default_instructions.h"
 #include "tool_scheduler.h"
 
+#include <chrono>
 #include <string>
 #include <utility>
 
@@ -21,6 +22,7 @@ constexpr std::string_view k_automatic_compact_instructions =
     "to continue the active task.";
 constexpr u64 k_automatic_compact_numerator = 9;
 constexpr u64 k_automatic_compact_denominator = 10;
+constexpr auto k_tool_cancel_grace_period = std::chrono::milliseconds(250);
 
 void emit(const EventSink &events, Event event) {
     if (events) {
@@ -159,9 +161,19 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
         };
         auto completed =
             co_await observe_cancellation(model.handle->complete(built->provider_history, tools->definitions(), stream), cancellation);
+        scheduler.finish_accepting();
         if (completed.is_cancelled()) {
-            scheduler.cancel();
-            auto results = co_await scheduler.finish();
+            session.append(session::ProviderCallAborted{
+                .task_id = task_id,
+                .id = provider_call_id,
+                .reason = session::ProviderCallAbortReason::CANCELLED,
+                .detail = "provider call cancelled",
+            });
+            auto cancelled = co_await scheduler.cancel_and_finish(k_tool_cancel_grace_period);
+            if (!cancelled) {
+                co_await fail(std::move(cancelled).error());
+            }
+            auto results = *std::move(cancelled);
             if (!results.empty()) {
                 session.append(session::ToolResults{
                     .task_id = task_id,
@@ -172,8 +184,18 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
             co_await cancel();
         }
         if (completed.has_error()) {
-            scheduler.cancel();
-            auto results = co_await scheduler.finish();
+            const auto failure_detail = completed.error().message();
+            session.append(session::ProviderCallAborted{
+                .task_id = task_id,
+                .id = provider_call_id,
+                .reason = session::ProviderCallAbortReason::FAILED,
+                .detail = failure_detail,
+            });
+            auto cancelled = co_await scheduler.cancel_and_finish(k_tool_cancel_grace_period);
+            if (!cancelled) {
+                co_await fail(std::move(cancelled).error());
+            }
+            auto results = *std::move(cancelled);
             if (!results.empty()) {
                 session.append(session::ToolResults{
                     .task_id = task_id,
@@ -191,11 +213,16 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
         });
         auto settled = co_await observe_cancellation(scheduler.finish(), cancellation);
         const bool cancelled_while_settling = settled.is_cancelled();
+        std::vector<provider::ToolResult> results;
         if (settled.is_cancelled()) {
-            scheduler.cancel();
-            settled = co_await observe_cancellation(scheduler.finish(), std::nullopt);
+            auto cancelled = co_await scheduler.cancel_and_finish(k_tool_cancel_grace_period);
+            if (!cancelled) {
+                co_await fail(std::move(cancelled).error());
+            }
+            results = *std::move(cancelled);
+        } else if (settled.has_value()) {
+            results = *std::move(settled);
         }
-        auto results = settled.has_value() ? *std::move(settled) : std::vector<provider::ToolResult>{};
         if (!results.empty()) {
             session.append(session::ToolResults{
                 .task_id = task_id,

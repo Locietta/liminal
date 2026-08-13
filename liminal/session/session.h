@@ -52,6 +52,18 @@ struct ProviderCallCompleted {
     provider::ProviderCallCompletion completion;
 };
 
+enum struct ProviderCallAbortReason {
+    CANCELLED,
+    FAILED,
+};
+
+struct ProviderCallAborted {
+    TaskId task_id;
+    ProviderCallId id;
+    ProviderCallAbortReason reason = ProviderCallAbortReason::FAILED;
+    std::string detail;
+};
+
 struct ToolResults {
     TaskId task_id;
     ProviderCallId provider_call_id;
@@ -87,7 +99,8 @@ struct ContextCheckpoint {
     std::vector<CheckpointItem> items;
 };
 
-using EntryPayload = std::variant<TaskStarted, OutputItemCompleted, ProviderCallCompleted, ToolResults, TaskFinished, ContextCheckpoint>;
+using EntryPayload = std::variant<TaskStarted, OutputItemCompleted, ProviderCallCompleted, ProviderCallAborted, ToolResults, TaskFinished,
+                                  ContextCheckpoint>;
 
 struct SessionEntry {
     EntryId id;

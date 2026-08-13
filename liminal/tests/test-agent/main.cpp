@@ -238,11 +238,13 @@ void test_long_tool_loop() {
 
 void test_tool_starts_before_provider_call_finishes() {
     ToolSet tools(std::filesystem::current_path());
-    auto executed = std::make_shared<bool>(false);
+    auto started = std::make_shared<lighter::Event>();
+    auto release = std::make_shared<lighter::Event>();
     auto registered = tools.register_tool({
         .definition = {.name = "test_online", .description = "Test online scheduling"},
-        .execute = [executed](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
-            *executed = true;
+        .execute = [started, release](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
+            started->set();
+            co_await release->wait();
             co_return provider::ToolResult{.call_id = call.id, .content = "online"};
         },
     });
@@ -251,20 +253,20 @@ void test_tool_starts_before_provider_call_finishes() {
     auto completions = std::make_shared<usize>(0);
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>()
-        .calls(
-            [completions, executed](const provider::History &, const std::vector<provider::ToolDefinition> &,
-                                    const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
-                if ((*completions)++ != 0) {
-                    emit_message(callbacks, "final", "done", true);
-                    co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
-                }
-                emit_message(callbacks, "before", "I will inspect.", true);
-                emit_tool_call(callbacks, "online-call", "test_online");
-                co_await lighter::sleep(1ms);
-                require(*executed, "tool execution waited for the provider call to finish");
-                emit_message(callbacks, "after", "The inspection is running.", true);
-                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
-            })
+        .calls([completions, started,
+                release](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                         const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            if ((*completions)++ != 0) {
+                emit_message(callbacks, "final", "done", true);
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+            }
+            emit_message(callbacks, "before", "I will inspect.", true);
+            emit_tool_call(callbacks, "online-call", "test_online");
+            co_await started->wait();
+            emit_message(callbacks, "after", "The inspection is running.", true);
+            release->set();
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+        })
         .times(2);
     provider_mock.expect<provider::CompactDispatch>().never();
 
@@ -276,15 +278,18 @@ void test_tool_starts_before_provider_call_finishes() {
     loop.run();
 
     require(task.result().has_value(), "online scheduling task failed");
+    usize tool_started = events.size();
     usize tool_completed = events.size();
     usize after_delta = events.size();
     for (usize index = 0; index < events.size(); ++index) {
+        if (std::holds_alternative<ToolStarted>(events[index])) tool_started = index;
         if (std::holds_alternative<ToolCompleted>(events[index])) tool_completed = index;
         if (const auto *delta = std::get_if<AssistantTextDelta>(&events[index]); delta && delta->text == "The inspection is running.") {
             after_delta = index;
         }
     }
-    require(tool_completed < after_delta, "provider progress emitted before the completed online tool event");
+    require(tool_started < after_delta && after_delta < tool_completed,
+            "provider progress did not stream while the online tool was running");
     provider_mock.verify();
 }
 
@@ -389,11 +394,22 @@ void test_cancelled_task_retains_semantic_progress() {
 
     auto outcome = task.result();
     require(outcome.is_cancelled(), "task cancellation did not propagate to the caller");
-    require(agent.session.entries.size() == 4 && std::holds_alternative<session::TaskStarted>(agent.session.entries[0].payload) &&
+    require(agent.session.entries.size() == 6 && std::holds_alternative<session::TaskStarted>(agent.session.entries[0].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[2].payload) &&
-                std::get<session::TaskFinished>(agent.session.entries[3].payload).outcome == session::TaskOutcome::CANCELLED,
+                std::get<session::ProviderCallAborted>(agent.session.entries[3].payload).reason ==
+                    session::ProviderCallAbortReason::CANCELLED &&
+                std::holds_alternative<session::ToolResults>(agent.session.entries[4].payload) &&
+                std::get<session::ToolResults>(agent.session.entries[4].payload).results.size() == 1 &&
+                std::get<session::ToolResults>(agent.session.entries[4].payload).results[0].call_id == "slow-call" &&
+                std::get<session::ToolResults>(agent.session.entries[4].payload).results[0].is_error &&
+                std::get<session::ToolResults>(agent.session.entries[4].payload).results[0].content.contains("outcome is unknown") &&
+                std::get<session::TaskFinished>(agent.session.entries[5].payload).outcome == session::TaskOutcome::CANCELLED,
             "cancelled task did not retain completed output items and its terminal outcome");
+    auto context = agent.context_manifest();
+    require(context && context->provider_history.size() == 6 && context->provider_history.back().role == provider::Role::USER &&
+                std::get<provider::ToolResult>(context->provider_history.back().parts[0]).call_id == "slow-call",
+            "cancelled task projected an unmatched tool call into resumable provider context");
     provider_mock.verify();
 }
 
@@ -420,10 +436,12 @@ void test_stream_failure_retains_completed_tool_result() {
     auto outcome = task.result();
     require(outcome.has_error() && outcome.error().detail == "simulated stream failure",
             "provider stream failure did not reach the caller");
-    require(agent.session.entries.size() == 4 && std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
-                std::holds_alternative<session::ToolResults>(agent.session.entries[2].payload) &&
-                std::get<session::ToolResults>(agent.session.entries[2].payload).results.front().call_id == "completed-before-failure" &&
-                std::get<session::TaskFinished>(agent.session.entries[3].payload).outcome == session::TaskOutcome::FAILED,
+    require(agent.session.entries.size() == 5 && std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
+                std::get<session::ProviderCallAborted>(agent.session.entries[2].payload).reason ==
+                    session::ProviderCallAbortReason::FAILED &&
+                std::holds_alternative<session::ToolResults>(agent.session.entries[3].payload) &&
+                std::get<session::ToolResults>(agent.session.entries[3].payload).results.front().call_id == "completed-before-failure" &&
+                std::get<session::TaskFinished>(agent.session.entries[4].payload).outcome == session::TaskOutcome::FAILED,
             "stream failure rolled back a completed tool call or result");
     provider_mock.verify();
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <vector>
 
@@ -20,8 +21,9 @@ struct ToolScheduler {
     ToolScheduler(const ToolSet &tools, EventSink events);
 
     void submit(provider::ToolCall call);
-    void cancel();
+    void finish_accepting();
     lighter::Task<std::vector<provider::ToolResult>> finish();
+    lighter::Task<std::vector<provider::ToolResult>, Error> cancel_and_finish(std::chrono::milliseconds grace_period);
 
 private:
     std::shared_ptr<State> state;
