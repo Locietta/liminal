@@ -73,29 +73,40 @@ std::optional<std::string> Session::reply_from_latest(usize ordinal) const {
     if (ordinal == 0) return std::nullopt;
 
     std::vector<std::string> replies;
-    std::string reply;
-    bool in_task = false;
-    const auto finish_task = [&] {
-        if (!reply.empty()) replies.push_back(std::exchange(reply, {}));
-    };
+    std::optional<TaskId> active_task;
+    std::string explicit_final;
+    std::string last_unphased;
     for (const auto *entry : active_branch()) {
-        if (std::holds_alternative<TaskStarted>(entry->payload)) {
-            if (in_task) finish_task();
-            in_task = true;
+        if (const auto *started = std::get_if<TaskStarted>(&entry->payload)) {
+            active_task = started->id;
+            explicit_final.clear();
+            last_unphased.clear();
             continue;
         }
-        if (!in_task) continue;
+        if (!active_task) continue;
         const auto *output = std::get_if<OutputItemCompleted>(&entry->payload);
-        if (!output) continue;
-        const auto *message = std::get_if<provider::AssistantMessageItem>(&output->item);
-        if (!message) continue;
-        std::string segment;
-        for (const auto &part : message->parts) segment += part.text;
-        if (segment.empty()) continue;
-        if (!reply.empty()) reply += "\n\n";
-        reply += segment;
+        if (output && output->task_id == *active_task) {
+            const auto *message = std::get_if<provider::AssistantMessageItem>(&output->item);
+            if (!message || message->phase == provider::MessagePhase::COMMENTARY) continue;
+            std::string text;
+            for (const auto &part : message->parts) text += part.text;
+            if (text.empty()) continue;
+            if (message->phase == provider::MessagePhase::FINAL) {
+                if (!explicit_final.empty()) explicit_final += "\n\n";
+                explicit_final += text;
+            } else {
+                last_unphased = std::move(text);
+            }
+            continue;
+        }
+        const auto *finished = std::get_if<TaskFinished>(&entry->payload);
+        if (!finished || finished->id != *active_task) continue;
+        if (finished->outcome == TaskOutcome::COMPLETED) {
+            auto reply = !explicit_final.empty() ? std::move(explicit_final) : std::move(last_unphased);
+            if (!reply.empty()) replies.push_back(std::move(reply));
+        }
+        active_task.reset();
     }
-    if (in_task) finish_task();
     if (ordinal > replies.size()) return std::nullopt;
     return replies[replies.size() - ordinal];
 }

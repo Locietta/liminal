@@ -22,11 +22,12 @@ void require(bool condition, std::string_view message) {
 }
 
 session::EntryId append_message(session::Session &log, session::TaskId task_id, std::string text,
-                                session::ProviderCallId call_id = {.value = 1}) {
+                                session::ProviderCallId call_id = {.value = 1},
+                                provider::MessagePhase phase = provider::MessagePhase::UNSPECIFIED) {
     return log.append(session::OutputItemCompleted{
         .task_id = task_id,
         .provider_call_id = call_id,
-        .item = provider::AssistantMessageItem{.id = {.value = "message"}, .parts = {{.text = std::move(text)}}},
+        .item = provider::AssistantMessageItem{.id = {.value = "message"}, .parts = {{.text = std::move(text)}}, .phase = phase},
     });
 }
 
@@ -97,9 +98,10 @@ void test_reply_selection() {
     session::Session log({.value = 13});
     const auto first_task = log.start_task("first");
     append_message(log, first_task, "first answer");
+    log.append(session::TaskFinished{.id = first_task});
     const auto first_leaf = *log.active_leaf;
     const auto second_task = log.start_task("second");
-    append_message(log, second_task, "checking");
+    append_message(log, second_task, "checking", {.value = 1}, provider::MessagePhase::COMMENTARY);
     log.append(session::OutputItemCompleted{
         .task_id = second_task,
         .provider_call_id = {.value = 2},
@@ -119,15 +121,20 @@ void test_reply_selection() {
                 .part = {.provider_tag = "test", .payload = "private"},
             },
     });
-    append_message(log, second_task, "second answer", {.value = 3});
+    append_message(log, second_task, "second answer", {.value = 3}, provider::MessagePhase::FINAL);
+    log.append(session::TaskFinished{.id = second_task});
 
-    require(log.reply_from_latest() == "checking\n\nsecond answer",
-            "latest reply did not join textual tool-round segments or exclude non-text parts");
+    require(log.reply_from_latest() == "second answer", "latest reply did not select only the explicit final answer");
     require(log.reply_from_latest(2) == "first answer", "older reply selection used the wrong newest-first ordinal");
     require(!log.reply_from_latest(0) && !log.reply_from_latest(3), "reply selection accepted an invalid ordinal");
 
     auto selected = log.select_leaf(first_leaf);
     require(selected.has_value() && log.reply_from_latest() == "first answer", "reply selection escaped the active session branch");
+
+    const auto failed_task = log.start_task("failed");
+    append_message(log, failed_task, "unfinished output");
+    log.append(session::TaskFinished{.id = failed_task, .outcome = session::TaskOutcome::FAILED});
+    require(log.reply_from_latest() == "first answer", "failed task displaced the newest completed reply");
 }
 
 i32 run_all() {
