@@ -22,13 +22,14 @@ constexpr auto k_background_retry_delay = 5s;
 } // namespace
 
 std::shared_ptr<PersistenceQueue> PersistenceQueue::create(SessionWriter writer) {
+    const auto id = writer.session_id();
     auto owned_writer = std::make_shared<SessionWriter>(std::move(writer));
     Commit commit = [owned_writer](const SessionDelta &delta) { return owned_writer->commit(delta); };
-    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(std::move(commit)));
+    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit)));
 }
 
-std::shared_ptr<PersistenceQueue> PersistenceQueue::create_for_test(Commit commit) {
-    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(std::move(commit)));
+std::shared_ptr<PersistenceQueue> PersistenceQueue::create_for_test(SessionId id, Commit commit) {
+    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit)));
 }
 
 std::shared_ptr<PersistenceQueue> PersistenceQueue::create_reopening(std::filesystem::path database_path, SessionId id,
@@ -49,7 +50,7 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create_reopening(std::filesy
         }
         return reopening->writer->commit(delta);
     };
-    auto queue = std::shared_ptr<PersistenceQueue>(new PersistenceQueue(std::move(commit)));
+    auto queue = std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit)));
     queue->mark_degraded(std::move(detail));
     return queue;
 }
@@ -72,12 +73,13 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create_resolving(SessionId i
         }
         return resolving->writer->commit(delta);
     };
-    auto queue = std::shared_ptr<PersistenceQueue>(new PersistenceQueue(std::move(commit)));
+    auto queue = std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit)));
     queue->mark_degraded(std::move(detail));
     return queue;
 }
 
-PersistenceQueue::PersistenceQueue(Commit commit) : commit(std::move(commit)), worker([this](std::stop_token stop) { run(stop); }) {}
+PersistenceQueue::PersistenceQueue(SessionId id, Commit commit)
+    : id(id), commit(std::move(commit)), worker([this](std::stop_token stop) { run(stop); }) {}
 
 PersistenceQueue::~PersistenceQueue() {
     worker.request_stop();
@@ -94,6 +96,8 @@ void PersistenceQueue::enqueue(SessionDelta delta) {
     }
     changed.notify_all();
 }
+
+SessionId PersistenceQueue::session_id() const noexcept { return id; }
 
 PersistenceStatus PersistenceQueue::status() const {
     std::scoped_lock lock(mutex);

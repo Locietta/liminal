@@ -62,10 +62,11 @@ struct SessionFailure {
 };
 
 SessionFooter session_footer(const Agent &agent) {
+    const auto *persistence = agent.session.persistence_queue();
     SessionFooter footer{
         .workspace_path = agent.tools->working_directory.string(),
         .tokens_used = agent.session.tokens_used(),
-        .not_saving = agent.session.persistence && agent.session.persistence->status().degraded,
+        .not_saving = persistence && persistence->status().degraded,
     };
     const auto manifest = agent.context_manifest();
     if (!manifest || !manifest->usage.input_budget_tokens || !manifest->usage.remaining_input_tokens ||
@@ -512,13 +513,14 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
 
     bool saving_notice_visible = false;
     while (true) {
-        if (agent.session.persistence) {
-            const auto persistence = agent.session.persistence->status();
-            if (persistence.degraded && !saving_notice_visible) {
-                if (!rendered(renderer.notice("[session not saving: " + persistence.detail + "]\n"), "cannot render persistence status"))
+        if (const auto *queue = agent.session.persistence_queue()) {
+            const auto persistence_status = queue->status();
+            if (persistence_status.degraded && !saving_notice_visible) {
+                if (!rendered(renderer.notice("[session not saving: " + persistence_status.detail + "]\n"),
+                              "cannot render persistence status"))
                     co_return 1;
                 saving_notice_visible = true;
-            } else if (!persistence.degraded) {
+            } else if (!persistence_status.degraded) {
                 saving_notice_visible = false;
             }
         }
@@ -815,8 +817,8 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
     }
 
     control.active_task = nullptr;
-    if (agent.session.persistence) {
-        auto flushed = agent.session.persistence->flush();
+    if (auto *persistence = agent.session.persistence_queue()) {
+        auto flushed = persistence->flush();
         if (!flushed) {
             std::fprintf(stderr, "warning: session has an unsaved tail: %s\n", flushed.error().message().c_str());
         }

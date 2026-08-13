@@ -57,7 +57,9 @@ Result<SessionSelection> select_session(const StartupOptions &options, const std
         SessionSelection selection;
         selection.session.metadata.workspace = session::SessionWorkspace{.root = workspace.root, .key = workspace.key};
         selection.session.metadata.working_directory = working_directory.generic_string();
-        selection.session.attach_persistence(session::PersistenceQueue::create_resolving(selection.session.id, path.error().message()));
+        auto attached =
+            selection.session.attach_persistence(session::PersistenceQueue::create_resolving(selection.session.id, path.error().message()));
+        if (!attached) return lighter::outcome_error(std::move(attached).error());
         selection.notices.push_back("[session not saving: " + path.error().message() + "]\n");
         return selection;
     }
@@ -69,7 +71,8 @@ Result<SessionSelection> select_session(const StartupOptions &options, const std
         selection.session.metadata.workspace = session::SessionWorkspace{.root = workspace.root, .key = workspace.key};
         selection.session.metadata.working_directory = working_directory.generic_string();
         auto queue = session::PersistenceQueue::create_reopening(*path, selection.session.id, opened.error().message());
-        selection.session.attach_persistence(std::move(queue));
+        auto attached = selection.session.attach_persistence(std::move(queue));
+        if (!attached) return lighter::outcome_error(std::move(attached).error());
         selection.notices.push_back("[session not saving: " + opened.error().message() + "]\n");
         return selection;
     }
@@ -82,10 +85,12 @@ Result<SessionSelection> select_session(const StartupOptions &options, const std
         auto writer = store.lease(selection.session.id);
         if (!writer) {
             auto queue = session::PersistenceQueue::create_reopening(*path, selection.session.id, writer.error().message());
-            selection.session.attach_persistence(std::move(queue));
+            auto attached = selection.session.attach_persistence(std::move(queue));
+            if (!attached) return lighter::outcome_error(std::move(attached).error());
             selection.notices.push_back("[session not saving: " + writer.error().message() + "]\n");
         } else {
-            selection.session.attach_persistence(session::PersistenceQueue::create(*std::move(writer)));
+            auto attached = selection.session.attach_persistence(session::PersistenceQueue::create(*std::move(writer)));
+            if (!attached) return lighter::outcome_error(std::move(attached).error());
         }
         return selection;
     }
@@ -107,7 +112,8 @@ Result<SessionSelection> select_session(const StartupOptions &options, const std
     if (!loaded) return lighter::outcome_error(std::move(loaded).error());
     SessionSelection selection{.session = *std::move(loaded)};
     auto queue = session::PersistenceQueue::create(*std::move(writer));
-    selection.session.attach_persistence(queue);
+    auto attached = selection.session.attach_persistence(queue);
+    if (!attached) return lighter::outcome_error(std::move(attached).error());
     const auto recovered = session::recover_interrupted(selection.session);
     if (recovered.recovered_tasks != 0) {
         selection.notices.push_back("[recovered an interrupted task; tools were not re-executed]\n");

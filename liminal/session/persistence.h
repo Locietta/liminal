@@ -25,22 +25,24 @@ struct PersistenceQueue {
     static std::shared_ptr<PersistenceQueue> create(SessionWriter writer);
     static std::shared_ptr<PersistenceQueue> create_reopening(std::filesystem::path database_path, SessionId id, std::string detail);
     static std::shared_ptr<PersistenceQueue> create_resolving(SessionId id, std::string detail);
-    static std::shared_ptr<PersistenceQueue> create_for_test(Commit commit);
+    static std::shared_ptr<PersistenceQueue> create_for_test(SessionId id, Commit commit);
     ~PersistenceQueue();
 
     PersistenceQueue(const PersistenceQueue &) = delete;
     PersistenceQueue &operator=(const PersistenceQueue &) = delete;
 
     void enqueue(SessionDelta delta);
+    SessionId session_id() const noexcept;
     PersistenceStatus status() const;
     Result<void> flush();
     void mark_degraded(std::string detail);
 
 private:
-    explicit PersistenceQueue(Commit commit);
+    PersistenceQueue(SessionId id, Commit commit);
     void run(std::stop_token stop);
     SessionDelta pending_delta_locked(usize count) const;
 
+    const SessionId id;
     Commit commit;
     mutable std::mutex mutex;
     std::condition_variable_any changed;

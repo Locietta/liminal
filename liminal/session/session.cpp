@@ -109,7 +109,17 @@ void Session::set_model_preference(std::string provider, std::string model, std:
     if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
 }
 
-void Session::attach_persistence(std::shared_ptr<PersistenceQueue> queue) { persistence = std::move(queue); }
+Result<void> Session::attach_persistence(std::shared_ptr<PersistenceQueue> queue) {
+    if (!queue) return lighter::outcome_error(Error::storage("cannot attach an empty persistence queue"));
+    if (queue->session_id() != id) {
+        return lighter::outcome_error(Error::storage("persistence queue belongs to another session"));
+    }
+    if (persistence) return lighter::outcome_error(Error::storage("session persistence is already attached"));
+    persistence = std::move(queue);
+    return {};
+}
+
+PersistenceQueue *Session::persistence_queue() const noexcept { return persistence.get(); }
 
 Result<void> Session::validate() const {
     if (next_entry_id != entries.size() + 1) {

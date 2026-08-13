@@ -263,6 +263,35 @@ void test_established_database_requires_application_identity() {
     require(mode != "wal", "Store::open changed a rejected foreign database to WAL mode");
 }
 
+void test_unidentified_nonempty_database_is_not_adopted() {
+    TemporaryDatabase database;
+    sqlite3 *raw = nullptr;
+    require(sqlite3_open(database.path.string().c_str(), &raw) == SQLITE_OK, "failed to create unidentified database fixture");
+    require(sqlite3_exec(raw, "CREATE TABLE foreign_data(value TEXT)", nullptr, nullptr, nullptr) == SQLITE_OK,
+            "failed to create foreign table fixture");
+    sqlite3_close(raw);
+
+    auto opened = session::Store::open(database.path);
+    require(!opened && opened.error().detail.contains("unidentified non-empty"), "an unidentified non-empty database was adopted");
+
+    require(sqlite3_open(database.path.string().c_str(), &raw) == SQLITE_OK, "failed to reopen unidentified database fixture");
+    sqlite3_stmt *inspection = nullptr;
+    constexpr auto query = R"sql(
+SELECT
+    (SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='foreign_data'),
+    (SELECT application_id FROM pragma_application_id),
+    (SELECT user_version FROM pragma_user_version),
+    (SELECT journal_mode FROM pragma_journal_mode)
+)sql";
+    require(sqlite3_prepare_v2(raw, query, -1, &inspection, nullptr) == SQLITE_OK && sqlite3_step(inspection) == SQLITE_ROW,
+            "failed to inspect rejected unidentified database");
+    require(sqlite3_column_int(inspection, 0) == 1 && sqlite3_column_int(inspection, 1) == 0 && sqlite3_column_int(inspection, 2) == 0 &&
+                std::string(reinterpret_cast<const char *>(sqlite3_column_text(inspection, 3))) != "wal",
+            "Store::open mutated a rejected unidentified database");
+    sqlite3_finalize(inspection);
+    sqlite3_close(raw);
+}
+
 void test_writer_rejects_updated_at_regression() {
     TemporaryDatabase database;
     auto store = session::Store::open(database.path);
@@ -478,6 +507,20 @@ void test_recovery_never_replays_tools() {
             "recovery suffix did not survive a second restart");
 }
 
+void test_session_rejects_mismatched_persistence_queue() {
+    session::Session owner;
+    session::Session other;
+    auto queue = session::PersistenceQueue::create_for_test(owner.id, [](const session::SessionDelta &) -> Result<void> { return {}; });
+
+    require(queue->session_id() == owner.id, "persistence queue did not retain its immutable session identity");
+    auto mismatched = other.attach_persistence(queue);
+    require(!mismatched && mismatched.error().detail.contains("another session") && other.persistence_queue() == nullptr,
+            "session accepted a persistence queue bound to another session");
+    require(owner.attach_persistence(queue).has_value() && owner.persistence_queue() == queue.get(),
+            "session rejected its matching persistence queue");
+    require(!owner.attach_persistence(queue), "session allowed its persistence owner to be replaced");
+}
+
 void test_ordered_queue_failure_and_retry() {
     struct Gate {
         std::mutex mutex;
@@ -488,7 +531,8 @@ void test_ordered_queue_failure_and_retry() {
         std::vector<session::SessionDelta> received;
     } gate;
 
-    auto queue = session::PersistenceQueue::create_for_test([&gate](const session::SessionDelta &delta) -> Result<void> {
+    session::Session value;
+    auto queue = session::PersistenceQueue::create_for_test(value.id, [&gate](const session::SessionDelta &delta) -> Result<void> {
         std::unique_lock lock(gate.mutex);
         ++gate.attempts;
         gate.received.push_back(delta);
@@ -500,8 +544,7 @@ void test_ordered_queue_failure_and_retry() {
         gate.changed.wait(lock, [&gate] { return gate.release_success; });
         return {};
     });
-    session::Session value;
-    value.attach_persistence(queue);
+    require(value.attach_persistence(queue).has_value(), "failed to attach the matching persistence queue");
     const auto task = value.start_task("queue test");
     {
         std::unique_lock lock(gate.mutex);
@@ -545,7 +588,8 @@ void test_flush_waits_for_its_complete_pending_prefix() {
         bool flush_succeeded = false;
     } gate;
 
-    auto queue = session::PersistenceQueue::create_for_test([&gate](const session::SessionDelta &) -> Result<void> {
+    session::Session value;
+    auto queue = session::PersistenceQueue::create_for_test(value.id, [&gate](const session::SessionDelta &) -> Result<void> {
         std::unique_lock lock(gate.mutex);
         ++gate.attempts;
         const auto attempt = gate.attempts;
@@ -553,8 +597,7 @@ void test_flush_waits_for_its_complete_pending_prefix() {
         gate.changed.wait(lock, [&gate, attempt] { return attempt == 1 ? gate.release_first : gate.release_second; });
         return {};
     });
-    session::Session value;
-    value.attach_persistence(queue);
+    require(value.attach_persistence(queue).has_value(), "failed to attach the matching persistence queue");
     const auto task = value.start_task("first mutation");
     {
         std::unique_lock lock(gate.mutex);
@@ -595,7 +638,7 @@ void test_state_path_resolution_failure_retries() {
 
     session::Session value;
     auto queue = session::PersistenceQueue::create_resolving(value.id, "injected state path failure");
-    value.attach_persistence(queue);
+    require(value.attach_persistence(queue).has_value(), "failed to attach the resolving persistence queue");
     value.start_task("retry state path");
     require(queue->status().degraded, "state-path failure did not expose persistent degraded status");
     require(!queue->flush(), "state-path failure unexpectedly persisted a session");
@@ -654,11 +697,13 @@ i32 run_all() {
     test_uuid_v7();
     test_store_preserves_caller_owned_directory_permissions();
     test_established_database_requires_application_identity();
+    test_unidentified_nonempty_database_is_not_adopted();
     test_writer_rejects_updated_at_regression();
     test_windows_workspace_key_uses_unicode_case_mapping();
     test_store_round_trip_and_restart_branching();
     test_unknown_payload_version_isolated_from_catalog();
     test_recovery_never_replays_tools();
+    test_session_rejects_mismatched_persistence_queue();
     test_ordered_queue_failure_and_retry();
     test_flush_waits_for_its_complete_pending_prefix();
     test_state_path_resolution_failure_retries();

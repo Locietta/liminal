@@ -148,6 +148,20 @@ Result<SessionId> column_id(sqlite3_stmt *statement, int column) {
     return id;
 }
 
+Result<bool> has_user_schema_objects(sqlite3 *database) {
+    auto query = prepare(database, R"sql(
+SELECT EXISTS(
+    SELECT 1 FROM sqlite_schema
+    WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%'
+)
+)sql");
+    if (!query) return lighter::outcome_error(std::move(query).error());
+    if (sqlite3_step(query->value) != SQLITE_ROW) {
+        return lighter::outcome_error(sqlite_error(database, "cannot inspect state database schema"));
+    }
+    return sqlite3_column_int(query->value, 0) != 0;
+}
+
 Result<void> migrate(sqlite3 *database) {
     auto application = prepare(database, "PRAGMA application_id");
     if (!application) return lighter::outcome_error(std::move(application).error());
@@ -173,6 +187,13 @@ Result<void> migrate(sqlite3 *database) {
     }
     if (schema_version == k_schema_version) return {};
     if (schema_version != 0) return lighter::outcome_error(Error::storage("unsupported state database schema version"));
+    if (application_id == 0) {
+        auto has_objects = has_user_schema_objects(database);
+        if (!has_objects) return lighter::outcome_error(std::move(has_objects).error());
+        if (*has_objects) {
+            return lighter::outcome_error(Error::storage("unidentified non-empty SQLite database cannot be used as Liminal state"));
+        }
+    }
     constexpr std::string_view migration = R"sql(
 BEGIN IMMEDIATE;
 CREATE TABLE sessions (
