@@ -56,7 +56,6 @@ Task<void, Error> sleeps_at_least(std::chrono::milliseconds budget, std::chrono:
 /// leave the frame parked on a Timer that has been stopped underneath it.
 Task<void, Error, Cancellation> cancelled_wait(bool &resumed, Event &started) {
     auto timer = Timer::create();
-    timer.start(1h);
     started.set();
     co_await timer.wait().or_fail();
     // Only reached if Cancellation failed to interrupt the timer wait.
@@ -88,13 +87,13 @@ Task<void, Error> cancel_pending_wait(bool &resumed, bool &observed_cancel) {
 /// fired, and a silently wrong result in exactly the builds that ship.
 Task<void, Error> rejects_second_waiter(bool &first_ok, bool &second_rejected) {
     auto timer = Timer::create();
-    timer.start(20ms);
     Event first_waiting;
 
     auto second = [&first_waiting](Timer &timer, bool &rejected) -> Task<void, Error> {
         co_await first_waiting.wait();
         auto result = co_await timer.wait().catch_cancel();
         rejected = result.has_error() && result.error() == Error::k_connection_already_in_progress;
+        timer.start(0ms);
     };
 
     auto first = [&first_waiting](Timer &timer, bool &ok) -> Task<void, Error> {

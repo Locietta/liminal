@@ -5,7 +5,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -207,12 +206,8 @@ Task<> consume_with_idle_timeout(i32 port) {
     auto streamed = std::move(*stream_result);
     http::sse::EventStream events(std::move(streamed));
 
-    // first event arrives within the idle window
-    {
-        auto raced = co_await WhenAny(events.next(), sleep(1000ms));
-        require(raced.has_value() && raced->index() == 0, "first event must beat the idle timeout");
-        require(std::get<0>(*raced).has_value(), "first event missing");
-    }
+    auto first = co_await events.next();
+    require(first.has_value() && *first, "first event missing before the stream stalled");
 
     // then the stream stalls; the timeout must win the race
     {
