@@ -119,3 +119,7 @@ Generally we will have 3 kinds of failures in our codebase:
 - **Fatal failures**. These are the failures that can't be handled meaningfully anywhere in the codebase. For example, an OOM error. These should `panic` .
 
 Distinguish these 3 kinds of failures by asking who can act on the failure. If the immediate caller can act on it, return `lighter::Outcome`. If only a distant recovery boundary can act on it, throw an exception. If no one can act on it, `panic`.
+
+# Synchronization in Tests
+
+We have a couple of mock tests for concurrent code in our codebase. These tests must be deterministic and not rely on timing assumptions. You should coordinate concurrency through observable state transitions (events, barriers, callbacks, process state waits, or mock handshakes), never through an arbitrary sleep or an assumption that enough wall-clock time has passed.
