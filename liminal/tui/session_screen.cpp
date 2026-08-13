@@ -781,6 +781,15 @@ void SessionScreen::apply(const Event &event) {
 
 void SessionScreen::add_notice(std::string text) { apply(SessionNotice{.text = trim_notice(std::move(text))}); }
 
+void SessionScreen::load_transcript(std::vector<Block> blocks) {
+    transcript.load(std::move(blocks));
+    layout_cache.clear();
+    anchor.reset();
+    selection.reset();
+    state = SessionState::EDITING;
+    completed_task_elapsed.reset();
+}
+
 void SessionScreen::insert(std::string_view text) {
     prompt_history.edited();
     composer.insert(text);
@@ -1106,7 +1115,11 @@ Frame SessionScreen::frame() const {
                                                                std::string("Context n/a");
             column = result.surface.write(size.rows - 1, column, context, Style::FOOTER_CONTEXT);
             column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
-            result.surface.write(size.rows - 1, column, compact_tokens(footer.tokens_used) + " used", Style::FOOTER_TOKENS);
+            column = result.surface.write(size.rows - 1, column, compact_tokens(footer.tokens_used) + " used", Style::FOOTER_TOKENS);
+            if (footer.not_saving) {
+                column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
+                result.surface.write(size.rows - 1, column, "SESSION NOT SAVING", Style::FAILURE);
+            }
         }
     }
 

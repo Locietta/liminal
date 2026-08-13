@@ -19,6 +19,7 @@ namespace liminal {
 struct Agent {
     Agent(model::Choice model, ToolSet &tools);
     Agent(model::Choice model, ToolSet &tools, std::vector<context::InstructionSource> instructions);
+    Agent(model::Choice model, ToolSet &tools, std::vector<context::InstructionSource> instructions, session::Session session);
 
     /// Runs one user task. Semantic session entries are appended as their
     /// lifecycle boundaries complete, so partial progress remains resumable.
@@ -29,7 +30,7 @@ struct Agent {
 
     Result<context::ContextManifest> context_manifest() const;
 
-    void select_model(model::Choice next) { model = std::move(next); }
+    void select_model(model::Choice next);
 
     model::Choice model;
     ToolSet *tools;

@@ -13,10 +13,13 @@ import json
 import os
 import select
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -138,6 +141,7 @@ def terminal_test_environment(
     env = os.environ.copy()
     env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
     env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
+    env["LIMINAL_STATE_DB"] = str(tmp_path / "state.sqlite3")
     env["LIMINAL_MODEL"] = "test-model"
     env["LIMINAL_SYSTEM_PROMPT"] = "Test system policy."
     env["LIMINAL_DEVELOPER_PROMPT"] = "Test developer policy."
@@ -392,6 +396,7 @@ def run_liminal(stdin, providers, tmp_path, selector="test-model"):
     env = os.environ.copy()
     env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
     env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
+    env["LIMINAL_STATE_DB"] = str(tmp_path / "state.sqlite3")
     env["LIMINAL_MODEL"] = selector
     env["LIMINAL_SYSTEM_PROMPT"] = "Test system policy."
     env["LIMINAL_DEVELOPER_PROMPT"] = "Test developer policy."
@@ -480,6 +485,141 @@ def test_openai_full_cycle_remote_compact(openai_mock, tmp_path):
     assert "Continuing from the compacted context." in out  # encrypted item replayed
 
 
+def test_session_continue_direct_resume_and_locking(openai_mock, tmp_path):
+    """Durable history hydrates before input and an active lease excludes peers."""
+    base_url, state = openai_mock
+    env = terminal_test_environment(
+        tmp_path, base_url=base_url, api_key=mock_openai.API_KEY
+    )
+
+    first = subprocess.run(
+        [str(BINARY)],
+        input="inspect the repository\n/quit\n",
+        env=env,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=TIMEOUT,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    assert "The working directory is the liminal repository." in first.stdout
+
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "state.sqlite3") as database:
+        session_hex = database.execute(
+            "SELECT lower(hex(id)) FROM sessions"
+        ).fetchone()[0]
+        session_id = str(uuid.UUID(hex=session_hex))
+
+    continued = subprocess.run(
+        [str(BINARY), "continue"],
+        input="continue from durable history\n/quit\n",
+        env=env,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=TIMEOUT,
+        check=False,
+    )
+    assert continued.returncode == 0, continued.stderr
+    assert "[user] inspect the repository" in continued.stdout
+    assert "Let me inspect the repository." in continued.stdout
+    assert (
+        continued.stdout.count("The working directory is the liminal repository.") >= 2
+    )
+
+    other_workspace = tmp_path / "other-workspace"
+    other_workspace.mkdir()
+    cross_workspace = subprocess.run(
+        [str(BINARY), "resume", session_id],
+        input="/quit\n",
+        env=env,
+        cwd=other_workspace,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=TIMEOUT,
+        check=False,
+    )
+    assert cross_workspace.returncode == 0, cross_workspace.stderr
+    assert "workspace warning" in cross_workspace.stdout
+    assert str(REPO_ROOT).replace("\\", "/") in cross_workspace.stdout
+    assert str(other_workspace).replace("\\", "/") in cross_workspace.stdout
+
+    holder_binary = tmp_path / BINARY.name
+    shutil.copy2(BINARY, holder_binary)
+    holder = subprocess.Popen(
+        [str(holder_binary), "resume", session_id],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=REPO_ROOT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    ready = threading.Event()
+    holder_output = []
+
+    def read_holder():
+        while character := holder.stdout.read(1):
+            holder_output.append(character)
+            if "".join(holder_output[-3:]) == " > ":
+                ready.set()
+
+    reader = threading.Thread(target=read_holder)
+    reader.start()
+    try:
+        assert ready.wait(10), "lease holder did not reach the input prompt"
+        rejected = subprocess.run(
+            [str(BINARY), "resume", session_id],
+            input="/quit\n",
+            env=env,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=TIMEOUT,
+            check=False,
+        )
+        assert rejected.returncode != 0
+        assert "session is in use by another Liminal process" in rejected.stderr
+
+        holder.kill()
+        holder.wait(10)
+        reader.join(10)
+        reopened = subprocess.run(
+            [str(BINARY), "resume", session_id],
+            input="/quit\n",
+            env=env,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=TIMEOUT,
+            check=False,
+        )
+        assert reopened.returncode == 0, reopened.stderr
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(5)
+        reader.join(10)
+
+    assert not state["errors"], "\n".join(state["errors"])
+
+
 def test_openai_gateway_compact_fallback(openai_mock_no_compact, tmp_path):
     """A gateway without /responses/compact pushes onto local summarization."""
     url, state = openai_mock_no_compact
@@ -547,6 +687,7 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
     auth_file = tmp_path / "auth.json"
     env = os.environ.copy()
     env["LIMINAL_AUTH_FILE"] = str(auth_file)
+    env["LIMINAL_STATE_DB"] = str(tmp_path / "state.sqlite3")
     env["LIMINAL_CODEX_AUTH_BASE_URL"] = url
     result = subprocess.run(
         [str(BINARY), "login", "codex"],
@@ -882,6 +1023,7 @@ def test_terminal_restores_after_interrupt(tmp_path):
     env = os.environ.copy()
     env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
     env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
+    env["LIMINAL_STATE_DB"] = str(tmp_path / "state.sqlite3")
     env["LIMINAL_MODEL"] = "test-model"
     process = subprocess.Popen(
         [str(BINARY)],

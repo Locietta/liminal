@@ -113,6 +113,7 @@ struct SessionFooter {
     std::string workspace_path = ".";
     std::optional<u32> context_left_percent;
     u64 tokens_used = 0;
+    bool not_saving = false;
 };
 
 enum struct SessionState {
@@ -136,6 +137,7 @@ struct SessionScreen {
     void show_status(std::string text);
     void apply(const Event &event);
     void add_notice(std::string text);
+    void load_transcript(std::vector<Block> blocks);
 
     void insert(std::string_view text);
     void backspace();

@@ -21,10 +21,21 @@ enum struct ErrorKind {
     JSON,        ///< failed to encode/decode JSON
     PROTOCOL,    ///< stream violated the Messages API event protocol
     TOOL,        ///< tool infrastructure failure (spawn, bad input, ...)
+    STORAGE,     ///< durable session state or lease failure
+};
+
+enum struct ErrorCode {
+    NONE,
+    NOT_FOUND,
+    IO,
+    INVALID_DATA,
+    AUTH_NOT_CONFIGURED,
+    AUTH_INVALID,
 };
 
 struct Error {
     ErrorKind kind = ErrorKind::PROTOCOL;
+    ErrorCode code = ErrorCode::NONE;
     std::string detail;
 
     // HTTP_STATUS extras
@@ -66,6 +77,7 @@ struct Error {
             case ErrorKind::JSON: out = "json error: "; break;
             case ErrorKind::PROTOCOL: out = "protocol error: "; break;
             case ErrorKind::TOOL: out = "tool error: "; break;
+            case ErrorKind::STORAGE: out = "session storage error: "; break;
         }
         if (!api_type.empty()) {
             out += api_type + ": ";
@@ -85,7 +97,9 @@ struct Error {
         return out;
     }
 
-    static Error config(std::string detail) { return {.kind = ErrorKind::CONFIG, .detail = std::move(detail)}; }
+    static Error config(std::string detail, ErrorCode code = ErrorCode::NONE) {
+        return {.kind = ErrorKind::CONFIG, .code = code, .detail = std::move(detail)};
+    }
 
     static Error http(lighter::http::Error error) {
         return {.kind = ErrorKind::HTTP, .detail = "transport failure", .http_error = std::move(error)};
@@ -123,6 +137,7 @@ struct Error {
     static Error protocol(std::string detail) { return {.kind = ErrorKind::PROTOCOL, .detail = std::move(detail)}; }
 
     static Error tool(std::string detail) { return {.kind = ErrorKind::TOOL, .detail = std::move(detail)}; }
+    static Error storage(std::string detail) { return {.kind = ErrorKind::STORAGE, .detail = std::move(detail)}; }
 };
 
 template <typename T>

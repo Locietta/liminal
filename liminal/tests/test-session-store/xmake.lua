@@ -1,0 +1,7 @@
+target("test-session-store")
+    set_kind("binary")
+    set_group("test")
+    add_files("main.cpp")
+    add_deps("liminal-core")
+    add_packages("sqlite3")
+    add_tests("default")

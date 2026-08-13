@@ -45,6 +45,7 @@ struct Block {
 
 struct Transcript {
     void apply(const Event &event, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+    void load(std::vector<Block> completed_blocks);
 
     std::vector<Block> blocks;
 

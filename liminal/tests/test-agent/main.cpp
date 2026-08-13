@@ -11,6 +11,7 @@
 
 #include <glaze/json.hpp>
 #include <lighter/async/io/loop.h>
+#include <lighter/encoding/utf8.h>
 #include <lighter/mock/mock.h>
 #include <lighter/types.hpp>
 
@@ -434,13 +435,16 @@ void test_stream_failure_retains_completed_tool_result() {
     ToolSet tools(std::filesystem::current_path());
     register_noop_tool(tools);
     auto tool_completed = std::make_shared<lighter::Event>();
+    const auto diagnostic_prefix_size = Error::protocol("").message().size();
+    auto failure = std::make_shared<std::string>(4095 - diagnostic_prefix_size, 'x');
+    *failure += "\xF0\x9F\x98\x80 trailing diagnostic";
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>().calls(
-        [tool_completed](const provider::History &, const std::vector<provider::ToolDefinition> &,
-                         const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+        [tool_completed, failure](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                                  const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             emit_tool_call(callbacks, "completed-before-failure", "test_noop");
             co_await tool_completed->wait();
-            co_await lighter::fail(Error::protocol("simulated stream failure"));
+            co_await lighter::fail(Error::protocol(*failure));
         });
     provider_mock.expect<provider::CompactDispatch>().never();
 
@@ -453,8 +457,10 @@ void test_stream_failure_retains_completed_tool_result() {
     loop.run();
 
     auto outcome = task.result();
-    require(outcome.has_error() && outcome.error().detail == "simulated stream failure",
-            "provider stream failure did not reach the caller");
+    require(outcome.has_error() && outcome.error().detail == *failure, "provider stream failure did not reach the caller");
+    const auto &durable_failure = std::get<session::ProviderCallAborted>(agent.session.entries[2].payload).detail;
+    require(durable_failure.size() == 4095 && lighter::encoding::utf8::is_valid(durable_failure),
+            "durable provider diagnostic split a UTF-8 code point at its byte bound");
     require(agent.session.entries.size() == 5 && std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
                 std::get<session::ProviderCallAborted>(agent.session.entries[2].payload).reason ==
                     session::ProviderCallAbortReason::FAILED &&
@@ -773,8 +779,9 @@ void test_context_manifest() {
         {.authority = context::InstructionAuthority::RUNTIME, .origin = "runtime:liminal", .content = "platform policy"},
         {.authority = context::InstructionAuthority::PROJECT, .origin = "project:duplicate", .content = "project policy"},
     };
-    session::Session session_log({.value = 42});
+    session::Session session_log;
     session_log.start_task("change the project");
+    const auto session_id = session_log.id;
 
     auto manifest = context::ContextBuilder{}.build(instructions, session_log);
     require(manifest.has_value(), "failed to build a valid context manifest");
@@ -787,7 +794,7 @@ void test_context_manifest() {
                 manifest->provider_history[2].role == provider::Role::DEVELOPER &&
                 manifest->provider_history[3].role == provider::Role::USER,
             "context manifest lowered semantic instruction authority incorrectly");
-    require(manifest->session_id.value == 42 && manifest->session_entries.size() == 1 && manifest->session_entries[0].value == 1,
+    require(manifest->session_id == session_id && manifest->session_entries.size() == 1 && manifest->session_entries[0].value == 1,
             "context manifest did not report its selected session entries");
 
     auto altered_history = manifest->provider_history;

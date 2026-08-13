@@ -9,6 +9,8 @@
 
 #include <lighter/async/vocab/cancellation.h>
 
+#include <liminal/text.h>
+
 namespace liminal {
 
 using lighter::cancel;
@@ -23,6 +25,7 @@ constexpr std::string_view k_automatic_compact_instructions =
 constexpr u64 k_automatic_compact_numerator = 9;
 constexpr u64 k_automatic_compact_denominator = 10;
 constexpr auto k_tool_cancel_grace_period = std::chrono::milliseconds(250);
+constexpr usize k_provider_diagnostic_limit = 4096;
 
 void emit(const EventSink &events, Event event) {
     if (events) {
@@ -50,6 +53,8 @@ bool needs_automatic_compaction(const context::ContextManifest &manifest) {
     return manifest.usage.estimated_input_tokens >= threshold;
 }
 
+std::string bounded_diagnostic(std::string detail) { return bounded_utf8(detail, k_provider_diagnostic_limit); }
+
 session::ProviderCallLoopOutcome loop_outcome(const provider::ProviderCallCompletion &completion, usize call_count,
                                               bool has_terminal_answer) {
     if (completion.stop == provider::StopKind::DONE) {
@@ -74,7 +79,17 @@ Task<lighter::Outcome<T, E, lighter::Cancellation>> observe_cancellation(Task<T,
 Agent::Agent(model::Choice model, ToolSet &tools) : Agent(std::move(model), tools, default_agent_instructions()) {}
 
 Agent::Agent(model::Choice model, ToolSet &tools, std::vector<context::InstructionSource> instructions)
-    : model(std::move(model)), tools(&tools), instructions(std::move(instructions)) {}
+    : Agent(std::move(model), tools, std::move(instructions), session::Session{}) {}
+
+Agent::Agent(model::Choice model, ToolSet &tools, std::vector<context::InstructionSource> instructions, session::Session session)
+    : model(std::move(model)), tools(&tools), instructions(std::move(instructions)), session(std::move(session)) {
+    this->session.set_model_preference(this->model.entry.provider, this->model.entry.id, this->model.reasoning_effort);
+}
+
+void Agent::select_model(model::Choice next) {
+    model = std::move(next);
+    session.set_model_preference(model.entry.provider, model.entry.id, model.reasoning_effort);
+}
 
 Result<context::ContextManifest> Agent::context_manifest() const {
     return context::ContextBuilder{}.build(instructions, session, context_budget(model.entry));
@@ -196,7 +211,7 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
             co_await cancel();
         }
         if (completed.has_error()) {
-            const auto failure_detail = completed.error().message();
+            const auto failure_detail = bounded_diagnostic(completed.error().message());
             session.append(session::ProviderCallAborted{
                 .task_id = task_id,
                 .id = provider_call_id,
@@ -218,6 +233,7 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
             co_await fail(std::move(completed).error());
         }
         auto completion = *std::move(completed);
+        session.metadata.working_directory = tools->working_directory.generic_string();
         session.append(session::ProviderCallCompleted{
             .task_id = task_id,
             .id = provider_call_id,

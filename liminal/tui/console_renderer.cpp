@@ -106,6 +106,32 @@ lighter::Error ConsoleRenderer::prompt(std::string_view model, const std::option
 
 lighter::Error ConsoleRenderer::notice(std::string_view text) { return render(SessionNotice{.text = std::string(text)}); }
 
+lighter::Error ConsoleRenderer::load_transcript(std::vector<Block> blocks) {
+    screen.load_transcript(blocks);
+    if (terminal) return {};
+    for (const auto &block : blocks) {
+        switch (block.kind) {
+            case BlockKind::USER:
+                if (auto error = write_stdout("[user] " + plain_text(block.text) + "\n")) return error;
+                break;
+            case BlockKind::ASSISTANT:
+                if (auto error = write_stdout(plain_text(block.text) + "\n")) return error;
+                break;
+            case BlockKind::TOOL: {
+                auto line =
+                    std::string("[tool ") + (block.state == BlockState::FAILED ? "failed] " : "completed] ") + plain_text(block.text);
+                if (!block.detail.empty()) line += "\n  " + plain_text(block.detail);
+                if (auto error = write_stdout(line + "\n")) return error;
+                break;
+            }
+            case BlockKind::NOTICE:
+                if (auto error = write_stdout("[" + plain_text(block.text) + "]\n")) return error;
+                break;
+        }
+    }
+    return {};
+}
+
 lighter::Error ConsoleRenderer::status(std::string_view text) {
     if (!terminal) return write_stdout("[" + plain_text(text) + "]\n");
     screen.show_status(std::string(text));

@@ -19,6 +19,12 @@ void Transcript::apply(const Event &event, std::chrono::steady_clock::time_point
         event);
 }
 
+void Transcript::load(std::vector<Block> completed_blocks) {
+    blocks = std::move(completed_blocks);
+    next_id = 1;
+    for (auto &block : blocks) block.id = next_id++;
+}
+
 void Transcript::apply_one(const PromptSubmitted &event) {
     append({.kind = BlockKind::USER, .state = BlockState::COMPLETED, .text = event.text});
 }

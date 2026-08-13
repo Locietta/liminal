@@ -1,37 +1,88 @@
 #include "session.h"
 
+#include "persistence.h"
+
 #include <algorithm>
-#include <atomic>
+#include <chrono>
 #include <limits>
+#include <type_traits>
 #include <utility>
 
+#include <boost/uuid/string_generator.hpp>
+#include <boost/uuid/time_generator_v7.hpp>
+#include <boost/uuid/uuid_io.hpp>
+
 #include <lighter/async/vocab/outcome.h>
+#include <lighter/encoding/utf8.h>
+
+#include <liminal/text.h>
 
 namespace liminal::session {
 
+SessionId generate_session_id() {
+    const auto uuid = boost::uuids::time_generator_v7{}();
+    SessionId id;
+    std::ranges::copy(uuid, id.bytes.begin());
+    return id;
+}
+
+Result<SessionId> parse_session_id(std::string_view text) {
+    try {
+        const auto uuid = boost::uuids::string_generator{}(text.begin(), text.end());
+        SessionId id;
+        std::ranges::copy(uuid, id.bytes.begin());
+        return id;
+    } catch (const std::exception &) {
+        return lighter::outcome_error(Error::config("invalid session id: '" + std::string(text) + "'"));
+    }
+}
+
+std::string to_string(SessionId id) {
+    boost::uuids::uuid uuid;
+    std::ranges::copy(id.bytes, uuid.begin());
+    return boost::uuids::to_string(uuid);
+}
+
+i64 unix_milliseconds_now() noexcept {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 namespace {
 
-std::atomic<u64> next_session_id = 1;
+i64 mutation_timestamp(const SessionMetadata &metadata) noexcept {
+    return std::max({unix_milliseconds_now(), metadata.created_at_ms, metadata.updated_at_ms});
+}
 
 } // namespace
 
-Session::Session() : Session(SessionId{.value = next_session_id.fetch_add(1, std::memory_order_relaxed)}) {}
+Session::Session() : Session(generate_session_id()) {}
 
-Session::Session(SessionId id) : id(id) {}
+Session::Session(SessionId id) : id(id) {
+    metadata.created_at_ms = unix_milliseconds_now();
+    metadata.updated_at_ms = metadata.created_at_ms;
+}
 
 EntryId Session::append(EntryPayload payload) {
     const EntryId entry_id{.value = next_entry_id++};
+    const auto created_at = mutation_timestamp(metadata);
     entries.push_back({
         .id = entry_id,
         .parent_id = active_leaf,
         .payload = std::move(payload),
+        .created_at_ms = created_at,
     });
     active_leaf = entry_id;
+    metadata.updated_at_ms = created_at;
+    if (persistence) persistence->enqueue(make_delta(*this, std::span(&entries.back(), 1)));
     return entry_id;
 }
 
 TaskId Session::start_task(std::string text) {
     const TaskId task_id{.value = next_task_id++};
+    if (metadata.preview.empty()) {
+        constexpr usize k_preview_limit = 240;
+        metadata.preview = bounded_utf8(text, k_preview_limit);
+    }
     append(TaskStarted{.id = task_id, .text = std::move(text)});
     return task_id;
 }
@@ -43,6 +94,76 @@ Result<void> Session::select_leaf(std::optional<EntryId> id) {
         return lighter::outcome_error(Error::protocol("cannot select an unknown session entry"));
     }
     active_leaf = id;
+    metadata.updated_at_ms = mutation_timestamp(metadata);
+    if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
+    return {};
+}
+
+void Session::set_model_preference(std::string provider, std::string model, std::optional<std::string> reasoning_effort) {
+    metadata.model_preference = SessionModelPreference{
+        .provider = std::move(provider),
+        .model = std::move(model),
+        .reasoning_effort = std::move(reasoning_effort),
+    };
+    metadata.updated_at_ms = mutation_timestamp(metadata);
+    if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
+}
+
+void Session::attach_persistence(std::shared_ptr<PersistenceQueue> queue) { persistence = std::move(queue); }
+
+Result<void> Session::validate() const {
+    if (next_entry_id != entries.size() + 1) {
+        return lighter::outcome_error(Error::protocol("session next entry id does not follow the append-only entry sequence"));
+    }
+    u64 maximum_task_id = 0;
+    u64 maximum_provider_call_id = 0;
+    for (usize index = 0; index < entries.size(); ++index) {
+        const auto &entry = entries[index];
+        if (entry.id.value != index + 1) {
+            return lighter::outcome_error(Error::protocol("session entries are not dense and ordered"));
+        }
+        if (entry.parent_id && (entry.parent_id->value == 0 || entry.parent_id->value >= entry.id.value)) {
+            return lighter::outcome_error(Error::protocol("session entry parent does not precede its child"));
+        }
+        if (entry.created_at_ms <= 0) {
+            return lighter::outcome_error(Error::protocol("session entry has an invalid creation timestamp"));
+        }
+        std::visit(
+            [&maximum_task_id, &maximum_provider_call_id](const auto &payload) {
+                using T = std::remove_cvref_t<decltype(payload)>;
+                if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>) {
+                    maximum_task_id = std::max(maximum_task_id, payload.id.value);
+                } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolResults>) {
+                    maximum_task_id = std::max(maximum_task_id, payload.task_id.value);
+                    maximum_provider_call_id = std::max(maximum_provider_call_id, payload.provider_call_id.value);
+                } else if constexpr (std::same_as<T, ProviderCallCompleted> || std::same_as<T, ProviderCallAborted>) {
+                    maximum_task_id = std::max(maximum_task_id, payload.task_id.value);
+                    maximum_provider_call_id = std::max(maximum_provider_call_id, payload.id.value);
+                }
+            },
+            entry.payload);
+    }
+    if (active_leaf && !find(*active_leaf)) {
+        return lighter::outcome_error(Error::protocol("session active leaf does not identify an entry"));
+    }
+    if (next_task_id <= maximum_task_id || next_provider_call_id <= maximum_provider_call_id) {
+        return lighter::outcome_error(Error::protocol("session lifecycle counters do not follow their durable identifiers"));
+    }
+    if (metadata.created_at_ms <= 0 || metadata.updated_at_ms < metadata.created_at_ms) {
+        return lighter::outcome_error(Error::protocol("session catalog timestamps are invalid"));
+    }
+    if (metadata.preview.size() > 240 || !lighter::encoding::utf8::is_valid(metadata.preview)) {
+        return lighter::outcome_error(Error::protocol("session preview is not valid bounded UTF-8"));
+    }
+    if (metadata.workspace && (metadata.workspace->root.empty() || metadata.workspace->key.empty())) {
+        return lighter::outcome_error(Error::protocol("session workspace metadata is incomplete"));
+    }
+    if (metadata.model_preference && (metadata.model_preference->provider.empty() || metadata.model_preference->model.empty())) {
+        return lighter::outcome_error(Error::protocol("session model preference is incomplete"));
+    }
+    if (metadata.forked_from && metadata.forked_from->entry.value == 0) {
+        return lighter::outcome_error(Error::protocol("session fork origin has an invalid entry"));
+    }
     return {};
 }
 

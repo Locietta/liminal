@@ -268,7 +268,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
 
 std::string describe(const ContextManifest &manifest) {
     std::string description = "context\n";
-    description += "session: " + std::to_string(manifest.session_id.value) + "\n";
+    description += "session: " + session::to_string(manifest.session_id) + "\n";
     description += "instructions: " + std::to_string(manifest.instructions.size()) + "\n";
     for (const auto &source : manifest.instructions) {
         description +=

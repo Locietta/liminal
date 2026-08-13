@@ -26,6 +26,8 @@
 #include <liminal/tui/console_renderer.h>
 #include <liminal/tui/clipboard.h>
 #include <liminal/tui/external_editor.h>
+#include <liminal/tui/hydration.h>
+#include <liminal/session/persistence.h>
 
 namespace liminal::tui {
 
@@ -62,6 +64,7 @@ SessionFooter session_footer(const Agent &agent) {
     SessionFooter footer{
         .workspace_path = agent.tools->working_directory.string(),
         .tokens_used = agent.session.tokens_used(),
+        .not_saving = agent.session.persistence && agent.session.persistence->status().degraded,
     };
     const auto manifest = agent.context_manifest();
     if (!manifest || !manifest->usage.input_budget_tokens || !manifest->usage.remaining_input_tokens ||
@@ -506,7 +509,18 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
         return false;
     };
 
+    bool saving_notice_visible = false;
     while (true) {
+        if (agent.session.persistence) {
+            const auto persistence = agent.session.persistence->status();
+            if (persistence.degraded && !saving_notice_visible) {
+                if (!rendered(renderer.notice("[session not saving: " + persistence.detail + "]\n"), "cannot render persistence status"))
+                    co_return 1;
+                saving_notice_visible = true;
+            } else if (!persistence.degraded) {
+                saving_notice_visible = false;
+            }
+        }
         if (!rendered(renderer.prompt(agent.model.entry.id, agent.model.reasoning_effort, session_footer(agent)), "cannot render prompt"))
             co_return 1;
 
@@ -641,7 +655,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
 
 } // namespace
 
-Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &models) {
+Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &models, std::vector<std::string> startup_notices) {
     TerminalSession terminal;
     Pipe pipe;
     const bool input_attached = TerminalSession::attached(0);
@@ -683,6 +697,19 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
     TaskControl control;
     SessionFailure failure;
     i32 exit_code = 0;
+    if (auto error = renderer.load_transcript(project_transcript(agent.session, *agent.tools))) {
+        failure.message = "cannot hydrate session transcript: " + std::string(error.message());
+        exit_code = 1;
+    }
+    if (exit_code == 0) {
+        for (const auto &notice : startup_notices) {
+            if (auto error = renderer.notice(notice)) {
+                failure.message = "cannot render startup notice: " + std::string(error.message());
+                exit_code = 1;
+                break;
+            }
+        }
+    }
 #ifndef _WIN32
     lighter::ControlEventSource suspend_controls;
     if (interactive) {
@@ -755,6 +782,12 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
     }
 
     control.active_task = nullptr;
+    if (agent.session.persistence) {
+        auto flushed = agent.session.persistence->flush();
+        if (!flushed) {
+            std::fprintf(stderr, "warning: session has an unsaved tail: %s\n", flushed.error().message().c_str());
+        }
+    }
     if (terminal.active()) {
         if (auto error = terminal.suspend(); error && failure.message.empty()) {
             failure.message = "cannot restore terminal: " + std::string(error.message());

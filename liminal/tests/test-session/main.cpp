@@ -6,9 +6,11 @@
 #include <variant>
 
 #include <lighter/types.hpp>
+#include <lighter/encoding/utf8.h>
 
 #include <liminal/context/context.h>
 #include <liminal/session/session.h>
+#include <liminal/text.h>
 
 namespace {
 
@@ -32,7 +34,7 @@ session::EntryId append_message(session::Session &log, session::TaskId task_id, 
 }
 
 void test_append_only_branching() {
-    session::Session log({.value = 7});
+    session::Session log;
     const auto first_task = log.start_task("first task");
     const auto root = session::EntryId{.value = 1};
     const auto original_leaf = append_message(log, first_task, "first answer");
@@ -42,7 +44,7 @@ void test_append_only_branching() {
     log.start_task("alternate task");
     const auto alternate_leaf = *log.active_leaf;
 
-    require(log.id.value == 7 && log.entries.size() == 3, "branching changed the session identity or deleted entries");
+    require(log.entries.size() == 3, "branching changed the session identity or deleted entries");
     require(log.find(original_leaf) != nullptr, "branching deleted the original leaf");
     require(log.entries.back().parent_id == root, "alternate branch has the wrong parent");
 
@@ -54,8 +56,37 @@ void test_append_only_branching() {
     require(!invalid && invalid.error().detail.contains("unknown session entry"), "an unknown branch leaf was accepted");
 }
 
+void test_monotonic_timestamps_and_utf8_bounds() {
+    session::Session log;
+    const auto future = session::unix_milliseconds_now() + 60'000;
+    log.metadata.created_at_ms = future;
+    log.metadata.updated_at_ms = future;
+    std::string prompt(239, 'a');
+    prompt += "\xF0\x9F\x98\x80";
+    log.start_task(prompt);
+    require(log.metadata.updated_at_ms == future && log.entries.back().created_at_ms == future,
+            "wall-clock rollback moved a session mutation before its durable timestamp");
+    require(log.metadata.preview.size() == 239 && lighter::encoding::utf8::is_valid(log.metadata.preview),
+            "session preview split a UTF-8 code point at its byte bound");
+    require(log.select_leaf(std::nullopt).has_value() && log.metadata.updated_at_ms == future,
+            "cursor mutation regressed the session timestamp");
+    log.set_model_preference("provider", "model", std::nullopt);
+    require(log.metadata.updated_at_ms == future && log.validate().has_value(),
+            "model preference mutation produced an unloadable timestamp");
+
+    std::string diagnostic(4095, 'x');
+    diagnostic += "\xF0\x9F\x98\x80";
+    const auto bounded = bounded_utf8(diagnostic, 4096);
+    require(bounded.size() == 4095 && lighter::encoding::utf8::is_valid(bounded), "provider diagnostic bound emitted malformed UTF-8");
+
+    const std::string invalid(240, static_cast<char>(0x80));
+    const auto sanitized = bounded_utf8(invalid, 240);
+    require(sanitized.size() <= 240 && lighter::encoding::utf8::is_valid(sanitized),
+            "UTF-8 sanitization expanded text beyond its advertised byte bound");
+}
+
 void test_checkpoint_projection() {
-    session::Session log({.value = 11});
+    session::Session log;
     const auto old_task = log.start_task("old task");
     append_message(log, old_task, "old answer");
 
@@ -81,7 +112,7 @@ void test_checkpoint_projection() {
 }
 
 void test_cumulative_token_usage() {
-    session::Session log({.value = 12});
+    session::Session log;
     const auto first = log.append(session::ProviderCallCompleted{
         .completion = {.usage = {.input_tokens = 30, .output_tokens = 5, .context_tokens = 40}},
     });
@@ -95,7 +126,7 @@ void test_cumulative_token_usage() {
 }
 
 void test_reply_selection() {
-    session::Session log({.value = 13});
+    session::Session log;
     const auto first_task = log.start_task("first");
     append_message(log, first_task, "first answer");
     log.append(session::ProviderCallCompleted{
@@ -172,6 +203,7 @@ void test_reply_selection() {
 
 i32 run_all() {
     test_append_only_branching();
+    test_monotonic_timestamps_and_utf8_bounds();
     test_checkpoint_projection();
     test_cumulative_token_usage();
     test_reply_selection();

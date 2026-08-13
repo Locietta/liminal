@@ -322,6 +322,12 @@ void check_multiline_navigation_history_and_projection() {
                 footer_style("Context 54% left", tui::Style::FOOTER_CONTEXT) && footer_style("1.18M used", tui::Style::FOOTER_TOKENS),
             "each footer metadata item must use its own semantic color");
 
+    visual.footer.not_saving = true;
+    visual.resize({100, 10});
+    const auto degraded_footer = visual.frame();
+    require(degraded_footer.surface.row_text(9).contains("SESSION NOT SAVING"),
+            "a degraded persistence queue must remain visible in the session footer");
+
     screen.clear_prompt();
     screen.insert("one\ntwo\nthree\nfour");
     const auto frame = screen.frame();
