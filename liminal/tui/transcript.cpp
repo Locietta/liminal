@@ -38,7 +38,9 @@ void Transcript::apply_one(const AssistantTextDelta &event) {
     });
 }
 
-void Transcript::apply_one(const AssistantMessageCompleted &event) { finish_assistant(event.item_id, BlockState::COMPLETED, event.phase); }
+void Transcript::apply_one(const AssistantMessageCompleted &event) {
+    finish_assistant(event.item_id, event.text, BlockState::COMPLETED, event.phase);
+}
 
 void Transcript::apply_one(const ToolStarted &event, std::chrono::steady_clock::time_point now) {
     append({
@@ -104,14 +106,24 @@ void Transcript::finish_streaming(BlockState state) {
     }
 }
 
-void Transcript::finish_assistant(std::string_view item_id, BlockState state, provider::MessagePhase phase) {
+void Transcript::finish_assistant(std::string_view item_id, std::string_view text, BlockState state, provider::MessagePhase phase) {
     for (auto block = blocks.rbegin(); block != blocks.rend(); ++block) {
         if (block->kind == BlockKind::ASSISTANT && block->output_item_id == item_id) {
             lighter::check(block->state == BlockState::STREAMING, "completed assistant block was not streaming");
+            if (!text.empty()) block->text = text;
             block->state = state;
             block->message_phase = phase;
             return;
         }
+    }
+    if (!text.empty()) {
+        append({
+            .kind = BlockKind::ASSISTANT,
+            .state = state,
+            .text = std::string(text),
+            .output_item_id = std::string(item_id),
+            .message_phase = phase,
+        });
     }
 }
 

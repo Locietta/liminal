@@ -163,7 +163,8 @@ void test_successful_task() {
     require(std::holds_alternative<AssistantTextDelta>(events[0]), "text delta must be the first response event");
     require(std::holds_alternative<AssistantMessageCompleted>(events[1]), "assistant message must finish before its tool");
     require(std::get<AssistantTextDelta>(events[0]).item_id == "message-1" &&
-                std::get<AssistantMessageCompleted>(events[1]).item_id == "message-1",
+                std::get<AssistantMessageCompleted>(events[1]).item_id == "message-1" &&
+                std::get<AssistantMessageCompleted>(events[1]).text == "checking",
             "agent events did not preserve assistant output-item identity");
     require(std::holds_alternative<ToolStarted>(events[2]), "tool start event is missing");
     require(std::holds_alternative<ToolCompleted>(events[3]), "tool completion event is missing");

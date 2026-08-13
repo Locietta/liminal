@@ -60,7 +60,7 @@ private:
     void apply_one(const SessionNotice &event);
     void apply_one(const ModelSelected &event);
     void finish_streaming(BlockState state);
-    void finish_assistant(std::string_view item_id, BlockState state, provider::MessagePhase phase);
+    void finish_assistant(std::string_view item_id, std::string_view text, BlockState state, provider::MessagePhase phase);
     Block &append(Block block);
 
     u64 next_id = 1;

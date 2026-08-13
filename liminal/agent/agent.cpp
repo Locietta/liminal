@@ -139,7 +139,13 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
                         .item = item,
                     });
                     if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
-                        emit(events, AssistantMessageCompleted{.item_id = message->id.value, .phase = message->phase});
+                        std::string text;
+                        for (const auto &part : message->parts) text += part.text;
+                        emit(events, AssistantMessageCompleted{
+                                         .item_id = message->id.value,
+                                         .text = std::move(text),
+                                         .phase = message->phase,
+                                     });
                         if (message->phase != provider::MessagePhase::COMMENTARY &&
                             std::ranges::any_of(message->parts, [](const provider::TextPart &part) { return !part.text.empty(); })) {
                             has_terminal_answer = true;

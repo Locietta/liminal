@@ -22,6 +22,7 @@ struct AssistantTextDelta {
 
 struct AssistantMessageCompleted {
     std::string item_id;
+    std::string text;
     provider::MessagePhase phase = provider::MessagePhase::UNSPECIFIED;
 };
 

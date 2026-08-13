@@ -99,6 +99,30 @@ void check_item_identity_survives_interleaved_tools() {
             "interleaved tool identity was not retained independently");
 }
 
+void check_completed_payload_reconciles_missing_deltas() {
+    tui::Transcript transcript;
+    transcript.apply(AssistantTextDelta{.item_id = "partial", .text = "Part"});
+    transcript.apply(AssistantMessageCompleted{
+        .item_id = "partial",
+        .text = "Partial response.",
+        .phase = provider::MessagePhase::COMMENTARY,
+    });
+    transcript.apply(AssistantMessageCompleted{
+        .item_id = "completed-only",
+        .text = "Final response.",
+        .phase = provider::MessagePhase::FINAL,
+    });
+
+    require(transcript.blocks.size() == 2, "stable assistant payloads did not create both completed messages");
+    require(transcript.blocks[0].text == "Partial response." && transcript.blocks[0].state == tui::BlockState::COMPLETED &&
+                transcript.blocks[0].message_phase == provider::MessagePhase::COMMENTARY,
+            "stable assistant payload did not reconcile incomplete streamed text");
+    require(transcript.blocks[1].text == "Final response." && transcript.blocks[1].output_item_id == "completed-only" &&
+                transcript.blocks[1].state == tui::BlockState::COMPLETED &&
+                transcript.blocks[1].message_phase == provider::MessagePhase::FINAL,
+            "completed-only assistant payload was not displayed");
+}
+
 void check_typed_model_selection() {
     tui::Transcript transcript;
     transcript.apply(ModelSelected{.name = "test-model", .effort = "high"});
@@ -112,6 +136,7 @@ i32 run_all() {
     check_tool_lifecycle();
     check_cancelled_partial_output();
     check_item_identity_survives_interleaved_tools();
+    check_completed_payload_reconciles_missing_deltas();
     check_typed_model_selection();
     return 0;
 }

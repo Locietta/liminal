@@ -179,7 +179,7 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "assistant_delta") {
         screen.apply(AssistantTextDelta{.item_id = action.item_id, .text = action.text});
     } else if (action.type == "assistant_message_completed") {
-        screen.apply(AssistantMessageCompleted{.item_id = action.item_id});
+        screen.apply(AssistantMessageCompleted{.item_id = action.item_id, .text = action.text});
     } else if (action.type == "tool_started") {
         screen.apply(ToolStarted{.call_id = action.call_id, .name = action.name, .description = action.text, .command = action.command});
     } else if (action.type == "tool_completed") {
