@@ -661,6 +661,8 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                     continue;
                 }
             }
+            if (!rendered(renderer.notice("[command error: unsupported command kind]\n"), "cannot render command error")) co_return 1;
+            co_return 1;
         }
 
         render_error = renderer.render(PromptSubmitted{.text = prompt});
