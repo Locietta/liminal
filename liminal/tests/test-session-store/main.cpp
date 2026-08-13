@@ -228,6 +228,12 @@ void test_store_preserves_caller_owned_directory_permissions() {
     constexpr auto public_permissions = std::filesystem::perms::group_all | std::filesystem::perms::others_all;
     require((std::filesystem::status(database.path).permissions() & public_permissions) == std::filesystem::perms::none,
             "new state database was visible outside its owner");
+
+    session::Session value;
+    value.metadata.working_directory = database.directory.generic_string();
+    value.start_task("create WAL sidecar");
+    auto writer = store->lease(value.id);
+    require(writer && writer->commit(session::make_delta(value, value.entries)), "failed to create WAL sidecar fixture");
     const auto wal = std::filesystem::path(database.path.string() + "-wal");
     require(std::filesystem::exists(wal) &&
                 (std::filesystem::status(wal).permissions() & public_permissions) == std::filesystem::perms::none,
