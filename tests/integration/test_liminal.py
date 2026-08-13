@@ -74,7 +74,7 @@ def openai_mock_fixture(**kwargs):
 
 
 openai_mock = openai_mock_fixture()
-openai_slow_mock = openai_mock_fixture(chunk_delay=0.02)
+openai_slow_mock = openai_mock_fixture(gate_tools_turn=True)
 openai_mock_no_compact = openai_mock_fixture(compact_404=True)
 
 
@@ -229,7 +229,7 @@ def read_pty_frame_without(master, output, marker, timeout):
         output.extend(os.read(master, 4096))
 
 
-def check_conpty_terminal_session(tmp_path, base_url):
+def check_conpty_terminal_session(tmp_path, base_url, mock_state):
     from windows_pty import ConPtyProcess
 
     process = ConPtyProcess(
@@ -287,6 +287,7 @@ def check_conpty_terminal_session(tmp_path, base_url):
         # handled while its deliberately slow SSE stream is still active.
         process.write(b"\x7f\x7f\x7finspect\r")
         read_conpty_until(process, output, b"Let me inspect the repository.", 10)
+        assert mock_state["stream_paused"].wait(1)
         redraws = output.count(b"\x1b[H")
         process.resize(60, 12)
         process.write(b"queued")
@@ -297,6 +298,7 @@ def check_conpty_terminal_session(tmp_path, base_url):
             chunk = process.read(remaining)
             assert chunk, f"ConPTY output closed during input/resize: {output!r}"
             output.extend(chunk)
+        mock_state["stream_release"].set()
         read_conpty_until(
             process, output, b"The working directory is the liminal repository.", 10
         )
@@ -310,6 +312,7 @@ def check_conpty_terminal_session(tmp_path, base_url):
         assert output.index(b"\x1b[?1049h") < output.index(b"\x1b[?1049l")
         assert output.rindex(b"\x1b[?1049l") < output.rindex(b"\x1b[?2004l")
     finally:
+        mock_state["stream_release"].set()
         if process.poll() is None:
             process.kill()
             process.wait(5)
@@ -341,7 +344,7 @@ def check_conpty_terminal_restores_after_interrupt(tmp_path):
         process.close()
 
 
-def check_conpty_ctrl_c_routes_by_state(tmp_path, base_url):
+def check_conpty_ctrl_c_routes_by_state(tmp_path, base_url, mock_state):
     from windows_pty import ConPtyProcess
 
     process = ConPtyProcess(
@@ -358,6 +361,7 @@ def check_conpty_ctrl_c_routes_by_state(tmp_path, base_url):
         read_conpty_until(process, output, PROMPT_MARKER, 10)
         process.write(b"inspect\r")
         read_conpty_until(process, output, b"Let me inspect the repository.", 10)
+        assert mock_state["stream_paused"].wait(1)
         process.write(b"queued")
         read_conpty_until(process, output, b"queued", 5)
 
@@ -375,6 +379,7 @@ def check_conpty_ctrl_c_routes_by_state(tmp_path, base_url):
         process.write(b"\x03")
         assert process.wait(10) == 130
     finally:
+        mock_state["stream_release"].set()
         if process.poll() is None:
             process.kill()
             process.wait(5)
@@ -597,9 +602,9 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
 
 def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
     """The interactive backend uses and restores an alternate terminal screen."""
-    base_url, _ = openai_slow_mock
+    base_url, mock_state = openai_slow_mock
     if os.name == "nt":
-        check_conpty_terminal_session(tmp_path, base_url)
+        check_conpty_terminal_session(tmp_path, base_url, mock_state)
         return
 
     import fcntl
@@ -735,6 +740,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             readable, _, _ = select.select([master], [], [], remaining)
             assert readable, f"slow turn produced no output: {output!r}"
             output.extend(os.read(master, 4096))
+        assert mock_state["stream_paused"].wait(1)
         redraws = output.count(b"\x1b[H")
         os.write(master, b"queued")
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 60, 0, 0))
@@ -746,6 +752,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             readable, _, _ = select.select([master], [], [], remaining)
             assert readable, f"input/resize produced no redraw during turn: {output!r}"
             output.extend(os.read(master, 4096))
+        mock_state["stream_release"].set()
         deadline = time.monotonic() + 10
         while b"The working directory is the liminal repository." not in output:
             remaining = deadline - time.monotonic()
@@ -789,6 +796,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
         assert output.rindex(b"\x1b[?1049l") < output.rindex(b"\x1b[?2004l")
         assert termios.tcgetattr(slave) == original
     finally:
+        mock_state["stream_release"].set()
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
@@ -920,9 +928,9 @@ def test_terminal_restores_after_interrupt(tmp_path):
 
 
 def test_ctrl_c_routes_by_ui_state(openai_slow_mock, tmp_path):
-    base_url, _ = openai_slow_mock
+    base_url, mock_state = openai_slow_mock
     if os.name == "nt":
-        check_conpty_ctrl_c_routes_by_state(tmp_path, base_url)
+        check_conpty_ctrl_c_routes_by_state(tmp_path, base_url, mock_state)
         return
 
     import fcntl
@@ -950,6 +958,7 @@ def test_ctrl_c_routes_by_ui_state(openai_slow_mock, tmp_path):
         read_pty_until(master, output, PROMPT_MARKER, 10)
         os.write(master, b"inspect\r")
         read_pty_until(master, output, b"Let me inspect the repository.", 10)
+        assert mock_state["stream_paused"].wait(1)
         os.write(master, b"queued")
         read_pty_until(master, output, b"queued", 5)
 
@@ -968,6 +977,7 @@ def test_ctrl_c_routes_by_ui_state(openai_slow_mock, tmp_path):
         assert process.wait(timeout=10) == 130
         assert termios.tcgetattr(slave) == original
     finally:
+        mock_state["stream_release"].set()
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)

@@ -14,7 +14,7 @@ All assertions record into state["errors"]; auth is a hardcoded fake.
 """
 
 import json
-import time
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 API_KEY = "test-key"
@@ -27,13 +27,15 @@ def sse(events):
     ).encode()
 
 
-def make_server(port=0, compact_404=False, chunk_delay=0):
+def make_server(port=0, compact_404=False, gate_tools_turn=False):
     """Returns (server, state). state: calls, log[], errors[]."""
     state = {
         "calls": 0,
         "log": [],
         "errors": [],
         "request_bodies": [],
+        "stream_paused": threading.Event(),
+        "stream_release": threading.Event(),
     }
 
     class Handler(BaseHTTPRequestHandler):
@@ -46,6 +48,9 @@ def make_server(port=0, compact_404=False, chunk_delay=0):
             except AssertionError as error:
                 state["errors"].append(f"openai mock: {error}")
                 self.send_error(500, str(error))
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                # Cancellation tests deliberately close an active response.
+                pass
 
         def send_json(self, status, payload, req_id):
             data = json.dumps(payload).encode()
@@ -56,18 +61,25 @@ def make_server(port=0, compact_404=False, chunk_delay=0):
             self.end_headers()
             self.wfile.write(data)
 
-        def send_sse(self, events, req_id, chunk_size=None):
+        def send_sse(self, events, req_id, chunk_size=None, pause_after=None):
             data = sse(events)
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
             self.send_header("x-request-id", req_id)
             self.end_headers()
             if chunk_size:
+                pause_offset = None
+                if pause_after is not None:
+                    marker_offset = data.index(pause_after)
+                    pause_offset = data.index(b"\n\n", marker_offset) + 2
                 for i in range(0, len(data), chunk_size):
-                    self.wfile.write(data[i : i + chunk_size])
+                    end = i + chunk_size
+                    self.wfile.write(data[i:end])
                     self.wfile.flush()
-                    if chunk_delay:
-                        time.sleep(chunk_delay)
+                    if pause_offset is not None and end >= pause_offset:
+                        state["stream_paused"].set()
+                        state["stream_release"].wait()
+                        pause_offset = None
             else:
                 self.wfile.write(data)
 
@@ -301,7 +313,14 @@ def make_server(port=0, compact_404=False, chunk_delay=0):
                     ("response.output_item.done", {"output_index": 3, "item": readme}),
                     ("response.completed", {"response": response}),
                 ]
-                self.send_sse(events, "req_tools", chunk_size=7)
+                self.send_sse(
+                    events,
+                    "req_tools",
+                    chunk_size=7,
+                    pause_after=(
+                        b"Let me inspect the repository." if gate_tools_turn else None
+                    ),
+                )
                 state["log"].append("tools-turn")
                 return
 
