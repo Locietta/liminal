@@ -415,21 +415,23 @@ void test_cancelled_task_retains_semantic_progress() {
 
 void test_stream_failure_retains_completed_tool_result() {
     ToolSet tools(std::filesystem::current_path());
-    auto tool_executions = register_noop_tool(tools);
+    register_noop_tool(tools);
+    auto tool_completed = std::make_shared<lighter::Event>();
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>().calls(
-        [tool_executions](const provider::History &, const std::vector<provider::ToolDefinition> &,
-                          const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+        [tool_completed](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                         const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             emit_tool_call(callbacks, "completed-before-failure", "test_noop");
-            co_await lighter::sleep(1ms);
-            require(*tool_executions == 1, "online tool did not complete before the simulated stream failure");
+            co_await tool_completed->wait();
             co_await lighter::fail(Error::protocol("simulated stream failure"));
         });
     provider_mock.expect<provider::CompactDispatch>().never();
 
     Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
     lighter::EventLoop loop;
-    auto task = agent.run_task("do fragile work", {});
+    auto task = agent.run_task("do fragile work", [tool_completed](const Event &event) {
+        if (std::holds_alternative<ToolCompleted>(event)) tool_completed->set();
+    });
     loop.schedule(task);
     loop.run();
 
