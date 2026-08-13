@@ -550,108 +550,115 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                     co_return 1;
                 continue;
             }
-            if (*command == CommandKind::QUIT) {
-                auto arguments = require_no_arguments(command_line.name, command_line.arguments);
-                if (!arguments) {
-                    if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"), "cannot render command error"))
-                        co_return 1;
-                    continue;
-                }
-                co_return 0;
-            }
-            if (*command == CommandKind::COPY) {
-                auto arguments = parse_copy_arguments(command_line.arguments);
-                if (!arguments) {
-                    if (!rendered(renderer.notice("[copy error: " + arguments.error().detail + "]\n"), "cannot render copy error"))
-                        co_return 1;
-                    continue;
-                }
-                if (!rendered(co_await copy_reply_with_feedback(agent, arguments->ordinal, renderer), "cannot render clipboard status"))
-                    co_return 1;
-                continue;
-            }
-            if (*command == CommandKind::CONTEXT) {
-                auto arguments = require_no_arguments(command_line.name, command_line.arguments);
-                if (!arguments) {
-                    if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"), "cannot render command error"))
-                        co_return 1;
-                    continue;
-                }
-                auto manifest = agent.context_manifest();
-                if (!manifest) {
-                    if (!rendered(renderer.notice("[context error: " + manifest.error().message() + "]\n"), "cannot render context error"))
-                        co_return 1;
-                } else if (!rendered(renderer.notice(context::describe(*manifest)), "cannot render context manifest")) {
-                    co_return 1;
-                }
-                continue;
-            }
-            if (*command == CommandKind::COMPACT) {
-                auto instructions =
-                    command_line.arguments.empty() ? std::string(k_default_compact_instructions) : std::move(command_line.arguments);
-                auto outcome = co_await guard_task(agent.compact(instructions), control);
-                lighter::Error render_error;
-                if (outcome.is_cancelled()) {
-                    render_error = renderer.notice("[compact cancelled; history unchanged]\n");
-                } else if (outcome.has_error()) {
-                    render_error = renderer.notice("[compact error: " + outcome.error().message() + "]\n");
-                } else {
-                    render_error = renderer.notice("[history compacted]\n");
-                }
-                if (!rendered(render_error, "cannot render compaction status")) co_return 1;
-                continue;
-            }
-
-            auto refreshed = co_await guard_task(models.refresh(), control);
-            if (refreshed.is_cancelled()) {
-                if (!rendered(renderer.notice("[model refresh cancelled; selection unchanged]\n"), "cannot render model status"))
-                    co_return 1;
-                continue;
-            }
-            if (refreshed.has_error()) {
-                if (!rendered(renderer.notice("[model error: " + refreshed.error().message() + "]\n"), "cannot render model error"))
-                    co_return 1;
-                continue;
-            }
-            for (const auto &warning : refreshed->warnings) {
-                if (!rendered(renderer.notice("[model warning: " + warning + "]\n"), "cannot render model warning")) co_return 1;
-            }
-
-            const auto selector = std::string_view(command_line.arguments);
-            if (selector.empty()) {
-                std::string listing = "models (configure " + models.providers_file().string() + "):\n";
-                for (const auto &entry : models.entries()) {
-                    const bool selected = entry.provider == agent.model.entry.provider && entry.id == agent.model.entry.id;
-                    listing += selected ? "* " : "  ";
-                    listing += entry.provider + "/" + entry.id;
-                    if (!entry.name.empty() && entry.name != entry.id) {
-                        listing += " - " + entry.name;
+            switch (*command) {
+                case CommandKind::QUIT: {
+                    auto arguments = require_no_arguments(command_line.name, command_line.arguments);
+                    if (!arguments) {
+                        if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"),
+                                      "cannot render command error"))
+                            co_return 1;
+                        continue;
                     }
-                    if (!entry.reasoning_efforts.empty()) {
-                        listing += " [effort: ";
-                        for (usize index = 0; index < entry.reasoning_efforts.size(); ++index) {
-                            if (index != 0) listing += ", ";
-                            listing += entry.reasoning_efforts[index];
+                    co_return 0;
+                }
+                case CommandKind::COPY: {
+                    auto arguments = parse_copy_arguments(command_line.arguments);
+                    if (!arguments) {
+                        if (!rendered(renderer.notice("[copy error: " + arguments.error().detail + "]\n"), "cannot render copy error"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (!rendered(co_await copy_reply_with_feedback(agent, arguments->ordinal, renderer), "cannot render clipboard status"))
+                        co_return 1;
+                    continue;
+                }
+                case CommandKind::CONTEXT: {
+                    auto arguments = require_no_arguments(command_line.name, command_line.arguments);
+                    if (!arguments) {
+                        if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"),
+                                      "cannot render command error"))
+                            co_return 1;
+                        continue;
+                    }
+                    auto manifest = agent.context_manifest();
+                    if (!manifest) {
+                        if (!rendered(renderer.notice("[context error: " + manifest.error().message() + "]\n"),
+                                      "cannot render context error"))
+                            co_return 1;
+                    } else if (!rendered(renderer.notice(context::describe(*manifest)), "cannot render context manifest")) {
+                        co_return 1;
+                    }
+                    continue;
+                }
+                case CommandKind::COMPACT: {
+                    auto instructions =
+                        command_line.arguments.empty() ? std::string(k_default_compact_instructions) : std::move(command_line.arguments);
+                    auto outcome = co_await guard_task(agent.compact(instructions), control);
+                    lighter::Error render_error;
+                    if (outcome.is_cancelled()) {
+                        render_error = renderer.notice("[compact cancelled; history unchanged]\n");
+                    } else if (outcome.has_error()) {
+                        render_error = renderer.notice("[compact error: " + outcome.error().message() + "]\n");
+                    } else {
+                        render_error = renderer.notice("[history compacted]\n");
+                    }
+                    if (!rendered(render_error, "cannot render compaction status")) co_return 1;
+                    continue;
+                }
+                case CommandKind::MODEL: {
+                    auto refreshed = co_await guard_task(models.refresh(), control);
+                    if (refreshed.is_cancelled()) {
+                        if (!rendered(renderer.notice("[model refresh cancelled; selection unchanged]\n"), "cannot render model status"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (refreshed.has_error()) {
+                        if (!rendered(renderer.notice("[model error: " + refreshed.error().message() + "]\n"), "cannot render model error"))
+                            co_return 1;
+                        continue;
+                    }
+                    for (const auto &warning : refreshed->warnings) {
+                        if (!rendered(renderer.notice("[model warning: " + warning + "]\n"), "cannot render model warning")) co_return 1;
+                    }
+
+                    const auto selector = std::string_view(command_line.arguments);
+                    if (selector.empty()) {
+                        std::string listing = "models (configure " + models.providers_file().string() + "):\n";
+                        for (const auto &entry : models.entries()) {
+                            const bool selected = entry.provider == agent.model.entry.provider && entry.id == agent.model.entry.id;
+                            listing += selected ? "* " : "  ";
+                            listing += entry.provider + "/" + entry.id;
+                            if (!entry.name.empty() && entry.name != entry.id) {
+                                listing += " - " + entry.name;
+                            }
+                            if (!entry.reasoning_efforts.empty()) {
+                                listing += " [effort: ";
+                                for (usize index = 0; index < entry.reasoning_efforts.size(); ++index) {
+                                    if (index != 0) listing += ", ";
+                                    listing += entry.reasoning_efforts[index];
+                                }
+                                listing += "]";
+                            }
+                            listing += "\n";
                         }
-                        listing += "]";
+                        listing += "select with /model <id>, <provider>/<id>, or <selector>@<effort>\n";
+                        if (!rendered(renderer.notice(listing), "cannot render model catalog")) co_return 1;
+                        continue;
                     }
-                    listing += "\n";
-                }
-                listing += "select with /model <id>, <provider>/<id>, or <selector>@<effort>\n";
-                if (!rendered(renderer.notice(listing), "cannot render model catalog")) co_return 1;
-                continue;
-            }
 
-            auto next = models.select(selector);
-            if (!next) {
-                if (!rendered(renderer.notice("[model error: " + next.error().message() + "]\n"), "cannot render model error")) co_return 1;
-                continue;
+                    auto next = models.select(selector);
+                    if (!next) {
+                        if (!rendered(renderer.notice("[model error: " + next.error().message() + "]\n"), "cannot render model error"))
+                            co_return 1;
+                        continue;
+                    }
+                    agent.select_model(*std::move(next));
+                    if (!rendered(renderer.render(ModelSelected{.name = agent.model.entry.id, .effort = agent.model.reasoning_effort}),
+                                  "cannot render model selection"))
+                        co_return 1;
+                    continue;
+                }
             }
-            agent.select_model(*std::move(next));
-            if (!rendered(renderer.render(ModelSelected{.name = agent.model.entry.id, .effort = agent.model.reasoning_effort}),
-                          "cannot render model selection"))
-                co_return 1;
-            continue;
         }
 
         render_error = renderer.render(PromptSubmitted{.text = prompt});

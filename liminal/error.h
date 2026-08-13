@@ -20,6 +20,7 @@ enum struct ErrorKind {
     HTTP_STATUS, ///< non-2xx response from the API
     JSON,        ///< failed to encode/decode JSON
     PROTOCOL,    ///< stream violated the Messages API event protocol
+    COMMAND,     ///< malformed or unknown user command
     TOOL,        ///< tool infrastructure failure (spawn, bad input, ...)
     STORAGE,     ///< durable session state or lease failure
 };
@@ -76,6 +77,7 @@ struct Error {
             case ErrorKind::HTTP_STATUS: out = "api error (status " + std::to_string(status) + "): "; break;
             case ErrorKind::JSON: out = "json error: "; break;
             case ErrorKind::PROTOCOL: out = "protocol error: "; break;
+            case ErrorKind::COMMAND: out = "command error: "; break;
             case ErrorKind::TOOL: out = "tool error: "; break;
             case ErrorKind::STORAGE: out = "session storage error: "; break;
         }
@@ -135,6 +137,7 @@ struct Error {
     }
 
     static Error protocol(std::string detail) { return {.kind = ErrorKind::PROTOCOL, .detail = std::move(detail)}; }
+    static Error command(std::string detail) { return {.kind = ErrorKind::COMMAND, .detail = std::move(detail)}; }
 
     static Error tool(std::string detail) { return {.kind = ErrorKind::TOOL, .detail = std::move(detail)}; }
     static Error storage(std::string detail) { return {.kind = ErrorKind::STORAGE, .detail = std::move(detail)}; }

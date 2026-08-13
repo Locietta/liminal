@@ -632,11 +632,17 @@ void check_command_parsing_and_status() {
 
     input = tui::parse_repl_input("/copycat");
     const auto *unknown = input ? std::get_if<tui::CommandLine>(&*input) : nullptr;
-    require(unknown && !tui::resolve_command(unknown->name), "an unknown slash command must not become a user prompt");
+    require(unknown != nullptr, "an unknown slash command must remain command input");
+    auto unresolved = tui::resolve_command(unknown->name);
+    require(!unresolved && unresolved.error().kind == ErrorKind::COMMAND,
+            "an unknown slash command must fail through the command boundary");
     input = tui::parse_repl_input("//copycat");
     prompt = input ? std::get_if<tui::UserPrompt>(&*input) : nullptr;
     require(prompt && prompt->text == "/copycat", "a double slash must escape a slash-prefixed user prompt");
-    require(!tui::parse_repl_input("/") && !tui::parse_repl_input("/ arguments"), "empty slash commands must fail lexically");
+    auto empty_command = tui::parse_repl_input("/");
+    auto whitespace_command = tui::parse_repl_input("/ arguments");
+    require(!empty_command && !whitespace_command && empty_command.error().kind == ErrorKind::COMMAND,
+            "empty slash commands must fail through the command boundary");
 
     command = tui::resolve_command("exit");
     require(command && *command == tui::CommandKind::QUIT, "command aliases must be registered centrally");

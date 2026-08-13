@@ -33,7 +33,7 @@ Result<ReplInput> parse_repl_input(std::string text) {
     const auto name_end = command.find_first_of(" \t\r\n\f\v");
     const auto name = command.substr(0, name_end);
     if (name.empty()) {
-        return lighter::outcome_error(Error::protocol("empty slash command"));
+        return lighter::outcome_error(Error::command("empty slash command"));
     }
     const auto arguments = name_end == std::string_view::npos ? std::string_view{} : trim(command.substr(name_end));
     return ReplInput{std::in_place_type<CommandLine>, std::string(name), std::string(arguments)};
@@ -45,7 +45,7 @@ Result<CommandKind> resolve_command(std::string_view name) {
     if (name == "context") return CommandKind::CONTEXT;
     if (name == "compact") return CommandKind::COMPACT;
     if (name == "model") return CommandKind::MODEL;
-    return lighter::outcome_error(Error::protocol("unknown command '/" + std::string(name) + "'"));
+    return lighter::outcome_error(Error::command("unknown command '/" + std::string(name) + "'"));
 }
 
 Result<CopyArguments> parse_copy_arguments(std::string_view arguments) {
@@ -55,14 +55,14 @@ Result<CopyArguments> parse_copy_arguments(std::string_view arguments) {
     lighter::types::usize ordinal = 0;
     const auto parsed = std::from_chars(arguments.data(), arguments.data() + arguments.size(), ordinal);
     if (parsed.ec != std::errc{} || parsed.ptr != arguments.data() + arguments.size() || ordinal == 0) {
-        return lighter::outcome_error(Error::protocol("usage: /copy [positive reply number]"));
+        return lighter::outcome_error(Error::command("usage: /copy [positive reply number]"));
     }
     return CopyArguments{.ordinal = ordinal};
 }
 
 Result<void> require_no_arguments(std::string_view command, std::string_view arguments) {
     if (trim(arguments).empty()) return {};
-    return lighter::outcome_error(Error::protocol("usage: /" + std::string(command)));
+    return lighter::outcome_error(Error::command("usage: /" + std::string(command)));
 }
 
 } // namespace liminal::tui
