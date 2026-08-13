@@ -459,6 +459,13 @@ ToolRegistration make_apply_patch_tool() {
                                  .required = {"patch"}},
             },
         .execution_mode = ToolExecutionMode::EXCLUSIVE,
+        .validate = [](const provider::ToolCall &call) -> Result<void> {
+            auto encoded = json::to_string(call.input);
+            if (!encoded) return lighter::outcome_error(Error::json(std::move(encoded).error(), "tool input re-encode"));
+            auto parsed = json::parse<ApplyPatchInput>(*encoded);
+            if (!parsed) return lighter::outcome_error(Error::json(std::move(parsed).error(), "tool input"));
+            return {};
+        },
         .execute = execute_apply_patch,
         .describe = describe_apply_patch,
     };

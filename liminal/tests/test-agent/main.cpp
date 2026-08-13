@@ -446,6 +446,41 @@ void test_stream_failure_retains_completed_tool_result() {
     provider_mock.verify();
 }
 
+void test_invalid_tool_is_rejected_before_dispatch() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    auto completions = std::make_shared<usize>(0);
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([completions](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                             const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            if ((*completions)++ == 0) {
+                emit_tool_call(callbacks, "unknown-call", "missing_tool");
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+            }
+            require(history.back().role == provider::Role::USER && history.back().parts.size() == 1,
+                    "invalid tool call did not produce a model-visible result");
+            const auto *result = std::get_if<provider::ToolResult>(&history.back().parts[0]);
+            require(result && result->call_id == "unknown-call" && result->is_error && result->content.contains("unknown tool"),
+                    "invalid tool result did not describe the pre-dispatch validation failure");
+            emit_message(callbacks, "done", "Recovered.");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        })
+        .times(2);
+    provider_mock.expect<provider::CompactDispatch>().never();
+
+    std::vector<Event> events;
+    Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
+    lighter::EventLoop loop;
+    auto task = agent.run_task("use an invalid tool", [&events](const Event &event) { events.push_back(event); });
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "agent did not recover from a model-visible invalid tool result");
+    require(std::ranges::none_of(events, [](const Event &event) { return std::holds_alternative<ToolStarted>(event); }),
+            "invalid tool emitted ToolStarted before lookup and input validation");
+    provider_mock.verify();
+}
+
 struct ToolSchedulingProbe {
     usize running = 0;
     usize max_running = 0;
@@ -747,6 +782,7 @@ i32 run_all() {
     test_final_phase_does_not_bypass_tool_follow_up();
     test_cancelled_task_retains_semantic_progress();
     test_stream_failure_retains_completed_tool_result();
+    test_invalid_tool_is_rejected_before_dispatch();
     test_tool_execution_semantics();
     test_automatic_compaction();
     test_multiple_automatic_compactions_in_one_task();

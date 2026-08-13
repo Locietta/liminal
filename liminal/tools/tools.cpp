@@ -268,6 +268,11 @@ ToolRegistration read_file_registration() {
                     },
             },
         .execution_mode = ToolExecutionMode::PARALLEL,
+        .validate = [](const provider::ToolCall &call) -> Result<void> {
+            auto input = parse_input<ReadFileInput>(call.input);
+            if (!input) return outcome_error(std::move(input).error());
+            return {};
+        },
         .execute = [](const ToolSet &tools, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<ReadFileInput>(call.input));
             provider::ToolResult result{.call_id = call.id};
@@ -322,6 +327,13 @@ std::vector<provider::ToolDefinition> ToolSet::definitions() const {
     result.push_back({.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search", .description = "Search the public web."});
     result.push_back({.kind = provider::ToolKind::WEB_FETCH, .name = "web_fetch", .description = "Fetch a public web page."});
     return result;
+}
+
+Result<void> ToolSet::validate(const provider::ToolCall &call) const {
+    const auto *tool = find_registration(registrations, call.name);
+    if (!tool) return outcome_error(Error::tool("unknown tool: " + call.name));
+    if (tool->validate) return tool->validate(call);
+    return {};
 }
 
 Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &call) const {

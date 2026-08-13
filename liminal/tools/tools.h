@@ -46,6 +46,7 @@ struct ToolRegistration {
     /// tools form an ordering barrier and are the conservative default for
     /// extensions that may touch shared state.
     ToolExecutionMode execution_mode = ToolExecutionMode::EXCLUSIVE;
+    std::move_only_function<Result<void>(const provider::ToolCall &) const> validate;
     std::move_only_function<lighter::Task<provider::ToolResult, Error>(const ToolSet &, const provider::ToolCall &) const> execute;
     std::move_only_function<ToolCallPresentation(const provider::ToolCall &) const> describe;
     std::move_only_function<std::string(const provider::ToolCall &, const provider::ToolResult &) const> summarize;
@@ -70,6 +71,7 @@ struct ToolSet {
     /// come back as a successful ToolResultBlock; only infrastructure
     /// failures (unknown tool, malformed input, spawn error) use the error
     /// channel - the agent layer converts those into is_error results.
+    Result<void> validate(const provider::ToolCall &call) const;
     lighter::Task<provider::ToolResult, Error> execute(const provider::ToolCall &call) const;
     ToolExecutionMode execution_mode(std::string_view name) const;
     ToolCallPresentation describe(const provider::ToolCall &call) const;

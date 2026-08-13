@@ -433,6 +433,11 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
                     },
             },
         .execution_mode = ToolExecutionMode::PARALLEL,
+        .validate = [](const provider::ToolCall &call) -> Result<void> {
+            auto input = parse_input<ExecCommandInput>(call.input);
+            if (!input) return lighter::outcome_error(std::move(input).error());
+            return {};
+        },
         .execute = [&tasks](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<ExecCommandInput>(call.input));
             auto response = co_await tasks.start(std::move(input)).or_fail();
@@ -467,6 +472,11 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
                     },
             },
         .execution_mode = ToolExecutionMode::PARALLEL,
+        .validate = [](const provider::ToolCall &call) -> Result<void> {
+            auto input = parse_input<WriteStdinInput>(call.input);
+            if (!input) return lighter::outcome_error(std::move(input).error());
+            return {};
+        },
         .execute = [&tasks](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<WriteStdinInput>(call.input));
             auto response = co_await tasks.write_stdin(std::move(input)).or_fail();

@@ -157,6 +157,17 @@ void ToolScheduler::submit(provider::ToolCall call) {
     state->started.push_back(false);
     state->add();
 
+    auto valid = state->tools->validate(call);
+    if (!valid) {
+        state->results[slot] = provider::ToolResult{
+            .call_id = call.id,
+            .content = "Error: " + valid.error().message(),
+            .is_error = true,
+        };
+        state->complete();
+        return;
+    }
+
     if (state->tools->execution_mode(call.name) == ToolExecutionMode::PARALLEL) {
         auto batch = state->parallel_batch;
         batch->add();
