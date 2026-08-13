@@ -409,6 +409,10 @@ Result<provider::OutputItem> to_output_item(wire::ResponseItem item, u64 output_
     return outcome_error(Error::protocol("unexpected function_call_output in model output"));
 }
 
+void set_item_id(provider::OutputItem &item, provider::OutputItemId id) {
+    std::visit([&id](auto &value) { value.id = std::move(id); }, item);
+}
+
 // --- SSE wire event payloads --------------------------------------------
 
 struct WireType {
@@ -503,12 +507,20 @@ struct StreamAccumulator {
     provider::ProviderCallCompletion completion;
     std::vector<std::optional<wire::ResponseItem>> completed;
     std::vector<bool> started;
+    std::vector<std::optional<provider::OutputItemId>> item_ids;
     std::string status;
     bool saw_created = false;
     bool saw_completed = false;
     bool output_emitted = false;
     bool has_calls = false;
     bool refused = false;
+
+    provider::OutputItemId canonical_item_id(u64 output_index, provider::OutputItemId candidate) {
+        const auto index = static_cast<usize>(output_index);
+        if (item_ids.size() <= index) item_ids.resize(index + 1);
+        if (!item_ids[index]) item_ids[index] = std::move(candidate);
+        return *item_ids[index];
+    }
 
     void apply_usage(const WireUsage &usage) {
         if (usage.input_tokens) completion.usage.input_tokens = *usage.input_tokens;
@@ -528,25 +540,29 @@ struct StreamAccumulator {
     Result<void> start_item(u64 output_index, const wire::ResponseItem &item, const provider::StreamCallbacks &callbacks) {
         const auto index = static_cast<usize>(output_index);
         if (started.size() <= index) started.resize(index + 1);
+        auto header = item_header(item, output_index);
+        header.id = canonical_item_id(output_index, std::move(header.id));
         if (started[index]) return {};
         started[index] = true;
         output_emitted = true;
-        if (callbacks.on_item_started) callbacks.on_item_started(item_header(item, output_index));
+        if (callbacks.on_item_started) callbacks.on_item_started(header);
         return {};
     }
 
-    void start_assistant_item(u64 output_index, std::string id, const provider::StreamCallbacks &callbacks) {
+    provider::OutputItemId start_assistant_item(u64 output_index, std::string id, const provider::StreamCallbacks &callbacks) {
         const auto index = static_cast<usize>(output_index);
         if (started.size() <= index) started.resize(index + 1);
-        if (started[index]) return;
+        auto canonical = canonical_item_id(output_index, {.value = std::move(id)});
+        if (started[index]) return canonical;
         started[index] = true;
         output_emitted = true;
         if (callbacks.on_item_started) {
             callbacks.on_item_started({
-                .id = {.value = std::move(id)},
+                .id = canonical,
                 .kind = provider::OutputItemKind::ASSISTANT_MESSAGE,
             });
         }
+        return canonical;
     }
 
     Result<void> add_item(u64 output_index, wire::ResponseItem item, const provider::StreamCallbacks &callbacks) {
@@ -562,8 +578,21 @@ struct StreamAccumulator {
         has_calls = has_calls || std::holds_alternative<wire::FunctionCallItem>(item);
         auto output = to_output_item(item, output_index, refused);
         if (!output) return outcome_error(std::move(output).error());
+        set_item_id(*output, canonical_item_id(output_index, item_header(item, output_index).id));
         completed[index] = std::move(item);
         if (callbacks.on_item_completed) callbacks.on_item_completed(*output);
+        return {};
+    }
+
+    Result<void> add_response_output(const WireResponse &response, const provider::StreamCallbacks &callbacks) {
+        if (!response.output) return {};
+        for (usize index = 0; index < response.output->size(); ++index) {
+            if (index < completed.size() && completed[index]) continue;
+            auto item = parse_item((*response.output)[index]);
+            if (!item) return outcome_error(std::move(item).error());
+            auto added = add_item(index, *std::move(item), callbacks);
+            if (!added) return added;
+        }
         return {};
     }
 
@@ -602,9 +631,9 @@ struct StreamAccumulator {
             output_emitted = true;
             const auto output_index = parsed->output_index.value_or(static_cast<u64>(completed.size()));
             auto id = parsed->item_id.value_or("output:" + std::to_string(output_index));
-            start_assistant_item(output_index, id, callbacks);
+            auto canonical = start_assistant_item(output_index, std::move(id), callbacks);
             if (callbacks.on_assistant_text_delta && !parsed->delta.empty()) {
-                callbacks.on_assistant_text_delta({.value = std::move(id)}, parsed->delta);
+                callbacks.on_assistant_text_delta(canonical, parsed->delta);
             }
             return {};
         }
@@ -614,10 +643,10 @@ struct StreamAccumulator {
             auto citation = citation_markdown(parsed->annotation);
             const auto output_index = parsed->output_index.value_or(static_cast<u64>(completed.size()));
             auto id = parsed->item_id.value_or("output:" + std::to_string(output_index));
-            start_assistant_item(output_index, id, callbacks);
+            auto canonical = start_assistant_item(output_index, std::move(id), callbacks);
             if (citation && callbacks.on_assistant_text_delta) {
                 output_emitted = true;
-                callbacks.on_assistant_text_delta({.value = std::move(id)}, "\n\nSource: " + *citation);
+                callbacks.on_assistant_text_delta(canonical, "\n\nSource: " + *citation);
             }
             return {};
         }
@@ -643,25 +672,33 @@ struct StreamAccumulator {
             if (completion.model.empty()) completion.model = std::move(parsed->response.model);
             if (parsed->response.usage) apply_usage(*parsed->response.usage);
 
-            // Non-streaming-shaped gateways may only carry output on the
-            // final response object.
-            if (completed.empty() && parsed->response.output) {
-                for (usize index = 0; index < parsed->response.output->size(); ++index) {
-                    auto item = parse_item((*parsed->response.output)[index]);
-                    if (!item) {
-                        return outcome_error(std::move(item).error());
-                    }
-                    auto added = add_item(index, *std::move(item), callbacks);
-                    if (!added) {
-                        return added;
-                    }
-                }
-            }
+            // Non-streaming-shaped gateways may carry some or all output only
+            // on the terminal response object.
+            auto added = add_response_output(parsed->response, callbacks);
+            if (!added) return added;
             status = "completed";
             saw_completed = true;
             return {};
         }
-        if (name == "response.failed" || name == "response.incomplete") {
+        if (name == "response.incomplete") {
+            auto parsed = parse_wire<ResponseEvent>(event.data, name);
+            if (!parsed) return outcome_error(std::move(parsed).error());
+            if (completion.model.empty()) completion.model = std::move(parsed->response.model);
+            if (parsed->response.usage) apply_usage(*parsed->response.usage);
+            auto added = add_response_output(parsed->response, callbacks);
+            if (!added) return added;
+            const auto reason = parsed->response.incomplete_details ? parsed->response.incomplete_details->reason : "unknown";
+            completion.stop = reason == "max_output_tokens" || reason == "max_tokens" ? provider::StopKind::TRUNCATED :
+                              reason == "context_length_exceeded" || reason == "context_window_exceeded" ?
+                                                                                        provider::StopKind::CONTEXT_EXHAUSTED :
+                              reason == "content_filter" ? provider::StopKind::REFUSED :
+                                                           provider::StopKind::OTHER;
+            completion.stop_detail = reason;
+            status = "incomplete";
+            saw_completed = true;
+            return {};
+        }
+        if (name == "response.failed") {
             auto parsed = parse_wire<FailedResponseEvent>(event.data, name);
             if (!parsed) {
                 return outcome_error(std::move(parsed).error());
@@ -671,9 +708,6 @@ struct StreamAccumulator {
                 bool transient = transient_api_type(type);
                 return outcome_error(
                     Error::api(std::move(type), std::move(parsed->response.error->message), completion.request_id, transient));
-            }
-            if (parsed->response.incomplete_details) {
-                return outcome_error(Error::protocol("response incomplete: " + parsed->response.incomplete_details->reason));
             }
             return outcome_error(Error::protocol(name + " without error detail"));
         }
@@ -698,10 +732,12 @@ struct StreamAccumulator {
                 return outcome_error(Error::protocol("response output item index gap"));
             }
         }
-        completion.stop = refused   ? provider::StopKind::REFUSED :
-                          has_calls ? provider::StopKind::NEEDS_TOOL_RESULTS :
-                                      provider::StopKind::DONE;
-        completion.stop_detail = std::move(status);
+        if (status == "completed") {
+            completion.stop = refused   ? provider::StopKind::REFUSED :
+                              has_calls ? provider::StopKind::NEEDS_TOOL_RESULTS :
+                                          provider::StopKind::DONE;
+            completion.stop_detail = std::move(status);
+        }
         return std::move(completion);
     }
 };
