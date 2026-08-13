@@ -2,7 +2,6 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -60,17 +59,17 @@ std::vector<context::InstructionSource> resolve_fixture() {
             return active;
         });
     files.expect<context::ReadInstructionFileDispatch>()
-        .then_calls([&](const std::filesystem::path &path) -> Result<std::optional<std::string>> {
+        .then_calls([&](const std::filesystem::path &path) -> Result<std::string> {
             require(path == root / "AGENTS.md", "resolver did not read the root instruction first");
-            return std::optional<std::string>{"root policy"};
+            return std::string("root policy");
         })
-        .then_calls([&](const std::filesystem::path &path) -> Result<std::optional<std::string>> {
+        .then_calls([&](const std::filesystem::path &path) -> Result<std::string> {
             require(path == root / "src" / "AGENTS.md", "resolver did not inspect the intermediate scope");
-            return std::optional<std::string>{};
+            return lighter::outcome_error(Error::config("not found", ErrorCode::NOT_FOUND));
         })
-        .then_calls([&](const std::filesystem::path &path) -> Result<std::optional<std::string>> {
+        .then_calls([&](const std::filesystem::path &path) -> Result<std::string> {
             require(path == active / "AGENTS.md", "resolver did not read the narrow instruction last");
-            return std::optional<std::string>{"module policy"};
+            return std::string("module policy");
         });
 
     auto handle = files.handle();
@@ -141,14 +140,21 @@ void test_instruction_read_failure() {
     files.expect<context::CanonicalizeInstructionPathDispatch>()
         .then_calls([](const std::filesystem::path &) -> Result<std::filesystem::path> { return std::filesystem::path("workspace"); })
         .then_calls([](const std::filesystem::path &) -> Result<std::filesystem::path> { return std::filesystem::path("workspace"); });
-    files.expect<context::ReadInstructionFileDispatch>().calls([](const std::filesystem::path &) -> Result<std::optional<std::string>> {
-        return lighter::outcome_error(Error::config("permission denied"));
+    files.expect<context::ReadInstructionFileDispatch>().calls([](const std::filesystem::path &) -> Result<std::string> {
+        return lighter::outcome_error(Error::config("permission denied", ErrorCode::IO));
     });
 
     auto handle = files.handle();
     auto resolved = context::ProjectInstructionResolver{}.resolve("workspace", "workspace", handle);
     require(!resolved && resolved.error().detail == "permission denied", "resolver hid or replaced an instruction read failure");
     files.verify();
+}
+
+void test_instruction_read_is_strict() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path = std::filesystem::temp_directory_path() / ("liminal-missing-instructions-" + std::to_string(nonce)) / "AGENTS.md";
+    auto content = context::LocalInstructionFiles{}.read_instruction_file(path);
+    require(!content && content.error().code == ErrorCode::NOT_FOUND, "a missing instruction file must be a structured failed read");
 }
 
 void test_manifest_deduplication_and_redacted_description() {
@@ -167,7 +173,7 @@ void test_manifest_deduplication_and_redacted_description() {
             .content = "SECRET POLICY",
         },
     };
-    session::Session session_log({.value = 7});
+    session::Session session_log;
     session_log.start_task("OLD SECRET");
     session::ContextCheckpoint checkpoint;
     checkpoint.items.push_back(session::ContextInput{.parts = {provider::TextPart{.text = "SUMMARY SECRET"}}});
@@ -198,7 +204,7 @@ void test_manifest_deduplication_and_redacted_description() {
 }
 
 void test_bounded_selection_keeps_complete_recent_tasks() {
-    session::Session session_log({.value = 11});
+    session::Session session_log;
     const auto old_task = session_log.start_task(std::string(80, 'a'));
     append_message(session_log, old_task, std::string(80, 'b'));
     const auto tool_task = session_log.start_task("use a tool");
@@ -224,7 +230,7 @@ void test_bounded_selection_keeps_complete_recent_tasks() {
 }
 
 void test_reported_usage_accounts_for_trailing_context() {
-    session::Session session_log({.value = 12});
+    session::Session session_log;
     const auto task_id = session_log.start_task(std::string(200, 'u'));
     append_message(session_log, task_id, std::string(200, 'a'));
     session_log.append(session::ProviderCallCompleted{
@@ -253,6 +259,7 @@ i32 run_all() {
     test_workspace_boundary();
     test_project_root_discovery();
     test_instruction_read_failure();
+    test_instruction_read_is_strict();
     test_manifest_deduplication_and_redacted_description();
     test_bounded_selection_keeps_complete_recent_tasks();
     test_reported_usage_accounts_for_trailing_context();

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cwchar>
 #include <filesystem>
-#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -58,7 +57,7 @@ Result<std::filesystem::path> LocalInstructionFiles::canonicalize_instruction_pa
     return canonical;
 }
 
-Result<std::optional<std::string>> LocalInstructionFiles::read_instruction_file(const std::filesystem::path &path) const {
+Result<std::string> LocalInstructionFiles::read_instruction_file(const std::filesystem::path &path) const {
     std::error_code error;
     auto status = std::filesystem::status(path, error);
     if (error == std::errc::no_such_file_or_directory) {
@@ -66,44 +65,50 @@ Result<std::optional<std::string>> LocalInstructionFiles::read_instruction_file(
         status = std::filesystem::file_status(std::filesystem::file_type::not_found);
     } else if (error) {
         return lighter::outcome_error(
-            Error::config("cannot inspect project instruction file '" + display_path(path) + "': " + error.message()));
+            Error::config("cannot inspect project instruction file '" + display_path(path) + "': " + error.message(), ErrorCode::IO));
     }
     if (!std::filesystem::exists(status)) {
-        return std::optional<std::string>{};
+        return lighter::outcome_error(
+            Error::config("project instruction file was not found: '" + display_path(path) + "'", ErrorCode::NOT_FOUND));
     }
     if (!std::filesystem::is_regular_file(status)) {
-        return lighter::outcome_error(Error::config("project instruction path is not a regular file: '" + display_path(path) + "'"));
+        return lighter::outcome_error(
+            Error::config("project instruction path is not a regular file: '" + display_path(path) + "'", ErrorCode::IO));
     }
 
     const auto size = std::filesystem::file_size(path, error);
     if (error) {
         return lighter::outcome_error(
-            Error::config("cannot size project instruction file '" + display_path(path) + "': " + error.message()));
+            Error::config("cannot size project instruction file '" + display_path(path) + "': " + error.message(), ErrorCode::IO));
     }
     if (size > k_instruction_file_limit) {
         return lighter::outcome_error(Error::config("project instruction file exceeds " + std::to_string(k_instruction_file_limit) +
-                                                    " bytes: '" + display_path(path) + "'"));
+                                                        " bytes: '" + display_path(path) + "'",
+                                                    ErrorCode::INVALID_DATA));
     }
 
     auto content = lighter::fs::sync::read_to_string(path.string());
     if (!content) {
-        return lighter::outcome_error(
-            Error::config("cannot read project instruction file '" + display_path(path) + "': " + std::string(content.error().message())));
+        return lighter::outcome_error(Error::config(
+            "cannot read project instruction file '" + display_path(path) + "': " + std::string(content.error().message()), ErrorCode::IO));
     }
     if (content->size() > k_instruction_file_limit) {
         return lighter::outcome_error(Error::config("project instruction file exceeds " + std::to_string(k_instruction_file_limit) +
-                                                    " bytes: '" + display_path(path) + "'"));
+                                                        " bytes: '" + display_path(path) + "'",
+                                                    ErrorCode::INVALID_DATA));
     }
     if (content->find('\0') != std::string::npos) {
-        return lighter::outcome_error(Error::config("project instruction file is binary: '" + display_path(path) + "'"));
+        return lighter::outcome_error(
+            Error::config("project instruction file is binary: '" + display_path(path) + "'", ErrorCode::INVALID_DATA));
     }
     if (!lighter::encoding::utf8::is_valid(*content)) {
-        return lighter::outcome_error(Error::config("project instruction file is not valid UTF-8: '" + display_path(path) + "'"));
+        return lighter::outcome_error(
+            Error::config("project instruction file is not valid UTF-8: '" + display_path(path) + "'", ErrorCode::INVALID_DATA));
     }
     if (content->starts_with("\xEF\xBB\xBF")) {
         content->erase(0, 3);
     }
-    return std::optional<std::string>{*std::move(content)};
+    return *std::move(content);
 }
 
 Result<std::filesystem::path> discover_project_root(const std::filesystem::path &working_directory) {
@@ -165,9 +170,12 @@ Result<std::vector<InstructionSource>> ProjectInstructionResolver::resolve(const
         const auto path = directory / "AGENTS.md";
         auto content = files->read_instruction_file(path);
         if (!content) {
+            if (content.error().code == ErrorCode::NOT_FOUND) {
+                continue;
+            }
             return lighter::outcome_error(std::move(content).error());
         }
-        if (!content->has_value() || (*content)->empty()) {
+        if (content->empty()) {
             continue;
         }
         instructions.push_back({
@@ -175,7 +183,7 @@ Result<std::vector<InstructionSource>> ProjectInstructionResolver::resolve(const
             .trust = InstructionTrust::WORKSPACE,
             .origin = "project:" + display_path(path),
             .scope = directory,
-            .content = *std::move(*content),
+            .content = *std::move(content),
         });
     }
     return instructions;

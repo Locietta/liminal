@@ -250,7 +250,9 @@ Result<Registry> load_registry(const std::filesystem::path &providers_path, cons
 
     Registry registry;
     auto codex_auth = codex::load_auth(auth_path);
-    if (!codex_auth) return lighter::outcome_error(std::move(codex_auth).error());
+    if (!codex_auth && codex_auth.error().code != ErrorCode::AUTH_NOT_CONFIGURED) {
+        return lighter::outcome_error(std::move(codex_auth).error());
+    }
     const auto codex_override = config->providers.find("codex");
     if (codex_override != config->providers.end()) {
         const auto &override = codex_override->second;
@@ -259,13 +261,13 @@ Result<Registry> load_registry(const std::filesystem::path &providers_path, cons
                 Error::config("built-in provider 'codex' only accepts 'name', 'discover_models', and 'models' overrides"));
         }
     }
-    if (*codex_auth) {
+    if (codex_auth) {
         registry.providers.push_back({
             .id = "codex",
             .name = "OpenAI Codex",
             .api = ApiType::OPENAI_RESPONSES,
             .base_url = codex_api_base_url(),
-            .auth = **std::move(codex_auth),
+            .auth = *std::move(codex_auth),
             .codex_subscription = true,
             .models_client_version = "0.1.0",
             .models = bundled_codex_models(),

@@ -2,7 +2,6 @@
 
 #include <filesystem>
 #include <functional>
-#include <optional>
 #include <string_view>
 
 #include <lighter/async/runtime/task.h>
@@ -16,7 +15,7 @@ using DeviceCodeNotice = std::move_only_function<void(std::string_view verificat
 
 std::filesystem::path default_auth_file();
 
-Result<std::optional<provider::AuthResolver>> load_auth(const std::filesystem::path &path);
+Result<provider::AuthResolver> load_auth(const std::filesystem::path &path);
 
 lighter::Task<void, Error> login_device(std::filesystem::path path, DeviceCodeNotice notice);
 

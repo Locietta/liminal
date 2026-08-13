@@ -87,17 +87,23 @@ Result<AuthFile> read_auth_file(const std::filesystem::path &path) {
     std::error_code exists_error;
     const bool exists = std::filesystem::exists(path, exists_error);
     if (exists_error) {
-        return outcome_error(Error::config("cannot inspect auth file '" + path.string() + "': " + exists_error.message()));
+        return outcome_error(Error::config("cannot inspect auth file '" + path.string() + "': " + exists_error.message(), ErrorCode::IO));
     }
     if (!exists) {
-        return AuthFile{};
+        return outcome_error(Error::config("auth file was not found: '" + path.string() + "'", ErrorCode::NOT_FOUND));
     }
     std::ifstream input(path, std::ios::binary);
     if (!input) {
-        return outcome_error(Error::config("cannot open auth file '" + path.string() + "'"));
+        return outcome_error(Error::config("cannot open auth file '" + path.string() + "'", ErrorCode::IO));
     }
     std::string text(std::istreambuf_iterator<char>(input), {});
-    return parse_json<AuthFile>(text, "invalid auth file '" + path.string() + "'");
+    auto file = parse_json<AuthFile>(text, "invalid auth file '" + path.string() + "'");
+    if (!file) {
+        auto error = std::move(file).error();
+        error.code = ErrorCode::AUTH_INVALID;
+        return outcome_error(std::move(error));
+    }
+    return file;
 }
 
 Result<void> write_auth_file(const std::filesystem::path &path, detail::Credentials credentials) {
@@ -232,13 +238,21 @@ std::filesystem::path default_auth_file() {
     return std::filesystem::path("auth.json");
 }
 
-Result<std::optional<provider::AuthResolver>> load_auth(const std::filesystem::path &path) {
+Result<provider::AuthResolver> load_auth(const std::filesystem::path &path) {
     auto file = read_auth_file(path);
-    if (!file) return outcome_error(std::move(file).error());
-    if (!file->codex) return std::optional<provider::AuthResolver>{};
+    if (!file) {
+        auto error = std::move(file).error();
+        if (error.code == ErrorCode::NOT_FOUND) {
+            error.code = ErrorCode::AUTH_NOT_CONFIGURED;
+        }
+        return outcome_error(std::move(error));
+    }
+    if (!file->codex) {
+        return outcome_error(Error::config("auth file '" + path.string() + "' has no Codex credentials", ErrorCode::AUTH_NOT_CONFIGURED));
+    }
     if (file->codex->type != "oauth" || file->codex->access_token.empty() || file->codex->refresh_token.empty() ||
         file->codex->account_id.empty()) {
-        return outcome_error(Error::config("auth file '" + path.string() + "' has invalid Codex credentials"));
+        return outcome_error(Error::config("auth file '" + path.string() + "' has invalid Codex credentials", ErrorCode::AUTH_INVALID));
     }
     auto state = std::make_shared<AuthState>(AuthState{
         .credentials = *std::move(file->codex),
@@ -246,7 +260,7 @@ Result<std::optional<provider::AuthResolver>> load_auth(const std::filesystem::p
         .auth_base_url = auth_base_url(),
     });
     provider::AuthResolver resolver = [state]() { return state->resolve(); };
-    return std::optional<provider::AuthResolver>(std::move(resolver));
+    return resolver;
 }
 
 Task<void, Error> login_device(std::filesystem::path path, DeviceCodeNotice notice) {

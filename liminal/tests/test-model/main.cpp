@@ -200,11 +200,45 @@ void test_expired_codex_auth_refreshes_and_resolves_headers() {
             "Codex resolver did not apply subscription headers");
 }
 
+void test_codex_auth_load_is_strict() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto directory = std::filesystem::temp_directory_path() / ("liminal-auth-" + std::to_string(nonce));
+    std::filesystem::create_directories(directory);
+    const auto path = directory / "auth.json";
+
+    auto auth = codex::load_auth(path);
+    require(!auth && auth.error().code == ErrorCode::AUTH_NOT_CONFIGURED,
+            "a missing auth file must report that Codex auth is not configured");
+
+    write(path, R"({})");
+    auth = codex::load_auth(path);
+    require(!auth && auth.error().code == ErrorCode::AUTH_NOT_CONFIGURED,
+            "an auth file without Codex credentials must report that auth is not configured");
+
+    write(path, R"({)");
+    auth = codex::load_auth(path);
+    require(!auth && auth.error().code == ErrorCode::AUTH_INVALID, "malformed auth JSON must report invalid auth");
+
+    write(path, R"({"codex":{}})");
+    auth = codex::load_auth(path);
+    require(!auth && auth.error().code == ErrorCode::AUTH_INVALID, "incomplete Codex credentials must report invalid auth");
+
+    write(
+        path,
+        R"({"codex":{"type":"oauth","access_token":"access","refresh_token":"refresh","expires_at":4102444800000,"account_id":"account"}})");
+    auth = codex::load_auth(path);
+    require(auth.has_value(), "complete Codex credentials must produce an auth resolver");
+
+    std::error_code remove_error;
+    std::filesystem::remove_all(directory, remove_error);
+}
+
 i32 run_all() {
     test_catalog_discovery_is_opt_in();
     test_catalog_discovery_failure_preserves_manual_models();
     test_device_login_flow_is_scriptable();
     test_expired_codex_auth_refreshes_and_resolves_headers();
+    test_codex_auth_load_is_strict();
 
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto directory = std::filesystem::temp_directory_path() / ("liminal-models-" + std::to_string(nonce));
