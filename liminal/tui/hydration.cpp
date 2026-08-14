@@ -1,5 +1,6 @@
 #include "hydration.h"
 
+#include <algorithm>
 #include <map>
 #include <tuple>
 #include <utility>
@@ -25,10 +26,7 @@ std::string abort_notice(const session::ProviderCallAborted &aborted) {
     return "Provider call ended unexpectedly";
 }
 
-} // namespace
-
-std::vector<Block> project_transcript(const session::Session &session, const ToolSet &tools) {
-    const auto branch = session.active_branch();
+std::vector<Block> project_branch(const std::vector<const session::SessionEntry *> &branch, const ToolSet &tools) {
     std::map<ToolKey, provider::ToolResult> results;
     for (const auto *entry : branch) {
         const auto *batch = std::get_if<session::ToolResults>(&entry->payload);
@@ -102,6 +100,25 @@ std::vector<Block> project_transcript(const session::Session &session, const Too
         }
     }
     return blocks;
+}
+
+} // namespace
+
+std::vector<Block> project_transcript(const session::Session &session, const ToolSet &tools) {
+    const auto branch = session.active_branch();
+    return project_branch(branch, tools);
+}
+
+Result<std::vector<Block>> project_transcript_at(const session::Session &session, session::ConversationCheckpointId checkpoint,
+                                                 const ToolSet &tools) {
+    auto checkpoints = session.conversation_checkpoints();
+    if (!checkpoints) return lighter::outcome_error(std::move(checkpoints).error());
+    if (std::ranges::none_of(*checkpoints, [checkpoint](const session::ConversationCheckpoint &item) { return item.id == checkpoint; })) {
+        return lighter::outcome_error(Error::protocol("requested transcript checkpoint is missing or unsafe"));
+    }
+    auto branch = session.branch_to(checkpoint.entry);
+    if (!branch) return lighter::outcome_error(std::move(branch).error());
+    return project_branch(*branch, tools);
 }
 
 } // namespace liminal::tui

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <map>
 #include <type_traits>
 #include <utility>
 
@@ -14,6 +15,7 @@
 
 #include <lighter/async/vocab/outcome.h>
 #include <lighter/encoding/utf8.h>
+#include <lighter/utils/panic.h>
 
 #include <liminal/text.h>
 
@@ -89,13 +91,15 @@ TaskId Session::start_task(std::string text) {
 
 ProviderCallId Session::next_provider_call() { return {.value = next_provider_call_id++}; }
 
-Result<void> Session::select_leaf(std::optional<EntryId> id) {
-    if (id && !find(*id)) {
-        return lighter::outcome_error(Error::protocol("cannot select an unknown session entry"));
+Result<void> Session::checkout(ConversationCheckpointId checkpoint) {
+    auto projected = conversation_checkpoints();
+    if (!projected) return lighter::outcome_error(std::move(projected).error());
+    if (std::ranges::none_of(*projected, [checkpoint](const ConversationCheckpoint &item) { return item.id == checkpoint; })) {
+        return lighter::outcome_error(Error::protocol("requested conversation checkpoint is missing or unsafe"));
     }
-    active_leaf = id;
+    active_leaf = checkpoint.entry;
     metadata.updated_at_ms = mutation_timestamp(metadata);
-    if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
+    if (persistence) persistence->enqueue(make_delta(*this, {}));
     return {};
 }
 
@@ -212,19 +216,213 @@ const SessionEntry *Session::find(EntryId id) const noexcept {
     return entry.id == id ? &entry : nullptr;
 }
 
-std::vector<const SessionEntry *> Session::active_branch() const {
+Result<std::vector<const SessionEntry *>> Session::branch_to(EntryId id) const {
+    if (!find(id)) return lighter::outcome_error(Error::protocol("requested session entry was not found"));
     std::vector<const SessionEntry *> branch;
-    auto cursor = active_leaf;
+    std::optional<EntryId> cursor = id;
     while (cursor) {
         const auto *entry = find(*cursor);
-        if (!entry) {
-            break;
-        }
+        if (!entry) return lighter::outcome_error(Error::protocol("session entry ancestry is incomplete"));
         branch.push_back(entry);
         cursor = entry->parent_id;
     }
     std::ranges::reverse(branch);
     return branch;
+}
+
+std::vector<const SessionEntry *> Session::active_branch() const {
+    if (!active_leaf) return {};
+    auto branch = branch_to(*active_leaf);
+    lighter::check(branch.has_value(), "active session branch is invalid");
+    return *std::move(branch);
+}
+
+Result<std::vector<ConversationCheckpoint>> Session::conversation_checkpoints() const {
+    struct PathState {
+        std::optional<TaskId> active_task;
+        std::string_view task_label;
+        std::optional<ConversationCheckpointId> checkpoint;
+        usize checkpoint_depth = 0;
+    };
+
+    std::vector<bool> active_ancestry(entries.size() + 1);
+    for (const auto *entry : active_branch()) active_ancestry[entry->id.value] = true;
+
+    std::vector<PathState> states(entries.size() + 1);
+    std::vector<ConversationCheckpoint> checkpoints;
+    std::vector<usize> checkpoint_indices(entries.size() + 1, std::numeric_limits<usize>::max());
+    u64 expected_entry_id = 1;
+    for (const auto &entry : entries) {
+        if (entry.id.value != expected_entry_id++) {
+            return lighter::outcome_error(Error::protocol("conversation history has an invalid entry identity"));
+        }
+        PathState state;
+        if (entry.parent_id) {
+            if (entry.parent_id->value == 0 || entry.parent_id->value >= entry.id.value) {
+                return lighter::outcome_error(Error::protocol("conversation history has an invalid parent"));
+            }
+            state = states[entry.parent_id->value];
+        }
+
+        std::optional<ConversationCheckpoint> checkpoint;
+        if (const auto *started = std::get_if<TaskStarted>(&entry.payload)) {
+            if (state.active_task) {
+                return lighter::outcome_error(Error::protocol("conversation branch starts a task before the previous task finished"));
+            }
+            state.active_task = started->id;
+            state.task_label = started->text;
+        } else if (const auto *output = std::get_if<OutputItemCompleted>(&entry.payload)) {
+            if (!state.active_task || *state.active_task != output->task_id) {
+                return lighter::outcome_error(Error::protocol("conversation branch has provider output outside its active task"));
+            }
+        } else if (const auto *completed = std::get_if<ProviderCallCompleted>(&entry.payload)) {
+            if (!state.active_task || *state.active_task != completed->task_id) {
+                return lighter::outcome_error(Error::protocol("conversation branch completes a provider call outside its active task"));
+            }
+        } else if (const auto *aborted = std::get_if<ProviderCallAborted>(&entry.payload)) {
+            if (!state.active_task || *state.active_task != aborted->task_id) {
+                return lighter::outcome_error(Error::protocol("conversation branch aborts a provider call outside its active task"));
+            }
+        } else if (const auto *results = std::get_if<ToolResults>(&entry.payload)) {
+            if (!state.active_task || *state.active_task != results->task_id) {
+                return lighter::outcome_error(Error::protocol("conversation branch has tool results outside its active task"));
+            }
+        } else if (const auto *finished = std::get_if<TaskFinished>(&entry.payload)) {
+            if (!state.active_task || *state.active_task != finished->id) {
+                return lighter::outcome_error(Error::protocol("conversation branch finishes a task that is not active"));
+            }
+            checkpoint = ConversationCheckpoint{
+                .id = ConversationCheckpointId{entry.id},
+                .parent_checkpoint = state.checkpoint,
+                .depth = state.checkpoint ? state.checkpoint_depth + 1 : 0,
+                .kind = ConversationCheckpointKind::TASK,
+                .label = std::string(state.task_label),
+                .task_outcome = finished->outcome,
+                .active = active_leaf == entry.id,
+                .on_active_branch = active_ancestry[entry.id.value],
+            };
+            state.active_task.reset();
+            state.task_label = {};
+        } else if (std::holds_alternative<ContextCheckpoint>(entry.payload) && !state.active_task) {
+            checkpoint = ConversationCheckpoint{
+                .id = ConversationCheckpointId{entry.id},
+                .parent_checkpoint = state.checkpoint,
+                .depth = state.checkpoint ? state.checkpoint_depth + 1 : 0,
+                .kind = ConversationCheckpointKind::COMPACTION,
+                .label = "History compacted",
+                .active = active_leaf == entry.id,
+                .on_active_branch = active_ancestry[entry.id.value],
+            };
+        }
+
+        if (checkpoint) {
+            state.checkpoint = checkpoint->id;
+            state.checkpoint_depth = checkpoint->depth;
+            checkpoint_indices[entry.id.value] = checkpoints.size();
+            checkpoints.push_back(*std::move(checkpoint));
+        }
+        states[entry.id.value] = std::move(state);
+    }
+
+    std::vector<std::vector<usize>> children(checkpoints.size());
+    for (usize index = 0; index < checkpoints.size(); ++index) {
+        const auto parent = checkpoints[index].parent_checkpoint;
+        if (!parent) continue;
+        const auto parent_index = checkpoint_indices[parent->entry.value];
+        if (parent_index == std::numeric_limits<usize>::max()) {
+            return lighter::outcome_error(Error::protocol("conversation checkpoint ancestry is incomplete"));
+        }
+        children[parent_index].push_back(index);
+        ++checkpoints[parent_index].direct_descendants;
+    }
+    for (usize index = checkpoints.size(); index-- > 0;) {
+        if (children[index].empty()) {
+            checkpoints[index].branch_leaves.push_back(checkpoints[index].id);
+            continue;
+        }
+        for (const auto child : children[index]) {
+            checkpoints[index].branch_leaves.insert(checkpoints[index].branch_leaves.end(), checkpoints[child].branch_leaves.begin(),
+                                                    checkpoints[child].branch_leaves.end());
+        }
+    }
+
+    std::vector<usize> roots;
+    for (usize index = 0; index < checkpoints.size(); ++index) {
+        if (!checkpoints[index].parent_checkpoint) roots.push_back(index);
+    }
+    std::vector<usize> pending;
+    for (auto root = roots.rbegin(); root != roots.rend(); ++root) pending.push_back(*root);
+    std::vector<ConversationCheckpoint> ordered;
+    ordered.reserve(checkpoints.size());
+    while (!pending.empty()) {
+        const auto index = pending.back();
+        pending.pop_back();
+        ordered.push_back(std::move(checkpoints[index]));
+        for (auto child = children[index].rbegin(); child != children[index].rend(); ++child) pending.push_back(*child);
+    }
+    return ordered;
+}
+
+Result<Session> Session::fork_at(ConversationCheckpointId checkpoint) const {
+    auto projected = conversation_checkpoints();
+    if (!projected) return lighter::outcome_error(std::move(projected).error());
+    if (std::ranges::none_of(*projected, [checkpoint](const ConversationCheckpoint &item) { return item.id == checkpoint; })) {
+        return lighter::outcome_error(Error::protocol("requested conversation checkpoint is missing or unsafe"));
+    }
+    auto source_branch = branch_to(checkpoint.entry);
+    if (!source_branch) return lighter::outcome_error(std::move(source_branch).error());
+
+    Session fork;
+    fork.metadata.workspace = metadata.workspace;
+    fork.metadata.working_directory = metadata.working_directory;
+    fork.metadata.preview = metadata.preview;
+    fork.metadata.model_preference = metadata.model_preference;
+    fork.metadata.forked_from = ForkOrigin{.session = id, .entry = checkpoint.entry};
+
+    std::map<u64, TaskId> task_ids;
+    std::map<u64, ProviderCallId> provider_call_ids;
+    auto remap_task = [&task_ids](TaskId source) -> TaskId {
+        if (const auto found = task_ids.find(source.value); found != task_ids.end()) return found->second;
+        const TaskId mapped{.value = task_ids.size() + 1};
+        task_ids.emplace(source.value, mapped);
+        return mapped;
+    };
+    auto remap_call = [&provider_call_ids](ProviderCallId source) -> ProviderCallId {
+        if (const auto found = provider_call_ids.find(source.value); found != provider_call_ids.end()) return found->second;
+        const ProviderCallId mapped{.value = provider_call_ids.size() + 1};
+        provider_call_ids.emplace(source.value, mapped);
+        return mapped;
+    };
+
+    for (const auto *source : *source_branch) {
+        auto payload = source->payload;
+        std::visit(
+            [&](auto &value) {
+                using T = std::remove_cvref_t<decltype(value)>;
+                if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>) {
+                    value.id = remap_task(value.id);
+                } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolResults>) {
+                    value.task_id = remap_task(value.task_id);
+                    value.provider_call_id = remap_call(value.provider_call_id);
+                } else if constexpr (std::same_as<T, ProviderCallCompleted> || std::same_as<T, ProviderCallAborted>) {
+                    value.task_id = remap_task(value.task_id);
+                    value.id = remap_call(value.id);
+                }
+            },
+            payload);
+        const EntryId id{.value = fork.next_entry_id++};
+        fork.entries.push_back({
+            .id = id,
+            .parent_id = fork.active_leaf,
+            .payload = std::move(payload),
+            .created_at_ms = source->created_at_ms,
+        });
+        fork.active_leaf = id;
+    }
+    fork.next_task_id = task_ids.size() + 1;
+    fork.next_provider_call_id = provider_call_ids.size() + 1;
+    if (auto valid = fork.validate(); !valid) return lighter::outcome_error(std::move(valid).error());
+    return fork;
 }
 
 std::optional<std::string> Session::reply_from_latest(usize ordinal) const {

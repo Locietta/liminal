@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -129,6 +130,7 @@ struct SessionEntry {
 struct SessionWorkspace {
     std::string root;
     std::string key;
+    bool operator==(const SessionWorkspace &) const = default;
 };
 
 struct SessionModelPreference {
@@ -140,6 +142,7 @@ struct SessionModelPreference {
 struct ForkOrigin {
     SessionId session;
     EntryId entry;
+    bool operator==(const ForkOrigin &) const = default;
 };
 
 struct SessionMetadata {
@@ -152,6 +155,32 @@ struct SessionMetadata {
     std::optional<SessionModelPreference> model_preference;
     std::optional<i64> archived_at_ms;
     std::optional<ForkOrigin> forked_from;
+};
+
+enum struct ConversationCheckpointKind {
+    TASK,
+    COMPACTION,
+};
+
+struct ConversationCheckpointId {
+    EntryId entry;
+    auto operator<=>(const ConversationCheckpointId &) const = default;
+};
+
+/// A safe idle boundary projected from the append-only entry tree. Leaf IDs
+/// below a checkpoint are stable branch identities derived from durable
+/// history, not separately persisted branch records.
+struct ConversationCheckpoint {
+    ConversationCheckpointId id;
+    std::optional<ConversationCheckpointId> parent_checkpoint;
+    usize depth = 0;
+    ConversationCheckpointKind kind = ConversationCheckpointKind::TASK;
+    std::string label;
+    std::optional<TaskOutcome> task_outcome;
+    bool active = false;
+    bool on_active_branch = false;
+    usize direct_descendants = 0;
+    std::vector<ConversationCheckpointId> branch_leaves;
 };
 
 i64 unix_milliseconds_now() noexcept;
@@ -168,9 +197,12 @@ struct Session {
     TaskId start_task(std::string text);
     ProviderCallId next_provider_call();
 
-    /// Moves the active cursor without modifying entries. Appending after
-    /// selecting an ancestor creates another branch.
-    Result<void> select_leaf(std::optional<EntryId> id);
+    /// Moves the append point to a safe idle checkpoint without modifying
+    /// descendants. A later append creates another branch.
+    Result<void> checkout(ConversationCheckpointId checkpoint);
+    /// Copies the selected semantic prefix into a new independently identified
+    /// session while preserving provider-private payloads.
+    Result<Session> fork_at(ConversationCheckpointId checkpoint) const;
     Result<void> validate() const;
     void set_model_preference(std::string provider, std::string model, std::optional<std::string> reasoning_effort);
     void set_title(std::optional<std::string> title);
@@ -181,7 +213,9 @@ struct Session {
     const PersistenceQueue *persistence_queue() const noexcept;
 
     const SessionEntry *find(EntryId id) const noexcept;
+    Result<std::vector<const SessionEntry *>> branch_to(EntryId id) const;
     std::vector<const SessionEntry *> active_branch() const;
+    Result<std::vector<ConversationCheckpoint>> conversation_checkpoints() const;
     /// Returns the Nth-newest textual assistant reply on the active branch.
     std::optional<std::string> reply_from_latest(usize ordinal = 1) const;
     u64 tokens_used() const noexcept;

@@ -97,7 +97,9 @@ struct SessionCoordinator {
     Result<AcquiredSession> acquire(session::SessionId id) const;
     Result<PreparedSession> resolve_model(AcquiredSession acquired) const;
     Result<PreparedSession> prepare(session::SessionId id) const;
+    Result<PreparedSession> prepare_fork(const session::Session &source, session::ConversationCheckpointId checkpoint) const;
     Result<SessionSwitch> begin_switch(session::SessionId current, session::SessionId target) const;
+    Result<SessionSwitch> begin_fork_switch(const session::Session &source, session::ConversationCheckpointId checkpoint) const;
     Result<void> mutate_inactive(session::SessionId id, const SessionCatalogMutation &mutation) const;
 
 private:
