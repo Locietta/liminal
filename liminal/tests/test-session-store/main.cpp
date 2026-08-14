@@ -64,6 +64,8 @@ void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
+session::ConversationCheckpointId checkpoint_id(session::EntryId entry) { return {entry}; }
+
 struct TemporaryDatabase {
     TemporaryDatabase() {
         directory = std::filesystem::temp_directory_path() / ("liminal-session-test-" + session::to_string(session::generate_session_id()));
@@ -545,17 +547,28 @@ void test_store_round_trip_and_restart_branching() {
                 loaded->active_leaf == original.active_leaf,
             "round trip changed session catalog metadata");
 
-    const auto original_leaf = *loaded->active_leaf;
-    auto selected = loaded->select_leaf(session::EntryId{.value = 1});
-    require(selected.has_value(), "failed to rewind loaded session");
-    auto cursor_commit = writer->commit(session::make_delta(*loaded, {}));
+    session::Session branching;
+    branching.metadata.working_directory = database.directory.generic_string();
+    const auto root_task = branching.start_task("branch root");
+    const auto root_checkpoint = branching.append(session::TaskFinished{.id = root_task});
+    const auto old_task = branching.start_task("old descendant");
+    const auto original_leaf = branching.append(session::TaskFinished{.id = old_task});
+    auto branch_writer = store.lease(branching.id);
+    require(branch_writer && branch_writer->commit(session::make_delta(branching, branching.entries)),
+            "failed to seed restart branching fixture");
+    auto selected = branching.checkout(checkpoint_id(root_checkpoint));
+    require(selected.has_value(), "failed to checkout a loaded session checkpoint");
+    auto cursor_commit = branch_writer->commit(session::make_delta(branching, {}));
     require(cursor_commit.has_value(), "cursor-only mutation did not persist");
-    loaded->start_task("alternate branch");
-    const auto alternate = loaded->entries.back();
-    auto branch_commit = writer->commit(session::make_delta(*loaded, std::span(&alternate, 1)));
+    auto cursor_restart = branch_writer->load();
+    require(cursor_restart && cursor_restart->active_leaf == root_checkpoint, "checked-out active cursor did not persist across restart");
+    const auto first_new_entry = branching.entries.size();
+    const auto alternate_task = branching.start_task("alternate branch");
+    branching.append(session::TaskFinished{.id = alternate_task});
+    auto branch_commit = branch_writer->commit(session::make_delta(branching, std::span(branching.entries).subspan(first_new_entry)));
     require(branch_commit.has_value(), "branch append did not persist");
-    auto restarted = writer->load();
-    require(restarted && restarted->find(original_leaf) && restarted->entries.back().parent_id == session::EntryId{.value = 1},
+    auto restarted = branch_writer->load();
+    require(restarted && restarted->find(original_leaf) && restarted->entries[first_new_entry].parent_id == root_checkpoint,
             "restart branching deleted or rewrote the original descendant");
 }
 
@@ -921,6 +934,81 @@ void test_prepared_switch_is_atomic_and_explicit_about_unsaved_history() {
     }
 }
 
+void test_fork_preparation_is_independently_durable() {
+    TemporaryDatabase database;
+    auto store = session::Store::open(database.path);
+    require(store.has_value(), "failed to open fork preparation store");
+    auto models = test_model_catalog();
+    application::SessionCoordinator coordinator(*store, preparation_services(models));
+
+    session::Session source;
+    source.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    source.metadata.working_directory = "workspace/subdir";
+    source.metadata.model_preference = session::SessionModelPreference{.provider = "test", .model = "fallback"};
+    const auto task = source.start_task("fork source");
+    const auto call = source.next_provider_call();
+    source.append(session::OutputItemCompleted{
+        .task_id = task,
+        .provider_call_id = call,
+        .item =
+            provider::ProviderOpaqueItem{
+                .id = {.value = "private-item"},
+                .part = {.provider_tag = "test", .payload = "provider-private"},
+            },
+    });
+    source.append(session::ProviderCallCompleted{
+        .task_id = task,
+        .id = call,
+        .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
+    });
+    const auto checkpoint = source.append(session::TaskFinished{.id = task});
+    const auto source_id = source.id;
+    session::SessionId fork_id;
+    {
+        auto prepared = coordinator.prepare_fork(source, checkpoint_id(checkpoint));
+        require(prepared && prepared->session.id != source.id &&
+                    prepared->session.metadata.forked_from == session::ForkOrigin{source.id, checkpoint} &&
+                    prepared->session.entries.size() == source.entries.size(),
+                "fork preparation did not create a distinct coherent target");
+        fork_id = prepared->session.id;
+        const auto *opaque = std::get_if<session::OutputItemCompleted>(&prepared->session.entries[1].payload);
+        require(opaque && std::holds_alternative<provider::ProviderOpaqueItem>(opaque->item),
+                "prepared fork lost provider-private history");
+    }
+
+    const auto later_task = source.start_task("source changes independently");
+    source.append(session::TaskFinished{.id = later_task});
+    auto writer = store->lease(fork_id);
+    require(writer.has_value(), "durable fork did not release ownership after preparation");
+    auto loaded = writer->load();
+    require(loaded && loaded->id == fork_id && loaded->id != source_id && loaded->entries.size() == 4 &&
+                loaded->metadata.forked_from == session::ForkOrigin{source_id, checkpoint} && loaded->active_leaf == session::EntryId{4},
+            "fork did not remain independently durable after the source changed");
+
+    const auto source_entries = source.entries.size();
+    const auto source_leaf = source.active_leaf;
+    auto projection_services = preparation_services(models);
+    projection_services.project = [](const session::Session &) -> Result<std::vector<tui::Block>> {
+        return lighter::outcome_error(Error::protocol("injected fork projection failure"));
+    };
+    application::SessionCoordinator projection_coordinator(*store, std::move(projection_services));
+    auto projection_failure = projection_coordinator.prepare_fork(source, checkpoint_id(checkpoint));
+    require(!projection_failure && projection_failure.error().detail.contains("projection") && source.entries.size() == source_entries &&
+                source.active_leaf == source_leaf,
+            "fork projection failure disturbed the source session");
+
+    auto model_services = preparation_services(models);
+    model_services.resolve_model =
+        [](const std::optional<session::SessionModelPreference> &) -> Result<application::SessionModelResolution> {
+        return lighter::outcome_error(Error::config("injected fork model failure"));
+    };
+    application::SessionCoordinator model_coordinator(*store, std::move(model_services));
+    auto model_failure = model_coordinator.prepare_fork(source, checkpoint_id(checkpoint));
+    require(!model_failure && model_failure.error().detail.contains("model") && source.entries.size() == source_entries &&
+                source.active_leaf == source_leaf,
+            "fork model-resolution failure disturbed the source session");
+}
+
 lighter::Task<lighter::Error> drive_session_picker(tui::SelectableListDialog &dialog, tui::ConsoleRenderer &renderer,
                                                    std::optional<session::SessionId> selection) {
     co_await dialog.wait_until_active();
@@ -941,6 +1029,67 @@ enum struct ResumeExpectation {
     PREPARATION_FAILED,
     SWITCHED,
 };
+
+enum struct HistoryAction {
+    CANCEL,
+    KEEP,
+    CHECKOUT,
+    FORK,
+};
+
+lighter::Task<lighter::Error> drive_history_dialog(tui::SelectableListDialog &dialog, tui::ConsoleRenderer &renderer,
+                                                   std::optional<session::EntryId> checkpoint, HistoryAction action,
+                                                   std::optional<bool> abandon_unsaved = std::nullopt) {
+    co_await dialog.wait_until_active();
+    if (!checkpoint) {
+        if (!renderer.selectable_list || renderer.selectable_list->empty_message != "No completed conversation checkpoints") {
+            co_return lighter::Error::k_invalid_argument;
+        }
+        co_return dialog.apply(tui::SelectableListAction::CANCEL);
+    }
+    if (!renderer.selectable_list || renderer.selectable_list->pages.front().items.empty() ||
+        !renderer.selectable_list->pages.front().items.front().secondary.contains("branch") ||
+        !renderer.selectable_list->pages.front().items.front().secondary.contains('#')) {
+        co_return lighter::Error::k_invalid_argument;
+    }
+    const auto target = std::to_string(checkpoint->value);
+    for (usize attempts = 0; attempts < 50 && renderer.selectable_list_selection() != std::optional<std::string_view>{target}; ++attempts) {
+        if (auto error = dialog.apply(tui::SelectableListAction::DOWN)) co_return error;
+    }
+    if (renderer.selectable_list_selection() != std::optional<std::string_view>{target}) {
+        co_return lighter::Error::k_invalid_argument;
+    }
+    if (action == HistoryAction::CANCEL) co_return dialog.apply(tui::SelectableListAction::CANCEL);
+    if (auto error = dialog.apply(tui::SelectableListAction::CONFIRM)) co_return error;
+
+    co_await dialog.wait_until_active();
+    if (action == HistoryAction::KEEP) co_return dialog.apply(tui::SelectableListAction::CONFIRM);
+    const auto moves = action == HistoryAction::CHECKOUT ? 1 : 2;
+    for (i32 index = 0; index < moves; ++index) {
+        if (auto error = dialog.apply(tui::SelectableListAction::DOWN)) co_return error;
+    }
+    if (auto error = dialog.apply(tui::SelectableListAction::CONFIRM)) co_return error;
+    if (!abandon_unsaved) co_return lighter::Error{};
+
+    co_await dialog.wait_until_active();
+    if (*abandon_unsaved) {
+        if (auto error = dialog.apply(tui::SelectableListAction::DOWN)) co_return error;
+    }
+    co_return dialog.apply(tui::SelectableListAction::CONFIRM);
+}
+
+void run_history_command(Agent &agent, application::SessionCoordinator &coordinator, tui::ConsoleRenderer &renderer,
+                         tui::SelectableListDialog &dialog, std::optional<session::EntryId> checkpoint, HistoryAction action,
+                         std::optional<bool> abandon_unsaved = std::nullopt) {
+    lighter::EventLoop loop;
+    auto command = tui::navigate_conversation(agent, &coordinator, renderer, dialog);
+    auto driver = drive_history_dialog(dialog, renderer, checkpoint, action, abandon_unsaved);
+    loop.schedule(command);
+    loop.schedule(driver);
+    loop.run();
+    require(!driver.result(), "deterministic history dialog driver failed");
+    require(!command.result(), "history command returned a rendering error");
+}
 
 void exercise_resume_command(model::Catalog &models, ToolSet &tools, application::SessionCoordinator &coordinator,
                              session::SessionId target, ResumeExpectation expectation) {
@@ -1034,6 +1183,137 @@ void test_resume_command_transaction_preserves_or_swaps_complete_state() {
     exercise_resume_command(models, tools, model_coordinator, target.id, ResumeExpectation::PREPARATION_FAILED);
 
     exercise_resume_command(models, tools, coordinator, target.id, ResumeExpectation::SWITCHED);
+}
+
+void test_history_command_is_atomic_and_uses_focused_dialogs() {
+    TemporaryDatabase database;
+    auto store = session::Store::open(database.path);
+    require(store.has_value(), "failed to open history command store");
+    auto models = test_model_catalog();
+    ToolSet tools(database.directory);
+    application::SessionPreparationServices history_services(
+        [&tools](const session::Session &value) -> Result<std::vector<tui::Block>> { return tui::project_transcript(value, tools); },
+        [&models](const std::optional<session::SessionModelPreference> &stored_model) {
+            return application::resolve_session_model(models, std::nullopt, stored_model);
+        });
+    application::SessionCoordinator coordinator(*store, std::move(history_services));
+
+    {
+        auto choice = models.select("test/fallback");
+        require(choice.has_value(), "failed to select empty-history model fixture");
+        Agent empty(*std::move(choice), tools);
+        lighter::TerminalSession terminal;
+        tui::ConsoleRenderer renderer(&terminal);
+        renderer.pause_rendering();
+        tui::SelectableListDialog dialog;
+        const auto empty_id = empty.session.id;
+        run_history_command(empty, coordinator, renderer, dialog, std::nullopt, HistoryAction::CANCEL);
+        require(empty.session.id == empty_id && empty.session.entries.empty(), "empty history navigation mutated the session");
+    }
+
+    session::Session current;
+    current.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    current.metadata.working_directory = "workspace";
+    current.metadata.model_preference = session::SessionModelPreference{.provider = "test", .model = "fallback"};
+    const auto first_task = current.start_task("first checkpoint");
+    const auto first = current.append(session::TaskFinished{.id = first_task});
+    const auto second_task = current.start_task("second checkpoint");
+    const auto second = current.append(session::TaskFinished{.id = second_task});
+    auto writer = store->lease(current.id);
+    require(writer && writer->commit(session::make_delta(current, current.entries)), "failed to persist history command source");
+    auto queue = session::PersistenceQueue::create(*std::move(writer));
+    require(current.attach_persistence(queue).has_value(), "failed to attach history command persistence");
+    const auto source_id = current.id;
+
+    auto choice = models.select("test/fallback");
+    require(choice.has_value(), "failed to select history command model fixture");
+    Agent agent(*std::move(choice), tools, {}, std::move(current));
+    lighter::TerminalSession terminal;
+    tui::ConsoleRenderer renderer(&terminal);
+    renderer.pause_rendering();
+    require(!renderer.load_transcript(tui::project_transcript(agent.session, tools)), "failed to seed history transcript");
+    tui::SelectableListDialog dialog;
+
+    run_history_command(agent, coordinator, renderer, dialog, first, HistoryAction::CANCEL);
+    require(agent.session.id == source_id && agent.session.active_leaf == second && renderer.screen.transcript.blocks.size() == 2,
+            "checkpoint-list cancellation changed the current branch or transcript");
+    run_history_command(agent, coordinator, renderer, dialog, first, HistoryAction::KEEP);
+    require(agent.session.active_leaf == second && renderer.screen.transcript.blocks.size() == 2,
+            "checkpoint action cancellation changed the current branch or transcript");
+    run_history_command(agent, coordinator, renderer, dialog, first, HistoryAction::CHECKOUT);
+    require(agent.session.active_leaf == first && renderer.screen.transcript.blocks.size() == 1 &&
+                renderer.screen.transcript.blocks.front().text == "first checkpoint" && agent.session.find(second),
+            "checkout did not atomically hydrate only the selected branch while preserving descendants");
+
+    run_history_command(agent, coordinator, renderer, dialog, first, HistoryAction::FORK);
+    require(agent.session.id != source_id, "fork action did not switch to a new session identity");
+    require(agent.session.metadata.forked_from == session::ForkOrigin{source_id, first},
+            "fork action did not retain exact source provenance");
+    require(!renderer.screen.transcript.blocks.empty() && renderer.screen.transcript.blocks.front().text == "first checkpoint" &&
+                std::ranges::none_of(renderer.screen.transcript.blocks,
+                                     [](const tui::Block &block) { return block.text == "second checkpoint"; }),
+            "fork action did not atomically replace the transcript with the selected branch");
+
+    session::Session failing_checkout;
+    failing_checkout.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    failing_checkout.metadata.working_directory = "workspace";
+    failing_checkout.metadata.model_preference = session::SessionModelPreference{.provider = "test", .model = "fallback"};
+    const auto failing_first_task = failing_checkout.start_task("checkout stays first");
+    const auto failing_first = failing_checkout.append(session::TaskFinished{.id = failing_first_task});
+    const auto failing_second_task = failing_checkout.start_task("checkout stays second");
+    const auto failing_second = failing_checkout.append(session::TaskFinished{.id = failing_second_task});
+    auto checkout_queue =
+        session::PersistenceQueue::create_for_test(failing_checkout.id, [](const session::SessionDelta &) -> Result<void> {
+            return lighter::outcome_error(Error::storage("injected checkout save failure"));
+        });
+    require(failing_checkout.attach_persistence(checkout_queue).has_value(), "failed to attach checkout failure fixture");
+    failing_checkout.set_title("force checkout persistence");
+    auto failing_choice = models.select("test/fallback");
+    require(failing_choice.has_value(), "failed to select checkout failure model fixture");
+    Agent failing_agent(*std::move(failing_choice), tools, {}, std::move(failing_checkout));
+    lighter::TerminalSession failing_terminal;
+    tui::ConsoleRenderer failing_renderer(&failing_terminal);
+    failing_renderer.pause_rendering();
+    require(!failing_renderer.load_transcript(tui::project_transcript(failing_agent.session, tools)),
+            "failed to seed checkout failure transcript");
+    tui::SelectableListDialog failing_dialog;
+    run_history_command(failing_agent, coordinator, failing_renderer, failing_dialog, failing_first, HistoryAction::CHECKOUT);
+    require(failing_agent.session.active_leaf == failing_second && failing_agent.session.find(failing_first) &&
+                failing_renderer.screen.transcript.blocks[0].text == "checkout stays first" &&
+                failing_renderer.screen.transcript.blocks[1].text == "checkout stays second",
+            "checkout persistence failure did not preserve the original cursor and displayed branch");
+
+    session::Session unsaved;
+    unsaved.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    unsaved.metadata.working_directory = "workspace";
+    unsaved.metadata.model_preference = session::SessionModelPreference{.provider = "test", .model = "fallback"};
+    const auto unsaved_task = unsaved.start_task("unsaved source");
+    const auto unsaved_checkpoint = unsaved.append(session::TaskFinished{.id = unsaved_task});
+    auto failing_queue = session::PersistenceQueue::create_for_test(unsaved.id, [](const session::SessionDelta &) -> Result<void> {
+        return lighter::outcome_error(Error::storage("injected current-tail failure"));
+    });
+    require(unsaved.attach_persistence(failing_queue).has_value(), "failed to attach unsaved history command fixture");
+    unsaved.set_title("unsaved mutation");
+    const auto unsaved_id = unsaved.id;
+    auto unsaved_choice = models.select("test/fallback");
+    require(unsaved_choice.has_value(), "failed to select unsaved history model fixture");
+    Agent unsaved_agent(*std::move(unsaved_choice), tools, {}, std::move(unsaved));
+    lighter::TerminalSession unsaved_terminal;
+    tui::ConsoleRenderer unsaved_renderer(&unsaved_terminal);
+    unsaved_renderer.pause_rendering();
+    require(!unsaved_renderer.load_transcript(tui::project_transcript(unsaved_agent.session, tools)),
+            "failed to seed unsaved history transcript");
+    tui::SelectableListDialog unsaved_dialog;
+
+    run_history_command(unsaved_agent, coordinator, unsaved_renderer, unsaved_dialog, unsaved_checkpoint, HistoryAction::FORK, false);
+    require(unsaved_agent.session.id == unsaved_id && unsaved_agent.session.active_leaf == unsaved_checkpoint &&
+                unsaved_renderer.screen.transcript.blocks.front().text == "unsaved source",
+            "declining fork abandonment changed the current session or transcript");
+    run_history_command(unsaved_agent, coordinator, unsaved_renderer, unsaved_dialog, unsaved_checkpoint, HistoryAction::FORK, true);
+    require(unsaved_agent.session.id != unsaved_id &&
+                unsaved_agent.session.metadata.forked_from == session::ForkOrigin{unsaved_id, unsaved_checkpoint} &&
+                unsaved_renderer.screen.transcript.blocks.front().text == "unsaved source",
+            "explicit unsaved-tail abandonment did not switch to the prepared fork coherently");
 }
 
 void test_recovery_never_replays_tools() {
@@ -1298,7 +1578,7 @@ void test_transcript_hydration() {
         .reason = session::ProviderCallAbortReason::INTERRUPTED,
         .detail = "crashed",
     });
-    value.append(session::TaskFinished{.id = task, .outcome = session::TaskOutcome::INTERRUPTED});
+    const auto task_checkpoint = value.append(session::TaskFinished{.id = task, .outcome = session::TaskOutcome::INTERRUPTED});
     value.append(session::ContextCheckpoint{});
 
     const auto blocks = tui::project_transcript(value, tools);
@@ -1306,6 +1586,13 @@ void test_transcript_hydration() {
                 blocks[2].kind == tui::BlockKind::TOOL && blocks[2].state == tui::BlockState::COMPLETED &&
                 blocks[3].text.contains("interrupted") && blocks[4].text.contains("interrupted") && blocks[5].text == "History compacted",
             "bulk transcript hydration did not reconstruct stable semantic blocks");
+    const auto selected_blocks = tui::project_transcript_at(value, checkpoint_id(task_checkpoint), tools);
+    require(selected_blocks && selected_blocks->size() == 5 && selected_blocks->back().text.contains("interrupted") &&
+                std::ranges::none_of(*selected_blocks, [](const tui::Block &block) { return block.text == "History compacted"; }),
+            "checkpoint transcript projection escaped the explicitly selected ancestry");
+    const auto missing = tui::project_transcript_at(value, checkpoint_id(session::EntryId{999}), tools);
+    require(!missing && missing.error().detail.contains("missing or unsafe"),
+            "explicitly missing transcript checkpoint returned optional absence or a partial projection");
 }
 
 i32 run_all() {
@@ -1323,7 +1610,9 @@ i32 run_all() {
     test_session_catalog_mutations_persist_and_respect_ownership();
     test_durable_acquisition_precedes_live_model_resolution();
     test_prepared_switch_is_atomic_and_explicit_about_unsaved_history();
+    test_fork_preparation_is_independently_durable();
     test_resume_command_transaction_preserves_or_swaps_complete_state();
+    test_history_command_is_atomic_and_uses_focused_dialogs();
     test_recovery_never_replays_tools();
     test_session_rejects_mismatched_persistence_queue();
     test_ordered_queue_failure_and_retry();

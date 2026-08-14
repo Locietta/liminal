@@ -1,10 +1,14 @@
 #include "session_commands.h"
 
 #include <algorithm>
+#include <charconv>
 #include <type_traits>
 #include <utility>
 
 #include <lighter/async/vocab/outcome.h>
+
+#include <liminal/text.h>
+#include <liminal/tui/hydration.h>
 
 namespace liminal::tui {
 
@@ -85,6 +89,105 @@ Result<void> mutate_selected_session(Agent &agent, application::SessionCoordinat
     return queue ? queue->flush() : Result<void>{};
 }
 
+std::string outcome_label(session::TaskOutcome outcome) {
+    switch (outcome) {
+        case session::TaskOutcome::COMPLETED: return "completed";
+        case session::TaskOutcome::CANCELLED: return "cancelled";
+        case session::TaskOutcome::FAILED: return "failed";
+        case session::TaskOutcome::INTERRUPTED: return "interrupted";
+    }
+    return "finished";
+}
+
+SelectableList history_list(const std::vector<session::ConversationCheckpoint> &checkpoints) {
+    SelectableListPage page;
+    page.items.reserve(checkpoints.size());
+    for (const auto &checkpoint : checkpoints) {
+        constexpr usize k_max_visible_depth = 8;
+        const auto visible_depth = std::min(checkpoint.depth, k_max_visible_depth);
+        auto primary = std::string(visible_depth * 2, ' ') + (checkpoint.depth > k_max_visible_depth ? "… " :
+                                                              checkpoint.depth == 0                  ? "● " :
+                                                                                                       "↳ ");
+        primary += bounded_utf8(checkpoint.label, 72);
+        auto secondary = "checkpoint #" + std::to_string(checkpoint.id.entry.value);
+        if (checkpoint.task_outcome) secondary += " · " + outcome_label(*checkpoint.task_outcome);
+        if (checkpoint.active) {
+            secondary += " · current append point";
+        } else if (checkpoint.on_active_branch) {
+            secondary += " · active ancestor";
+        } else {
+            secondary += " · preserved branch";
+        }
+        secondary += checkpoint.branch_leaves.size() == 1 ? " · branch" : " · branches";
+        constexpr usize k_visible_branch_ids = 4;
+        for (usize index = 0; index < std::min(checkpoint.branch_leaves.size(), k_visible_branch_ids); ++index) {
+            secondary += " #" + std::to_string(checkpoint.branch_leaves[index].entry.value);
+        }
+        if (checkpoint.branch_leaves.size() > k_visible_branch_ids) {
+            secondary += " +" + std::to_string(checkpoint.branch_leaves.size() - k_visible_branch_ids);
+        }
+        page.items.push_back(
+            {.id = std::to_string(checkpoint.id.entry.value), .primary = std::move(primary), .secondary = std::move(secondary)});
+    }
+    SelectableList list("Conversation history", "No completed conversation checkpoints", std::move(page));
+    list.description = "Inspect safe completed boundaries; selecting one does not change history.";
+    return list;
+}
+
+Result<session::ConversationCheckpointId> parse_checkpoint_choice(std::string_view choice) {
+    u64 value = 0;
+    const auto parsed = std::from_chars(choice.data(), choice.data() + choice.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != choice.data() + choice.size() || value == 0) {
+        return lighter::outcome_error(Error::protocol("history dialog returned an invalid checkpoint identity"));
+    }
+    return session::ConversationCheckpointId{session::EntryId{.value = value}};
+}
+
+Result<void> open_history_actions(SelectableListDialog &dialog, ConsoleRenderer &renderer, session::ConversationCheckpointId checkpoint) {
+    SelectableList list(
+        "Checkpoint #" + std::to_string(checkpoint.entry.value), "",
+        SelectableListPage{
+            .items = {
+                {.id = "keep", .primary = "Keep current session"},
+                {.id = "checkout", .primary = "Checkout here", .secondary = "preserve descendants; next prompt creates a branch"},
+                {.id = "fork", .primary = "Fork from here", .secondary = "create and switch to an independent session"},
+            }});
+    list.description = "Conversation context changes only; filesystem, process, network, and other tool effects are not undone.";
+    if (auto error = dialog.begin(renderer, std::move(list))) {
+        return lighter::outcome_error(Error::protocol("cannot render history actions: " + std::string(error.message())));
+    }
+    return {};
+}
+
+lighter::Task<lighter::Error> finish_switch(Agent &agent, ConsoleRenderer &renderer, SelectableListDialog &dialog,
+                                            application::SessionSwitch switching, std::string success_status) {
+    auto *current_queue = agent.session.persistence_queue();
+    switching.flush_current(current_queue);
+    if (switching.state() == application::SessionSwitchState::AWAITING_UNSAVED_CONFIRMATION) {
+        auto confirmation = open_unsaved_confirmation(dialog, renderer);
+        if (!confirmation) co_return renderer.status("Session switch error: " + confirmation.error().message());
+        auto decision = co_await dialog.next();
+        switching.resolve_unsaved(decision && *decision == "switch" ? application::UnsavedSwitchDecision::ABANDON_UNSAVED_HISTORY :
+                                                                      application::UnsavedSwitchDecision::STAY,
+                                  current_queue->status());
+    }
+    if (switching.state() == application::SessionSwitchState::CANCELLED) co_return lighter::Error{};
+    const auto abandoned_unsaved_history = switching.abandoned_unsaved_history();
+    auto prepared = std::move(switching).take_target();
+    if (auto error = renderer.load_transcript(std::move(prepared.transcript))) co_return error;
+    agent.replace_session(std::move(prepared.model), std::move(prepared.session));
+    if (auto error = renderer.render(ModelSelected{.name = agent.model.entry.id, .effort = agent.model.reasoning_effort})) co_return error;
+    for (const auto &notice : prepared.notices) {
+        if (auto error = renderer.notice(notice)) co_return error;
+    }
+    if (abandoned_unsaved_history) {
+        if (auto error = renderer.notice("[switched sessions; the old unsaved history was abandoned and external tool effects were not "
+                                         "undone]\n"))
+            co_return error;
+    }
+    co_return renderer.status(std::move(success_status));
+}
+
 } // namespace
 
 lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
@@ -106,32 +209,8 @@ lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionC
         co_return renderer.status("Already in the selected session");
     }
 
-    auto *current_queue = agent.session.persistence_queue();
-    switching->flush_current(current_queue);
-    if (switching->state() == application::SessionSwitchState::AWAITING_UNSAVED_CONFIRMATION) {
-        auto confirmation = open_unsaved_confirmation(dialog, renderer);
-        if (!confirmation) co_return renderer.status("Resume error: " + confirmation.error().message());
-        auto decision = co_await dialog.next();
-        switching->resolve_unsaved(decision && *decision == "switch" ? application::UnsavedSwitchDecision::ABANDON_UNSAVED_HISTORY :
-                                                                       application::UnsavedSwitchDecision::STAY,
-                                   current_queue->status());
-    }
-    if (switching->state() == application::SessionSwitchState::CANCELLED) co_return lighter::Error{};
-    const auto abandoned_unsaved_history = switching->abandoned_unsaved_history();
-    auto prepared = std::move(*switching).take_target();
-    if (auto error = renderer.load_transcript(std::move(prepared.transcript))) co_return error;
-    const auto resumed_id = session::to_string(prepared.session.id).substr(0, 8);
-    agent.replace_session(std::move(prepared.model), std::move(prepared.session));
-    if (auto error = renderer.render(ModelSelected{.name = agent.model.entry.id, .effort = agent.model.reasoning_effort})) co_return error;
-    for (const auto &notice : prepared.notices) {
-        if (auto error = renderer.notice(notice)) co_return error;
-    }
-    if (abandoned_unsaved_history) {
-        if (auto error = renderer.notice("[switched sessions; the old unsaved history was abandoned and external tool effects were not "
-                                         "undone]\n"))
-            co_return error;
-    }
-    co_return renderer.status("Resumed session " + resumed_id);
+    const auto resumed_id = session::to_string(*id).substr(0, 8);
+    co_return co_await finish_switch(agent, renderer, dialog, *std::move(switching), "Resumed session " + resumed_id);
 }
 
 lighter::Task<lighter::Error> change_archive_state(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
@@ -162,6 +241,62 @@ lighter::Error name_current_session(Agent &agent, ConsoleRenderer &renderer, std
     auto saved = queue ? queue->flush() : Result<void>{};
     if (saved) return renderer.status("Session name updated");
     return renderer.notice("[Session name changed in memory; saving failed]\n");
+}
+
+lighter::Task<lighter::Error> navigate_conversation(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
+                                                    SelectableListDialog &dialog) {
+    if (!sessions || !renderer.terminal) co_return renderer.status("Conversation history is unavailable in this session");
+    auto checkpoints = agent.session.conversation_checkpoints();
+    if (!checkpoints) co_return renderer.notice("[history error: " + checkpoints.error().message() + "]\n");
+    if (auto error = dialog.begin(renderer, history_list(*checkpoints))) co_return error;
+    auto selected = co_await dialog.next();
+    if (!selected) co_return lighter::Error{};
+    auto checkpoint = parse_checkpoint_choice(*selected);
+    if (!checkpoint) co_return renderer.notice("[history error: " + checkpoint.error().message() + "]\n");
+    if (auto actions = open_history_actions(dialog, renderer, *checkpoint); !actions) {
+        co_return renderer.notice("[history error: " + actions.error().message() + "]\n");
+    }
+    auto action = co_await dialog.next();
+    if (!action || *action == "keep") co_return lighter::Error{};
+
+    if (*action == "checkout") {
+        auto projected = project_transcript_at(agent.session, *checkpoint, *agent.tools);
+        if (!projected) co_return renderer.notice("[checkout error: " + projected.error().message() + "]\n");
+        auto *queue = agent.session.persistence_queue();
+        if (!queue) co_return renderer.notice("[checkout error: session persistence is unavailable]\n");
+        const auto former_leaf = agent.session.active_leaf;
+        auto restore = [&agent, queue, former_leaf]() -> Result<void> {
+            if (!former_leaf) return lighter::outcome_error(Error::protocol("checkout had no former append point"));
+            auto restored = agent.session.checkout(session::ConversationCheckpointId{*former_leaf});
+            if (!restored) return restored;
+            return queue->flush();
+        };
+        auto checked_out = agent.session.checkout(*checkpoint);
+        if (!checked_out) co_return renderer.notice("[checkout error: " + checked_out.error().message() + "]\n");
+        auto flushed = queue->flush();
+        if (!flushed) {
+            auto restored = restore();
+            if (!restored) {
+                co_return renderer.notice("[checkout error: " + flushed.error().message() +
+                                          "; the original cursor was restored in memory but is not saving: " + restored.error().message() +
+                                          "]\n");
+            }
+            co_return renderer.notice("[checkout error: " + flushed.error().message() + "; conversation unchanged]\n");
+        }
+        if (auto error = renderer.load_transcript(*std::move(projected))) {
+            auto restored = restore();
+            if (!restored) co_return renderer.notice("[checkout cursor restoration error: " + restored.error().message() + "]\n");
+            co_return error;
+        }
+        co_return renderer.status("Checked out checkpoint #" + std::to_string(checkpoint->entry.value) +
+                                  "; the next prompt creates a branch");
+    }
+
+    if (*action != "fork") co_return renderer.notice("[history error: unknown checkpoint action]\n");
+    auto switching = sessions->begin_fork_switch(agent.session, *checkpoint);
+    if (!switching) co_return renderer.notice("[fork error: " + switching.error().message() + "]\n");
+    co_return co_await finish_switch(agent, renderer, dialog, *std::move(switching),
+                                     "Forked from checkpoint #" + std::to_string(checkpoint->entry.value));
 }
 
 } // namespace liminal::tui

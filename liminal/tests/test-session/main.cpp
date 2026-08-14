@@ -33,27 +33,42 @@ session::EntryId append_message(session::Session &log, session::TaskId task_id, 
     });
 }
 
+session::ConversationCheckpointId checkpoint_id(session::EntryId entry) { return {entry}; }
+
 void test_append_only_branching() {
     session::Session log;
     const auto first_task = log.start_task("first task");
-    const auto root = session::EntryId{.value = 1};
-    const auto original_leaf = append_message(log, first_task, "first answer");
+    append_message(log, first_task, "first answer");
+    log.append(session::ProviderCallCompleted{
+        .task_id = first_task,
+        .id = log.next_provider_call(),
+        .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
+    });
+    const auto root = log.append(session::TaskFinished{.id = first_task});
+    const auto original_task = log.start_task("original continuation");
+    const auto original_leaf = log.append(session::TaskFinished{.id = original_task});
 
-    auto selected = log.select_leaf(root);
-    require(selected.has_value(), "failed to select a known session entry");
-    log.start_task("alternate task");
-    const auto alternate_leaf = *log.active_leaf;
+    auto selected = log.checkout(checkpoint_id(root));
+    require(selected.has_value(), "failed to checkout a safe conversation checkpoint");
+    const auto alternate_task = log.start_task("alternate task");
+    const auto alternate_leaf = log.append(session::TaskFinished{.id = alternate_task});
 
-    require(log.entries.size() == 3, "branching changed the session identity or deleted entries");
+    require(log.entries.size() == 8, "branching changed the session identity or deleted entries");
     require(log.find(original_leaf) != nullptr, "branching deleted the original leaf");
-    require(log.entries.back().parent_id == root, "alternate branch has the wrong parent");
+    require(log.entries[6].parent_id == root, "alternate branch has the wrong parent");
 
     auto branch = log.active_branch();
-    require(branch.size() == 2 && branch[0]->id == root && branch[1]->id == alternate_leaf,
-            "active branch did not follow parent links from root to leaf");
+    require(branch.size() == 6 && branch.back()->id == alternate_leaf, "active branch did not follow parent links to the new leaf");
+    auto manifest = context::ContextBuilder{}.build({}, log);
+    require(manifest &&
+                std::ranges::none_of(manifest->session_entries, [original_leaf](session::EntryId id) { return id == original_leaf; }) &&
+                manifest->session_entries.back() == alternate_leaf,
+            "provider context projection escaped the branch created after checkout");
 
-    auto invalid = log.select_leaf(session::EntryId{.value = 99});
-    require(!invalid && invalid.error().detail.contains("unknown session entry"), "an unknown branch leaf was accepted");
+    auto unsafe = log.checkout(checkpoint_id(session::EntryId{.value = root.value - 1}));
+    require(!unsafe && unsafe.error().detail.contains("missing or unsafe"), "a mid-lifecycle entry was accepted as a checkpoint");
+    auto invalid = log.checkout(checkpoint_id(session::EntryId{.value = 99}));
+    require(!invalid && invalid.error().detail.contains("missing or unsafe"), "an unknown checkpoint was accepted");
 }
 
 void test_monotonic_timestamps_and_utf8_bounds() {
@@ -63,12 +78,13 @@ void test_monotonic_timestamps_and_utf8_bounds() {
     log.metadata.updated_at_ms = future;
     std::string prompt(239, 'a');
     prompt += "\xF0\x9F\x98\x80";
-    log.start_task(prompt);
+    const auto task = log.start_task(prompt);
     require(log.metadata.updated_at_ms == future && log.entries.back().created_at_ms == future,
             "wall-clock rollback moved a session mutation before its durable timestamp");
     require(log.metadata.preview.size() == 239 && lighter::encoding::utf8::is_valid(log.metadata.preview),
             "session preview split a UTF-8 code point at its byte bound");
-    require(log.select_leaf(std::nullopt).has_value() && log.metadata.updated_at_ms == future,
+    const auto checkpoint = log.append(session::TaskFinished{.id = task});
+    require(log.checkout(checkpoint_id(checkpoint)).has_value() && log.metadata.updated_at_ms == future,
             "cursor mutation regressed the session timestamp");
     log.set_model_preference("provider", "model", std::nullopt);
     require(log.metadata.updated_at_ms == future && log.validate().has_value(),
@@ -120,15 +136,24 @@ void test_checkpoint_projection() {
 
 void test_cumulative_token_usage() {
     session::Session log;
-    const auto first = log.append(session::ProviderCallCompleted{
+    const auto first_task = log.start_task("first");
+    log.append(session::ProviderCallCompleted{
+        .task_id = first_task,
+        .id = log.next_provider_call(),
         .completion = {.usage = {.input_tokens = 30, .output_tokens = 5, .context_tokens = 40}},
     });
-    log.start_task("continue");
-    log.append(session::ProviderCallCompleted{.completion = {.usage = {.input_tokens = 50, .output_tokens = 7}}});
+    const auto first = log.append(session::TaskFinished{.id = first_task});
+    const auto second_task = log.start_task("continue");
+    log.append(session::ProviderCallCompleted{
+        .task_id = second_task,
+        .id = log.next_provider_call(),
+        .completion = {.usage = {.input_tokens = 50, .output_tokens = 7}},
+    });
+    log.append(session::TaskFinished{.id = second_task});
 
     require(log.tokens_used() == 97, "session token usage did not prefer normalized response totals");
 
-    auto selected = log.select_leaf(first);
+    auto selected = log.checkout(checkpoint_id(first));
     require(selected.has_value() && log.tokens_used() == 97, "branch selection changed tokens already consumed by the session");
 }
 
@@ -184,7 +209,7 @@ void test_reply_selection() {
     require(log.reply_from_latest(2) == "first answer", "older reply selection used the wrong newest-first ordinal");
     require(!log.reply_from_latest(0) && !log.reply_from_latest(3), "reply selection accepted an invalid ordinal");
 
-    auto selected = log.select_leaf(first_leaf);
+    auto selected = log.checkout(checkpoint_id(first_leaf));
     require(selected.has_value() && log.reply_from_latest() == "first answer", "reply selection escaped the active session branch");
 
     const auto failed_task = log.start_task("failed");
@@ -208,12 +233,115 @@ void test_reply_selection() {
     require(log.reply_from_latest() == "first answer", "cancelled task displaced the newest completed reply");
 }
 
+void test_checkpoint_tree_projection() {
+    session::Session log;
+    const auto first_task = log.start_task("shared root");
+    const auto unsafe_output = append_message(log, first_task, "root answer");
+    log.append(session::ProviderCallCompleted{
+        .task_id = first_task,
+        .id = log.next_provider_call(),
+        .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
+    });
+    const auto first = log.append(session::TaskFinished{.id = first_task});
+
+    const auto old_task = log.start_task("old branch");
+    const auto old_leaf = log.append(session::TaskFinished{.id = old_task});
+    require(log.checkout(checkpoint_id(first)).has_value(), "failed to rewind before projecting a branch tree");
+    const auto active_task = log.start_task("active branch");
+    session::ContextCheckpoint within_task_compaction;
+    within_task_compaction.items.push_back(session::ContextInput{{provider::TextPart{.text = "automatic summary"}}});
+    const auto unsafe_compaction = log.append(std::move(within_task_compaction));
+    const auto active_task_leaf = log.append(session::TaskFinished{.id = active_task});
+    session::ContextCheckpoint compacted;
+    compacted.items.push_back(session::ContextInput{{provider::TextPart{.text = "summary"}}});
+    const auto active_leaf = log.append(std::move(compacted));
+
+    auto checkpoints = log.conversation_checkpoints();
+    require(checkpoints.has_value() && checkpoints->size() == 4, "safe checkpoint projection omitted a completed boundary");
+    require((*checkpoints)[0].id == checkpoint_id(first) && (*checkpoints)[0].direct_descendants == 2 &&
+                (*checkpoints)[0].branch_leaves ==
+                    std::vector<session::ConversationCheckpointId>{checkpoint_id(old_leaf), checkpoint_id(active_leaf)},
+            "checkpoint projection did not identify both descendant branch leaves");
+    require(!(*checkpoints)[1].on_active_branch && (*checkpoints)[1].id == checkpoint_id(old_leaf),
+            "preserved branch was incorrectly marked active");
+    require((*checkpoints)[2].id == checkpoint_id(active_task_leaf) && (*checkpoints)[2].on_active_branch &&
+                (*checkpoints)[3].id == checkpoint_id(active_leaf) && (*checkpoints)[3].active,
+            "active ancestry or append point was projected incorrectly");
+    require(!log.checkout(checkpoint_id(unsafe_output)).has_value(), "provider output was exposed as a safe checkpoint");
+    require(!log.checkout(checkpoint_id(unsafe_compaction)).has_value(), "within-task compaction was exposed as a safe idle checkpoint");
+}
+
+void test_fork_remaps_lifecycle_and_preserves_private_items() {
+    session::Session source;
+    source.metadata.title = "Source name";
+    source.metadata.workspace = session::SessionWorkspace{.root = "D:/workspace", .key = "workspace-key"};
+    source.metadata.working_directory = "D:/workspace/subdir";
+    source.set_model_preference("provider", "model", "high");
+
+    const auto first_task = source.start_task("shared root");
+    const auto first_call = source.next_provider_call();
+    append_message(source, first_task, "root answer", first_call);
+    source.append(session::ProviderCallCompleted{
+        .task_id = first_task,
+        .id = first_call,
+        .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
+    });
+    const auto first = source.append(session::TaskFinished{.id = first_task});
+
+    const auto discarded_task = source.start_task("discarded branch");
+    const auto discarded_call = source.next_provider_call();
+    source.append(session::ProviderCallAborted{.task_id = discarded_task, .id = discarded_call});
+    source.append(session::TaskFinished{.id = discarded_task, .outcome = session::TaskOutcome::FAILED});
+    require(source.checkout(checkpoint_id(first)).has_value(), "failed to select fork source branch");
+
+    const auto selected_task = source.start_task("selected branch");
+    const auto selected_call = source.next_provider_call();
+    source.append(session::OutputItemCompleted{
+        .task_id = selected_task,
+        .provider_call_id = selected_call,
+        .item =
+            provider::ProviderOpaqueItem{
+                .id = {.value = "opaque-id"},
+                .part = {.provider_tag = "test-provider", .payload = R"({"private":true})"},
+            },
+    });
+    source.append(session::ProviderCallCompleted{
+        .task_id = selected_task,
+        .id = selected_call,
+        .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
+    });
+    const auto selected = source.append(session::TaskFinished{.id = selected_task});
+
+    auto fork = source.fork_at(checkpoint_id(selected));
+    require(fork.has_value(), "failed to fork a safe checkpoint");
+    require(fork->id != source.id && fork->metadata.forked_from == session::ForkOrigin{source.id, selected},
+            "fork identity or exact provenance is incorrect");
+    require(!fork->metadata.title && !fork->metadata.archived_at_ms && fork->metadata.workspace == source.metadata.workspace &&
+                fork->metadata.working_directory == source.metadata.working_directory,
+            "fork catalog metadata did not follow copy policy");
+    require(fork->entries.size() == 8 && fork->next_entry_id == 9 && fork->next_task_id == 3 && fork->next_provider_call_id == 3,
+            "fork did not produce dense local lifecycle identifiers");
+    for (usize index = 0; index < fork->entries.size(); ++index) {
+        require(fork->entries[index].id.value == index + 1, "fork entry identifiers were not remapped into a dense local sequence");
+    }
+    const auto *opaque = std::get_if<session::OutputItemCompleted>(&fork->entries[5].payload);
+    require(opaque && opaque->task_id.value == 2 && opaque->provider_call_id.value == 2,
+            "fork payload lifecycle references were not remapped");
+    const auto *private_item = opaque ? std::get_if<provider::ProviderOpaqueItem>(&opaque->item) : nullptr;
+    require(private_item && private_item->id.value == "opaque-id" && private_item->part.provider_tag == "test-provider" &&
+                private_item->part.payload == R"({"private":true})",
+            "fork did not preserve the provider-private item");
+    require(fork->validate().has_value(), "fork lifecycle counters are incoherent");
+}
+
 i32 run_all() {
     test_append_only_branching();
     test_monotonic_timestamps_and_utf8_bounds();
     test_checkpoint_projection();
     test_cumulative_token_usage();
     test_reply_selection();
+    test_checkpoint_tree_projection();
+    test_fork_remaps_lifecycle_and_preserves_private_items();
     return 0;
 }
 

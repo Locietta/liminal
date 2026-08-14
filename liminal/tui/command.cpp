@@ -51,6 +51,7 @@ Result<CommandKind> resolve_command(std::string_view name) {
     if (name == "name") return CommandKind::NAME;
     if (name == "archive") return CommandKind::ARCHIVE;
     if (name == "unarchive") return CommandKind::UNARCHIVE;
+    if (name == "history") return CommandKind::HISTORY;
     return lighter::outcome_error(Error::command("unknown command '/" + std::string(name) + "'"));
 }
 

@@ -36,6 +36,7 @@ enum struct CommandKind {
     NAME,
     ARCHIVE,
     UNARCHIVE,
+    HISTORY,
 };
 
 /// Resolves exact command names and their centrally registered aliases.

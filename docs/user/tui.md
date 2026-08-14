@@ -80,3 +80,17 @@ Session catalog commands are available while the agent is idle:
 - `/unarchive` opens the archived-session catalog, so every archived session remains identifiable and restorable.
 
 Liminal fully prepares a selected resume target before replacing the current transcript. If the current session still has unsaved history after a final save attempt, Liminal asks before switching and explains that the unsaved tail will not be resumable and that external tool effects are not undone. Choosing to stay leaves the current session unchanged.
+
+## Conversation history
+
+`/history` is available while the agent is idle. It opens a tree of completed conversation checkpoints. Rows identify the current append point, its active ancestors, preserved branches, and stable checkpoint-based branch IDs. Up and Down move between rows, Enter selects, and Esc cancels.
+
+After selecting a checkpoint, choose one of these actions:
+
+- **Keep current session** returns without changing anything.
+- **Checkout here** moves the current session's append point to that checkpoint. All later history remains preserved; the next prompt creates a new branch.
+- **Fork from here** creates an independently durable session containing the selected history prefix, records its source, and switches to it.
+
+Only coherent idle boundaries are selectable. Provider-call and tool lifecycle records are not shown as rewind points. An empty conversation reports that there are no completed checkpoints.
+
+Checkout and fork change conversation context only. They do not undo file edits, commands, processes, network requests, or any other external tool effects. The action dialog states this before either operation. Fork switching uses the same unsaved-history warning as `/resume`; choosing to stay preserves the current session and transcript, while explicit abandonment switches to the prepared fork.

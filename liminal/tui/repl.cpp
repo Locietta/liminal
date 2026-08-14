@@ -673,6 +673,26 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                         co_return 1;
                     continue;
                 }
+                case CommandKind::HISTORY: {
+                    auto arguments = require_no_arguments(command_line.name, command_line.arguments);
+                    if (!arguments) {
+                        if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"),
+                                      "cannot render command error"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (control.active_task) {
+                        if (!rendered(renderer.notice("[/history is available only while the agent is idle]\n"),
+                                      "cannot render history status"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (!rendered(co_await navigate_conversation(agent, sessions, renderer, dialog),
+                                  "cannot navigate conversation history"))
+                        co_return 1;
+                    saving_notice_visible = false;
+                    continue;
+                }
                 case CommandKind::MODEL: {
                     auto refreshed = co_await guard_task(models.refresh(), control);
                     if (refreshed.is_cancelled()) {

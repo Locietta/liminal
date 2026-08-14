@@ -32,6 +32,12 @@ Entries form an append-only parent-linked history. Selecting an ancestor moves t
 
 Provider context is derived from the active branch according to provider compatibility. Transcript hydration is a separate non-streaming projection and must not recreate running states. A copyable reply comes only from the terminal provider call of a successfully completed task.
 
+Conversation navigation exposes a distinct semantic checkpoint identity rather than accepting arbitrary entry IDs. A safe checkpoint is a completed task boundary or a compaction boundary whose ancestry is already idle. Provider output, provider-call, tool-result, and within-task compaction entries are not independently selectable. Projection derives checkpoint ancestry, descendants, active ancestry, the selected append point, and stable branch identity from the append-only entry tree; it does not persist parallel branch records.
+
+Checkout is a session-domain cursor mutation. It validates the requested checkpoint, preserves every descendant, persists the selected append point, and then hydrates transcript and provider context from that ancestry. Appending after checkout creates a branch naturally. Conversation navigation never represents filesystem, process, network, or other external tool effects as reverted.
+
+A fork is a new durable session containing the exact semantic prefix through a selected safe checkpoint. It records the source session and source checkpoint, receives fresh session identity and timestamps, starts unnamed and unarchived, and remaps entry, task, and provider-call identifiers into fork-local sequences. Provider output items, tool identifiers, compaction items, and provider-private payloads retain their semantic content and provenance. The fork commits to SQLite before it can become live and is prepared through the same transcript projection, model resolution, exclusive ownership, and unsaved-tail switch policy as a resumed session.
+
 ## Discovery
 
 Session discovery reads bounded, indexed catalog metadata without decoding entry payloads. Workspace association is discovery metadata, not an execution sandbox: the current invocation still controls the working directory and instruction discovery.
@@ -39,6 +45,8 @@ Session discovery reads bounded, indexed catalog metadata without decoding entry
 Workspace catalogs are ordered newest first and traversed with stable keyset cursors rather than offsets. A catalog summary contains only bounded identification metadata; the full session ID remains its durable identity. An empty page is a successful discovery result, while failure to resolve an explicitly requested session is an error.
 
 Catalog navigation uses a reusable focused selection surface. Commands supply domain data and cursor policy, but do not own terminal navigation or modal input handling.
+
+Conversation navigation uses the same focused selection surface and is available only while the agent is idle. Cancellation, projection failure, persistence failure, fork preparation failure, and model-resolution failure must leave the live agent and displayed transcript on the same session and branch.
 
 Target preparation has two ordered stages. Durable acquisition takes the exclusive lease, loads and recovers the session, attaches persistence, and projects the transcript without depending on provider discovery. Model resolution then consults the current catalog and policy, so startup claims a requested session before discovery and interactive switching cannot retain a stale fallback.
 
