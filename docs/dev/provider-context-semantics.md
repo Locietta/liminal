@@ -16,11 +16,13 @@ OpenAI assigns application rules to `developer`, end-user input to `user`, and m
 
 The Responses API also accepts top-level `instructions`. Those instructions apply to the current response and are not automatically carried forward with `previous_response_id`. Liminal currently constructs requests from explicit, manually managed input items, so explicit developer messages keep the instruction prefix visible and reproducible. Switching to top-level `instructions` should require evidence that the resulting semantics remain equivalent.
 
-Tool calls, tool results, reasoning items, and compaction items use their typed Responses API forms rather than being disguised as chat messages.
+Tool calls, tool results, reasoning items, and compaction items use their typed Responses API forms rather than being disguised as chat messages. Hosted web access uses the provider's Responses tool, and provider-owned state needed for stateless replay remains provider-tagged semantic data.
 
 ## Anthropic Messages
 
 Anthropic conversation messages use `user` and `assistant`; governing instructions belong in the top-level `system` field. Anthropic has no generally portable equivalent of OpenAI's developer role, so Liminal serializes its ordered runtime, application, and project instructions into the system prompt while preserving generated history as assistant messages.
+
+Provider-native hosted tools use their typed server-tool forms. Any provider-owned state required to replay those results remains provider-tagged and is omitted by incompatible adapters rather than translated into invented portable semantics.
 
 Provider-specific features such as model-dependent mid-conversation system messages must not define Liminal's base session semantics.
 

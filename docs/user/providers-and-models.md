@@ -73,15 +73,12 @@ Discovery is best-effort and provider-scoped. A discovery failure produces a war
 removing explicit models or models discovered from other providers.
 
 Reasoning metadata must be configured explicitly because standard Models APIs do not report the
-supported effort values. OpenAI Responses providers receive `reasoning.effort`; Anthropic Messages
-providers receive adaptive thinking plus `output_config.effort`.
+supported effort values.
 
 ## Hosted web tools
 
-Normal agent turns offer hosted web access to the selected provider. OpenAI receives its
-`web_search` Responses tool, which handles both searching and opening pages. Anthropic receives
-the `web_search_20250305` and `web_fetch_20250910` server tools. Liminal preserves provider server-tool
-state for stateless replay and appends URL citations to both live and persisted assistant text.
+Normal agent turns offer the selected provider's hosted web access. URL citations appear while the
+answer streams and remain available in the saved assistant text.
 
 The selected model and endpoint must support these provider-native tools. An incompatible
 OpenAI-compatible gateway or Anthropic model reports its normal API error; Liminal does not silently
