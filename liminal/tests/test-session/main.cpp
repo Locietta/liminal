@@ -259,7 +259,8 @@ void test_checkpoint_tree_projection() {
     auto checkpoints = log.conversation_checkpoints();
     require(checkpoints.has_value() && checkpoints->size() == 4, "safe checkpoint projection omitted a completed boundary");
     require((*checkpoints)[0].id == checkpoint_id(first) && (*checkpoints)[0].direct_descendants == 2 &&
-                (*checkpoints)[0].branch_leaves ==
+                (*checkpoints)[0].branch_leaf_count == 2 &&
+                (*checkpoints)[0].branch_leaf_examples ==
                     std::vector<session::ConversationCheckpointId>{checkpoint_id(old_leaf), checkpoint_id(active_leaf)},
             "checkpoint projection did not identify both descendant branch leaves");
     require(!(*checkpoints)[1].on_active_branch && (*checkpoints)[1].id == checkpoint_id(old_leaf),
@@ -269,6 +270,38 @@ void test_checkpoint_tree_projection() {
             "active ancestry or append point was projected incorrectly");
     require(!log.checkout(checkpoint_id(unsafe_output)).has_value(), "provider output was exposed as a safe checkpoint");
     require(!log.checkout(checkpoint_id(unsafe_compaction)).has_value(), "within-task compaction was exposed as a safe idle checkpoint");
+}
+
+void test_checkpoint_branch_summaries_are_bounded() {
+    constexpr usize k_branch_levels = 2'000;
+    session::Session log;
+    const auto root_task = log.start_task("comb root");
+    const auto root = log.append(session::TaskFinished{.id = root_task});
+    auto spine = root;
+    for (usize level = 0; level < k_branch_levels; ++level) {
+        log.active_leaf = spine;
+        const auto side_task = log.start_task("side branch");
+        log.append(session::TaskFinished{.id = side_task});
+
+        log.active_leaf = spine;
+        const auto spine_task = log.start_task("spine branch");
+        spine = log.append(session::TaskFinished{.id = spine_task});
+    }
+
+    auto checkpoints = log.conversation_checkpoints();
+    require(checkpoints && checkpoints->size() == 1 + 2 * k_branch_levels, "large comb tree did not project every safe checkpoint");
+    require(checkpoints->front().id == checkpoint_id(root) && checkpoints->front().branch_leaf_count == k_branch_levels + 1 &&
+                checkpoints->front().branch_leaf_examples.size() == session::k_branch_leaf_example_limit,
+            "large comb root did not retain an exact count and bounded examples");
+    usize retained_examples = 0;
+    for (const auto &checkpoint : *checkpoints) {
+        require(checkpoint.branch_leaf_examples.size() <= session::k_branch_leaf_example_limit &&
+                    checkpoint.branch_leaf_examples.size() <= checkpoint.branch_leaf_count,
+                "checkpoint retained an unbounded or incoherent branch summary");
+        retained_examples += checkpoint.branch_leaf_examples.size();
+    }
+    require(retained_examples <= checkpoints->size() * session::k_branch_leaf_example_limit,
+            "branch projection storage did not remain linear in checkpoint count");
 }
 
 void test_fork_remaps_lifecycle_and_preserves_private_items() {
@@ -341,6 +374,7 @@ i32 run_all() {
     test_cumulative_token_usage();
     test_reply_selection();
     test_checkpoint_tree_projection();
+    test_checkpoint_branch_summaries_are_bounded();
     test_fork_remaps_lifecycle_and_preserves_private_items();
     return 0;
 }

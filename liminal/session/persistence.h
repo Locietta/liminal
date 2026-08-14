@@ -33,6 +33,10 @@ struct PersistenceQueue {
 
     SessionId session_id() const noexcept;
     PersistenceStatus status() const;
+    /// Publishes the first complete snapshot through an otherwise unused
+    /// queue. This is synchronous so a prepared session cannot become visible
+    /// before its initial transaction succeeds.
+    Result<void> publish_initial(const SessionDelta &delta);
     Result<void> flush();
 
 private:

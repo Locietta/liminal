@@ -934,7 +934,7 @@ void test_prepared_switch_is_atomic_and_explicit_about_unsaved_history() {
     }
 }
 
-void test_fork_preparation_is_independently_durable() {
+void test_fork_publication_is_deferred_and_independently_durable() {
     TemporaryDatabase database;
     auto store = session::Store::open(database.path);
     require(store.has_value(), "failed to open fork preparation store");
@@ -963,18 +963,28 @@ void test_fork_preparation_is_independently_durable() {
     });
     const auto checkpoint = source.append(session::TaskFinished{.id = task});
     const auto source_id = source.id;
+    const auto catalog_size = [&store]() {
+        auto page = store->page({.workspace_key = "workspace", .limit = 50});
+        require(page.has_value(), "failed to inspect fork preparation catalog");
+        return page->sessions.size();
+    };
+    require(catalog_size() == 0, "fork preparation fixture started with an unexpected catalog row");
     session::SessionId fork_id;
     {
-        auto prepared = coordinator.prepare_fork(source, checkpoint_id(checkpoint));
-        require(prepared && prepared->session.id != source.id &&
+        auto plan = coordinator.prepare_fork(source, checkpoint_id(checkpoint));
+        require(plan && plan->target_id() != source.id, "fork preparation did not create a distinct target plan");
+        fork_id = plan->target_id();
+        require(catalog_size() == 0, "fork preparation published its target before authorization");
+        auto prepared = coordinator.publish_fork(*std::move(plan));
+        require(prepared && prepared->session.id == fork_id &&
                     prepared->session.metadata.forked_from == session::ForkOrigin{source.id, checkpoint} &&
                     prepared->session.entries.size() == source.entries.size(),
-                "fork preparation did not create a distinct coherent target");
-        fork_id = prepared->session.id;
+                "fork publication did not produce a distinct coherent target");
         const auto *opaque = std::get_if<session::OutputItemCompleted>(&prepared->session.entries[1].payload);
         require(opaque && std::holds_alternative<provider::ProviderOpaqueItem>(opaque->item),
-                "prepared fork lost provider-private history");
+                "published fork lost provider-private history");
     }
+    require(catalog_size() == 1, "authorized fork publication did not add exactly one catalog row");
 
     const auto later_task = source.start_task("source changes independently");
     source.append(session::TaskFinished{.id = later_task});
@@ -994,8 +1004,8 @@ void test_fork_preparation_is_independently_durable() {
     application::SessionCoordinator projection_coordinator(*store, std::move(projection_services));
     auto projection_failure = projection_coordinator.prepare_fork(source, checkpoint_id(checkpoint));
     require(!projection_failure && projection_failure.error().detail.contains("projection") && source.entries.size() == source_entries &&
-                source.active_leaf == source_leaf,
-            "fork projection failure disturbed the source session");
+                source.active_leaf == source_leaf && catalog_size() == 1,
+            "fork projection failure disturbed the source session or leaked a catalog row");
 
     auto model_services = preparation_services(models);
     model_services.resolve_model =
@@ -1005,8 +1015,29 @@ void test_fork_preparation_is_independently_durable() {
     application::SessionCoordinator model_coordinator(*store, std::move(model_services));
     auto model_failure = model_coordinator.prepare_fork(source, checkpoint_id(checkpoint));
     require(!model_failure && model_failure.error().detail.contains("model") && source.entries.size() == source_entries &&
-                source.active_leaf == source_leaf,
-            "fork model-resolution failure disturbed the source session");
+                source.active_leaf == source_leaf && catalog_size() == 1,
+            "fork model-resolution failure disturbed the source session or leaked a catalog row");
+
+    auto unavailable_persistence_services = preparation_services(models);
+    unavailable_persistence_services.persistence = [](session::SessionWriter) -> std::shared_ptr<session::PersistenceQueue> { return {}; };
+    application::SessionCoordinator unavailable_persistence_coordinator(*store, std::move(unavailable_persistence_services));
+    auto persistence_preparation_failure = unavailable_persistence_coordinator.prepare_fork(source, checkpoint_id(checkpoint));
+    require(!persistence_preparation_failure && persistence_preparation_failure.error().detail.contains("empty persistence queue") &&
+                catalog_size() == 1,
+            "fork persistence preparation failure leaked a catalog row");
+
+    auto persistence_services = preparation_services(models);
+    persistence_services.persistence = [](session::SessionWriter writer) {
+        return session::PersistenceQueue::create_for_test(writer.session_id(), [](const session::SessionDelta &) -> Result<void> {
+            return lighter::outcome_error(Error::storage("injected initial fork publication failure"));
+        });
+    };
+    application::SessionCoordinator persistence_coordinator(*store, std::move(persistence_services));
+    auto failed_plan = persistence_coordinator.prepare_fork(source, checkpoint_id(checkpoint));
+    require(failed_plan.has_value(), "failed to prepare initial-publication failure fixture");
+    auto publication_failure = persistence_coordinator.publish_fork(*std::move(failed_plan));
+    require(!publication_failure && publication_failure.error().detail.contains("publication") && catalog_size() == 1,
+            "failed initial fork publication leaked a partial catalog row");
 }
 
 lighter::Task<lighter::Error> drive_session_picker(tui::SelectableListDialog &dialog, tui::ConsoleRenderer &renderer,
@@ -1072,6 +1103,10 @@ lighter::Task<lighter::Error> drive_history_dialog(tui::SelectableListDialog &di
     if (!abandon_unsaved) co_return lighter::Error{};
 
     co_await dialog.wait_until_active();
+    if (!renderer.selectable_list || !renderer.selectable_list->description.contains("The selected prefix will be saved in the fork") ||
+        renderer.selectable_list->description.contains("will not be resumable")) {
+        co_return lighter::Error::k_invalid_argument;
+    }
     if (*abandon_unsaved) {
         if (auto error = dialog.apply(tui::SelectableListAction::DOWN)) co_return error;
     }
@@ -1304,15 +1339,24 @@ void test_history_command_is_atomic_and_uses_focused_dialogs() {
     require(!unsaved_renderer.load_transcript(tui::project_transcript(unsaved_agent.session, tools)),
             "failed to seed unsaved history transcript");
     tui::SelectableListDialog unsaved_dialog;
+    const auto catalog_size = [&store]() {
+        auto page = store->page({.workspace_key = "workspace", .limit = 50});
+        require(page.has_value(), "failed to inspect history command catalog");
+        return page->sessions.size();
+    };
+    const auto catalog_size_before_decline = catalog_size();
 
     run_history_command(unsaved_agent, coordinator, unsaved_renderer, unsaved_dialog, unsaved_checkpoint, HistoryAction::FORK, false);
     require(unsaved_agent.session.id == unsaved_id && unsaved_agent.session.active_leaf == unsaved_checkpoint &&
-                unsaved_renderer.screen.transcript.blocks.front().text == "unsaved source",
-            "declining fork abandonment changed the current session or transcript");
+                unsaved_renderer.screen.transcript.blocks.front().text == "unsaved source" && catalog_size() == catalog_size_before_decline,
+            "declining fork publication changed live state or leaked a catalog row");
+    run_history_command(unsaved_agent, coordinator, unsaved_renderer, unsaved_dialog, unsaved_checkpoint, HistoryAction::FORK, false);
+    require(catalog_size() == catalog_size_before_decline, "repeated declined forks accumulated duplicate catalog rows");
     run_history_command(unsaved_agent, coordinator, unsaved_renderer, unsaved_dialog, unsaved_checkpoint, HistoryAction::FORK, true);
     require(unsaved_agent.session.id != unsaved_id &&
                 unsaved_agent.session.metadata.forked_from == session::ForkOrigin{unsaved_id, unsaved_checkpoint} &&
-                unsaved_renderer.screen.transcript.blocks.front().text == "unsaved source",
+                unsaved_renderer.screen.transcript.blocks.front().text == "unsaved source" &&
+                catalog_size() == catalog_size_before_decline + 1,
             "explicit unsaved-tail abandonment did not switch to the prepared fork coherently");
 }
 
@@ -1610,7 +1654,7 @@ i32 run_all() {
     test_session_catalog_mutations_persist_and_respect_ownership();
     test_durable_acquisition_precedes_live_model_resolution();
     test_prepared_switch_is_atomic_and_explicit_about_unsaved_history();
-    test_fork_preparation_is_independently_durable();
+    test_fork_publication_is_deferred_and_independently_durable();
     test_resume_command_transaction_preserves_or_swaps_complete_state();
     test_history_command_is_atomic_and_uses_focused_dialogs();
     test_recovery_never_replays_tools();

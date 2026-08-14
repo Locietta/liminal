@@ -29,6 +29,23 @@ struct PreparedSession {
     std::vector<std::string> notices;
 };
 
+/// An unpublished, fully prepared fork. Destroying the plan releases its
+/// target lease without adding a session to the durable catalog.
+struct ForkPlan {
+    ForkPlan(ForkPlan &&) noexcept = default;
+    ForkPlan &operator=(ForkPlan &&) noexcept = default;
+    ForkPlan(const ForkPlan &) = delete;
+    ForkPlan &operator=(const ForkPlan &) = delete;
+
+    session::SessionId target_id() const noexcept { return target.session.id; }
+
+private:
+    friend struct SessionCoordinator;
+    explicit ForkPlan(PreparedSession target) : target(std::move(target)) {}
+
+    PreparedSession target;
+};
+
 struct AcquiredSession {
     session::Session session;
     std::vector<tui::Block> transcript;
@@ -97,9 +114,9 @@ struct SessionCoordinator {
     Result<AcquiredSession> acquire(session::SessionId id) const;
     Result<PreparedSession> resolve_model(AcquiredSession acquired) const;
     Result<PreparedSession> prepare(session::SessionId id) const;
-    Result<PreparedSession> prepare_fork(const session::Session &source, session::ConversationCheckpointId checkpoint) const;
+    Result<ForkPlan> prepare_fork(const session::Session &source, session::ConversationCheckpointId checkpoint) const;
+    Result<PreparedSession> publish_fork(ForkPlan plan) const;
     Result<SessionSwitch> begin_switch(session::SessionId current, session::SessionId target) const;
-    Result<SessionSwitch> begin_fork_switch(const session::Session &source, session::ConversationCheckpointId checkpoint) const;
     Result<void> mutate_inactive(session::SessionId id, const SessionCatalogMutation &mutation) const;
 
 private:

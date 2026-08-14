@@ -70,6 +70,20 @@ Result<void> open_unsaved_confirmation(SelectableListDialog &dialog, ConsoleRend
     return {};
 }
 
+Result<void> open_unsaved_fork_confirmation(SelectableListDialog &dialog, ConsoleRenderer &renderer) {
+    SelectableList list("Fork while the source is not saved?", "",
+                        SelectableListPage{.items = {
+                                               {.id = "stay", .primary = "Stay and cancel the fork"},
+                                               {.id = "fork", .primary = "Create the fork and switch"},
+                                           }});
+    list.description = "The selected prefix will be saved in the fork. Unsaved source-only history or metadata may remain unavailable "
+                       "from the source; external tool effects are not undone.";
+    if (auto error = dialog.begin(renderer, std::move(list))) {
+        return lighter::outcome_error(Error::protocol("cannot render fork confirmation: " + std::string(error.message())));
+    }
+    return {};
+}
+
 Result<void> mutate_selected_session(Agent &agent, application::SessionCoordinator &sessions, session::SessionId id,
                                      const application::SessionCatalogMutation &mutation) {
     if (id != agent.session.id) return sessions.mutate_inactive(id, mutation);
@@ -118,13 +132,12 @@ SelectableList history_list(const std::vector<session::ConversationCheckpoint> &
         } else {
             secondary += " · preserved branch";
         }
-        secondary += checkpoint.branch_leaves.size() == 1 ? " · branch" : " · branches";
-        constexpr usize k_visible_branch_ids = 4;
-        for (usize index = 0; index < std::min(checkpoint.branch_leaves.size(), k_visible_branch_ids); ++index) {
-            secondary += " #" + std::to_string(checkpoint.branch_leaves[index].entry.value);
+        secondary += checkpoint.branch_leaf_count == 1 ? " · branch" : " · branches";
+        for (const auto leaf : checkpoint.branch_leaf_examples) {
+            secondary += " #" + std::to_string(leaf.entry.value);
         }
-        if (checkpoint.branch_leaves.size() > k_visible_branch_ids) {
-            secondary += " +" + std::to_string(checkpoint.branch_leaves.size() - k_visible_branch_ids);
+        if (checkpoint.branch_leaf_count > checkpoint.branch_leaf_examples.size()) {
+            secondary += " +" + std::to_string(checkpoint.branch_leaf_count - checkpoint.branch_leaf_examples.size());
         }
         page.items.push_back(
             {.id = std::to_string(checkpoint.id.entry.value), .primary = std::move(primary), .secondary = std::move(secondary)});
@@ -183,6 +196,41 @@ lighter::Task<lighter::Error> finish_switch(Agent &agent, ConsoleRenderer &rende
     if (abandoned_unsaved_history) {
         if (auto error = renderer.notice("[switched sessions; the old unsaved history was abandoned and external tool effects were not "
                                          "undone]\n"))
+            co_return error;
+    }
+    co_return renderer.status(std::move(success_status));
+}
+
+lighter::Task<lighter::Error> publish_and_switch_to_fork(Agent &agent, ConsoleRenderer &renderer, SelectableListDialog &dialog,
+                                                         application::SessionCoordinator &sessions, application::ForkPlan plan,
+                                                         std::string success_status) {
+    auto *source_queue = agent.session.persistence_queue();
+    bool confirmation_required = source_queue == nullptr;
+    if (source_queue) {
+        auto flushed = source_queue->flush();
+        confirmation_required = !flushed;
+    }
+    bool source_history_unsaved = false;
+    if (confirmation_required) {
+        auto confirmation = open_unsaved_fork_confirmation(dialog, renderer);
+        if (!confirmation) co_return renderer.notice("[fork error: " + confirmation.error().message() + "]\n");
+        auto decision = co_await dialog.next();
+        if (!decision || *decision != "fork") co_return lighter::Error{};
+        source_history_unsaved = !source_queue || source_queue->status().pending_mutations != 0;
+    }
+
+    auto published = sessions.publish_fork(std::move(plan));
+    if (!published) co_return renderer.notice("[fork error: " + published.error().message() + "]\n");
+    auto prepared = *std::move(published);
+    if (auto error = renderer.load_transcript(std::move(prepared.transcript))) co_return error;
+    agent.replace_session(std::move(prepared.model), std::move(prepared.session));
+    if (auto error = renderer.render(ModelSelected{.name = agent.model.entry.id, .effort = agent.model.reasoning_effort})) co_return error;
+    for (const auto &notice : prepared.notices) {
+        if (auto error = renderer.notice(notice)) co_return error;
+    }
+    if (source_history_unsaved) {
+        if (auto error = renderer.notice("[forked the selected prefix; unsaved source-only history or metadata may remain unavailable "
+                                         "from the source session, and external tool effects were not undone]\n"))
             co_return error;
     }
     co_return renderer.status(std::move(success_status));
@@ -293,10 +341,10 @@ lighter::Task<lighter::Error> navigate_conversation(Agent &agent, application::S
     }
 
     if (*action != "fork") co_return renderer.notice("[history error: unknown checkpoint action]\n");
-    auto switching = sessions->begin_fork_switch(agent.session, *checkpoint);
-    if (!switching) co_return renderer.notice("[fork error: " + switching.error().message() + "]\n");
-    co_return co_await finish_switch(agent, renderer, dialog, *std::move(switching),
-                                     "Forked from checkpoint #" + std::to_string(checkpoint->entry.value));
+    auto plan = sessions->prepare_fork(agent.session, *checkpoint);
+    if (!plan) co_return renderer.notice("[fork error: " + plan.error().message() + "]\n");
+    co_return co_await publish_and_switch_to_fork(agent, renderer, dialog, *sessions, *std::move(plan),
+                                                  "Forked from checkpoint #" + std::to_string(checkpoint->entry.value));
 }
 
 } // namespace liminal::tui

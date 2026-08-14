@@ -93,4 +93,6 @@ After selecting a checkpoint, choose one of these actions:
 
 Only coherent idle boundaries are selectable. Provider-call and tool lifecycle records are not shown as rewind points. An empty conversation reports that there are no completed checkpoints.
 
-Checkout and fork change conversation context only. They do not undo file edits, commands, processes, network requests, or any other external tool effects. The action dialog states this before either operation. Fork switching uses the same unsaved-history warning as `/resume`; choosing to stay preserves the current session and transcript, while explicit abandonment switches to the prepared fork.
+Checkout and fork change conversation context only. They do not undo file edits, commands, processes, network requests, or any other external tool effects. The action dialog states this before either operation.
+
+Liminal does not add a prepared fork to `/resume` until the switch is authorized. If the source session cannot finish saving, a fork-specific warning explains that the selected prefix will be saved in the fork while unsaved source-only descendants or metadata may remain unavailable from the source. Choosing to stay cancels the fork without creating a session; explicit continuation publishes the fork and switches to it.

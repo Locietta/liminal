@@ -148,14 +148,11 @@ Result<PreparedSession> SessionCoordinator::prepare(session::SessionId id) const
     return resolve_model(*std::move(acquired));
 }
 
-Result<PreparedSession> SessionCoordinator::prepare_fork(const session::Session &source,
-                                                         session::ConversationCheckpointId checkpoint) const {
+Result<ForkPlan> SessionCoordinator::prepare_fork(const session::Session &source, session::ConversationCheckpointId checkpoint) const {
     auto fork = source.fork_at(checkpoint);
     if (!fork) return lighter::outcome_error(std::move(fork).error());
     auto writer = store.lease(fork->id);
     if (!writer) return lighter::outcome_error(std::move(writer).error());
-    auto committed = writer->commit(session::make_delta(*fork, fork->entries));
-    if (!committed) return lighter::outcome_error(std::move(committed).error());
 
     AcquiredSession acquired{.session = *std::move(fork)};
     auto queue = services.persistence(*std::move(writer));
@@ -164,19 +161,22 @@ Result<PreparedSession> SessionCoordinator::prepare_fork(const session::Session 
     auto transcript = services.project(acquired.session);
     if (!transcript) return lighter::outcome_error(std::move(transcript).error());
     acquired.transcript = *std::move(transcript);
-    return resolve_model(std::move(acquired));
+    auto prepared = resolve_model(std::move(acquired));
+    if (!prepared) return lighter::outcome_error(std::move(prepared).error());
+    return ForkPlan(*std::move(prepared));
+}
+
+Result<PreparedSession> SessionCoordinator::publish_fork(ForkPlan plan) const {
+    auto *queue = plan.target.session.persistence_queue();
+    if (!queue) return lighter::outcome_error(Error::protocol("prepared fork has no persistence queue"));
+    auto published = queue->publish_initial(session::make_delta(plan.target.session, plan.target.session.entries));
+    if (!published) return lighter::outcome_error(std::move(published).error());
+    return std::move(plan.target);
 }
 
 Result<SessionSwitch> SessionCoordinator::begin_switch(session::SessionId current, session::SessionId target) const {
     if (current == target) return SessionSwitch(SessionSwitchState::CURRENT_SELECTED);
     auto prepared = prepare(target);
-    if (!prepared) return lighter::outcome_error(std::move(prepared).error());
-    return SessionSwitch(SessionSwitchState::PREPARED, *std::move(prepared));
-}
-
-Result<SessionSwitch> SessionCoordinator::begin_fork_switch(const session::Session &source,
-                                                            session::ConversationCheckpointId checkpoint) const {
-    auto prepared = prepare_fork(source, checkpoint);
     if (!prepared) return lighter::outcome_error(std::move(prepared).error());
     return SessionSwitch(SessionSwitchState::PREPARED, *std::move(prepared));
 }

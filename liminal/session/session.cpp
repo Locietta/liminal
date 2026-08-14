@@ -337,12 +337,17 @@ Result<std::vector<ConversationCheckpoint>> Session::conversation_checkpoints() 
     }
     for (usize index = checkpoints.size(); index-- > 0;) {
         if (children[index].empty()) {
-            checkpoints[index].branch_leaves.push_back(checkpoints[index].id);
+            checkpoints[index].branch_leaf_count = 1;
+            checkpoints[index].branch_leaf_examples.push_back(checkpoints[index].id);
             continue;
         }
         for (const auto child : children[index]) {
-            checkpoints[index].branch_leaves.insert(checkpoints[index].branch_leaves.end(), checkpoints[child].branch_leaves.begin(),
-                                                    checkpoints[child].branch_leaves.end());
+            checkpoints[index].branch_leaf_count += checkpoints[child].branch_leaf_count;
+            const auto remaining = k_branch_leaf_example_limit - checkpoints[index].branch_leaf_examples.size();
+            const auto copied = std::min(remaining, checkpoints[child].branch_leaf_examples.size());
+            checkpoints[index].branch_leaf_examples.insert(checkpoints[index].branch_leaf_examples.end(),
+                                                           checkpoints[child].branch_leaf_examples.begin(),
+                                                           checkpoints[child].branch_leaf_examples.begin() + copied);
         }
     }
 

@@ -104,6 +104,23 @@ PersistenceStatus PersistenceQueue::status() const {
     return current_status;
 }
 
+Result<void> PersistenceQueue::publish_initial(const SessionDelta &delta) {
+    {
+        std::scoped_lock lock(mutex);
+        if (!pending.empty() || enqueued_mutations != 0 || persisted_mutations != 0 || commit_active) {
+            return lighter::outcome_error(Error::protocol("initial publication requires an unused persistence queue"));
+        }
+        commit_active = true;
+    }
+    auto published = commit(delta);
+    {
+        std::scoped_lock lock(mutex);
+        commit_active = false;
+    }
+    changed.notify_all();
+    return published;
+}
+
 void PersistenceQueue::mark_degraded(std::string detail) {
     std::scoped_lock lock(mutex);
     current_status.degraded = true;

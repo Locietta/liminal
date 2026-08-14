@@ -167,9 +167,11 @@ struct ConversationCheckpointId {
     auto operator<=>(const ConversationCheckpointId &) const = default;
 };
 
-/// A safe idle boundary projected from the append-only entry tree. Leaf IDs
-/// below a checkpoint are stable branch identities derived from durable
-/// history, not separately persisted branch records.
+inline constexpr usize k_branch_leaf_example_limit = 4;
+
+/// A safe idle boundary projected from the append-only entry tree. The leaf
+/// count and bounded examples describe stable branch identities derived from
+/// durable history, not separately persisted branch records.
 struct ConversationCheckpoint {
     ConversationCheckpointId id;
     std::optional<ConversationCheckpointId> parent_checkpoint;
@@ -180,7 +182,8 @@ struct ConversationCheckpoint {
     bool active = false;
     bool on_active_branch = false;
     usize direct_descendants = 0;
-    std::vector<ConversationCheckpointId> branch_leaves;
+    usize branch_leaf_count = 0;
+    std::vector<ConversationCheckpointId> branch_leaf_examples;
 };
 
 i64 unix_milliseconds_now() noexcept;
