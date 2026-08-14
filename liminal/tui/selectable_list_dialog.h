@@ -19,12 +19,14 @@ struct SelectableListDialog {
     lighter::Error begin(ConsoleRenderer &renderer, SelectableList list, LoadPage load_page = {});
     bool active() const noexcept;
     lighter::Error apply(SelectableListAction action);
+    lighter::Task<> wait_until_active();
     lighter::Task<std::optional<std::string>> next();
 
 private:
     ConsoleRenderer *renderer = nullptr;
     LoadPage load_page;
     std::optional<std::optional<std::string>> decision;
+    lighter::Event opened;
     lighter::Event ready;
 };
 

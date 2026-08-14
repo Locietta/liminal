@@ -8,11 +8,18 @@ lighter::Error SelectableListDialog::begin(ConsoleRenderer &renderer, Selectable
     this->renderer = &renderer;
     this->load_page = std::move(load_page);
     decision.reset();
+    opened.reset();
     ready.reset();
-    return renderer.show_selectable_list(std::move(list));
+    if (auto error = renderer.show_selectable_list(std::move(list))) return error;
+    opened.set();
+    return {};
 }
 
 bool SelectableListDialog::active() const noexcept { return renderer && renderer->selectable_list_active(); }
+
+lighter::Task<> SelectableListDialog::wait_until_active() {
+    if (!active()) co_await opened.wait();
+}
 
 lighter::Error SelectableListDialog::apply(SelectableListAction action) {
     SelectableListEffect effect = SelectableListEffect::NONE;
@@ -20,7 +27,7 @@ lighter::Error SelectableListDialog::apply(SelectableListAction action) {
     if (effect == SelectableListEffect::LOAD_NEXT_PAGE) {
         auto page = load_page();
         return page ? renderer->append_selectable_list_page(*std::move(page)) :
-                      renderer->fail_selectable_list_page("Cannot load sessions: " + page.error().detail);
+                      renderer->fail_selectable_list_page("Cannot load next page: " + page.error().detail);
     }
     if (effect == SelectableListEffect::CONFIRMED) {
         decision = std::string(*renderer->selectable_list_selection());
@@ -31,6 +38,7 @@ lighter::Error SelectableListDialog::apply(SelectableListAction action) {
     }
     if (auto error = renderer->close_selectable_list()) return error;
     renderer = nullptr;
+    opened.reset();
     ready.set();
     return {};
 }

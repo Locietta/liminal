@@ -36,8 +36,43 @@ void apply_mutation(session::Session &value, const SessionCatalogMutation &mutat
 
 } // namespace
 
+SessionPreparationServices::SessionPreparationServices(TranscriptProjector project, ModelResolver resolve_model,
+                                                       PersistenceFactory persistence)
+    : persistence(std::move(persistence)), project(std::move(project)), resolve_model(std::move(resolve_model)) {}
+
+Result<SessionModelResolution> resolve_session_model(model::Catalog &models, const std::optional<std::string> &configured_model,
+                                                     const std::optional<session::SessionModelPreference> &stored_model) {
+    if (configured_model) {
+        auto selected = models.select(*configured_model);
+        if (!selected) return lighter::outcome_error(std::move(selected).error());
+        return SessionModelResolution{.model = *std::move(selected)};
+    }
+    if (models.entries().empty()) return lighter::outcome_error(Error::config("no configured models"));
+
+    const auto &fallback = models.entries().front();
+    const auto fallback_selector = fallback.provider + "/" + fallback.id;
+    if (!stored_model) {
+        auto selected = models.select(fallback_selector);
+        if (!selected) return lighter::outcome_error(std::move(selected).error());
+        return SessionModelResolution{.model = *std::move(selected)};
+    }
+
+    const auto stored_selector = stored_model_selector(*stored_model);
+    auto selected = models.select(stored_selector);
+    if (selected) return SessionModelResolution{.model = *std::move(selected)};
+
+    auto fallback_choice = models.select(fallback_selector);
+    if (!fallback_choice) return lighter::outcome_error(std::move(fallback_choice).error());
+    return SessionModelResolution{
+        .model = *std::move(fallback_choice),
+        .notice = "[stored model " + stored_selector + " is unavailable; using " + fallback_selector + "]\n",
+    };
+}
+
 SessionCoordinator::SessionCoordinator(session::Store store, SessionPreparationServices services)
     : store(std::move(store)), services(std::move(services)) {
+    lighter::check(static_cast<bool>(this->services.project), "session preparation requires a transcript projector");
+    lighter::check(static_cast<bool>(this->services.resolve_model), "session preparation requires a model resolver");
     if (!this->services.persistence) {
         this->services.persistence = [](session::SessionWriter writer) { return session::PersistenceQueue::create(std::move(writer)); };
     }
@@ -63,46 +98,54 @@ void SessionSwitch::resolve_unsaved(UnsavedSwitchDecision decision, const sessio
     current_state = SessionSwitchState::READY;
 }
 
-PreparedSession SessionSwitch::take_target() {
+PreparedSession SessionSwitch::take_target() && {
     lighter::check(target.has_value(), "ready session switch has no prepared target");
-    return std::move(*target);
+    auto prepared = std::move(*target);
+    target.reset();
+    current_state = SessionSwitchState::CONSUMED;
+    return prepared;
 }
 
-Result<PreparedSession> SessionCoordinator::prepare(session::SessionId id) const {
+Result<AcquiredSession> SessionCoordinator::acquire(session::SessionId id) const {
     auto writer = store.lease(id);
     if (!writer) return lighter::outcome_error(std::move(writer).error());
     auto loaded = writer->load();
     if (!loaded) return lighter::outcome_error(std::move(loaded).error());
 
-    PreparedSession prepared{.session = *std::move(loaded)};
+    AcquiredSession acquired{.session = *std::move(loaded)};
     auto queue = services.persistence(*std::move(writer));
-    auto attached = prepared.session.attach_persistence(queue);
+    auto attached = acquired.session.attach_persistence(queue);
     if (!attached) return lighter::outcome_error(std::move(attached).error());
 
-    const auto recovered = session::recover_interrupted(prepared.session);
+    const auto recovered = session::recover_interrupted(acquired.session);
     if (recovered.recovered_tasks != 0) {
-        prepared.notices.push_back("[recovered an interrupted task; tools were not re-executed]\n");
+        acquired.notices.push_back("[recovered an interrupted task; tools were not re-executed]\n");
         auto flushed = queue->flush();
-        if (!flushed) prepared.notices.push_back("[session not saving: " + flushed.error().message() + "]\n");
+        if (!flushed) acquired.notices.push_back("[session not saving: " + flushed.error().message() + "]\n");
     }
 
-    auto transcript = services.project(prepared.session);
+    auto transcript = services.project(acquired.session);
     if (!transcript) return lighter::outcome_error(std::move(transcript).error());
-    prepared.transcript = *std::move(transcript);
+    acquired.transcript = *std::move(transcript);
+    return acquired;
+}
 
-    const bool use_stored_model = !services.configured_model && prepared.session.metadata.model_preference.has_value();
-    auto selector = services.configured_model.value_or(
-        use_stored_model ? stored_model_selector(*prepared.session.metadata.model_preference) : services.fallback_model);
-    auto selected = services.models->select(selector);
-    if (!selected && use_stored_model) {
-        auto fallback = services.models->select(services.fallback_model);
-        if (!fallback) return lighter::outcome_error(std::move(fallback).error());
-        prepared.notices.push_back("[stored model " + selector + " is unavailable; using " + services.fallback_model + "]\n");
-        selected = *std::move(fallback);
-    }
-    if (!selected) return lighter::outcome_error(std::move(selected).error());
-    prepared.model = *std::move(selected);
-    return prepared;
+Result<PreparedSession> SessionCoordinator::resolve_model(AcquiredSession acquired) const {
+    auto resolved = services.resolve_model(acquired.session.metadata.model_preference);
+    if (!resolved) return lighter::outcome_error(std::move(resolved).error());
+    if (resolved->notice) acquired.notices.push_back(std::move(*resolved->notice));
+    return PreparedSession{
+        .session = std::move(acquired.session),
+        .model = std::move(resolved->model),
+        .transcript = std::move(acquired.transcript),
+        .notices = std::move(acquired.notices),
+    };
+}
+
+Result<PreparedSession> SessionCoordinator::prepare(session::SessionId id) const {
+    auto acquired = acquire(id);
+    if (!acquired) return lighter::outcome_error(std::move(acquired).error());
+    return resolve_model(*std::move(acquired));
 }
 
 Result<SessionSwitch> SessionCoordinator::begin_switch(session::SessionId current, session::SessionId target) const {

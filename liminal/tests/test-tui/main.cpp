@@ -19,6 +19,7 @@
 #include <liminal/tui/headless.h>
 #include <liminal/tui/external_editor.h>
 #include <liminal/tui/rich_text.h>
+#include <liminal/tui/selectable_list_dialog.h>
 #include <liminal/tui/session_screen.h>
 #include <liminal/tui/surface.h>
 #include <liminal/tui/syntax_highlight.h>
@@ -959,6 +960,20 @@ void check_headless_selectable_list() {
             "page failure must render without losing the selected item identity");
 }
 
+void check_selectable_dialog_uses_generic_page_errors() {
+    tui::ConsoleRenderer renderer;
+    tui::SelectableListDialog dialog;
+    tui::SelectableList list("Choose item", "No items",
+                             tui::SelectableListPage{.items = {{.id = "first", .primary = "First"}}, .has_more = true});
+    auto begun = dialog.begin(renderer, std::move(list),
+                              []() -> Result<tui::SelectableListPage> { return lighter::outcome_error(Error::storage("catalog failed")); });
+    require(!begun, "selectable dialog fixture failed to open");
+    require(!dialog.apply(tui::SelectableListAction::PAGE_DOWN), "selectable dialog page failure did not render");
+    require(renderer.selectable_list &&
+                frame_text(renderer.selectable_list->frame(60, 8)).contains("Cannot load next page: catalog failed"),
+            "reusable selectable dialog used domain-specific page error wording");
+}
+
 void check_headless_resize_and_markup_stress() {
     tui::HeadlessSession session(80, 24);
     u32 state = 0x243f6a88;
@@ -1031,6 +1046,7 @@ i32 run_all(std::string_view executable) {
     check_mouse_selection();
     check_headless_virtual_time_and_snapshots();
     check_headless_selectable_list();
+    check_selectable_dialog_uses_generic_page_errors();
     check_headless_resize_and_markup_stress();
     return 0;
 }

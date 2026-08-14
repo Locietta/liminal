@@ -21,6 +21,7 @@
 #include <lighter/async/io/loop.h>
 
 #include <liminal/application/session_coordinator.h>
+#include <liminal/agent/agent.h>
 #include <liminal/context/context.h>
 #include <liminal/model/catalog.h>
 #include <liminal/session/codec.h>
@@ -30,6 +31,9 @@
 #include <liminal/session/store.h>
 #include <liminal/tools/tools.h>
 #include <liminal/tui/hydration.h>
+#include <liminal/tui/console_renderer.h>
+#include <liminal/tui/selectable_list_dialog.h>
+#include <liminal/tui/session_commands.h>
 
 namespace {
 
@@ -42,8 +46,13 @@ concept PubliclyEnqueueable = requires(T &queue, session::SessionDelta delta) { 
 template <typename T>
 concept PubliclyDegradable = requires(T &queue) { queue.mark_degraded("failure"); };
 
+template <typename T>
+concept LvalueTargetTakeable = requires(T &value) { value.take_target(); };
+
 static_assert(!std::default_initializable<session::Store>);
 static_assert(!std::default_initializable<session::SessionWriter>);
+static_assert(!std::default_initializable<application::SessionPreparationServices>);
+static_assert(!LvalueTargetTakeable<application::SessionSwitch>);
 static_assert(std::movable<session::Session>);
 static_assert(!std::copy_constructible<session::Session>);
 static_assert(!std::assignable_from<session::Session &, const session::Session &>);
@@ -139,16 +148,42 @@ model::Catalog test_model_catalog() {
     return catalog;
 }
 
+model::Catalog changing_model_catalog(const std::shared_ptr<std::string> &model_id) {
+    return model::Catalog(model::CatalogSources{
+        .load = [model_id]() -> Result<provider::Registry> {
+            provider::Registry registry;
+            registry.providers.push_back({
+                .id = "test",
+                .name = "Test",
+                .api = provider::ApiType::OPENAI_RESPONSES,
+                .base_url = "https://example.invalid",
+                .models = {{.provider = "test", .id = *model_id, .name = *model_id}},
+            });
+            return registry;
+        },
+        .discover = [](const provider::Registry &, const provider::Instance &)
+            -> lighter::Task<std::vector<provider::DiscoveredModel>, Error> { co_return std::vector<provider::DiscoveredModel>{}; },
+    });
+}
+
+void refresh_catalog(model::Catalog &catalog) {
+    lighter::EventLoop loop;
+    auto refreshed = catalog.refresh();
+    loop.schedule(refreshed);
+    loop.run();
+    require(refreshed.result().has_value(), "failed to refresh model catalog fixture");
+}
+
 application::SessionPreparationServices preparation_services(model::Catalog &models) {
-    return {
-        .models = &models,
-        .fallback_model = "test/fallback",
-        .project = [](const session::Session &value) -> Result<std::vector<tui::Block>> {
+    return application::SessionPreparationServices(
+        [](const session::Session &value) -> Result<std::vector<tui::Block>> {
             return std::vector<tui::Block>{{.kind = tui::BlockKind::NOTICE,
                                             .state = tui::BlockState::COMPLETED,
                                             .text = "projected " + std::to_string(value.entries.size())}};
         },
-    };
+        [&models](const std::optional<session::SessionModelPreference> &stored_model) {
+            return application::resolve_session_model(models, std::nullopt, stored_model);
+        });
 }
 
 void persist_session(session::Store &store, const session::Session &value) {
@@ -649,7 +684,8 @@ void test_session_catalog_mutations_persist_and_respect_ownership() {
     value.start_task("catalog mutation");
     persist_session(*store, value);
 
-    application::SessionCoordinator coordinator(*store, {});
+    auto models = test_model_catalog();
+    application::SessionCoordinator coordinator(*store, preparation_services(models));
     require(coordinator.mutate_inactive(value.id, application::RenameSession{.title = "Named session"}).has_value(),
             "inactive session rename failed");
     require(coordinator.mutate_inactive(value.id, application::ArchiveSession{}).has_value(), "inactive session archive failed");
@@ -677,6 +713,46 @@ void test_session_catalog_mutations_persist_and_respect_ownership() {
     auto loaded = writer->load();
     require(loaded && loaded->metadata.title == "Named session" && !loaded->metadata.archived_at_ms,
             "restart did not hydrate persisted title and archive state");
+}
+
+void test_durable_acquisition_precedes_live_model_resolution() {
+    TemporaryDatabase database;
+    auto store = session::Store::open(database.path);
+    require(store.has_value(), "failed to open staged preparation store");
+
+    session::Session target;
+    target.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    target.metadata.working_directory = "workspace";
+    target.metadata.model_preference = session::SessionModelPreference{.provider = "missing", .model = "removed"};
+    target.start_task("staged preparation");
+    persist_session(*store, target);
+
+    auto current_model = std::make_shared<std::string>("first");
+    auto models = changing_model_catalog(current_model);
+    refresh_catalog(models);
+    usize resolutions = 0;
+    application::SessionPreparationServices services(
+        [](const session::Session &) -> Result<std::vector<tui::Block>> {
+            return std::vector<tui::Block>{{.kind = tui::BlockKind::USER, .text = "acquired transcript"}};
+        },
+        [&models, &resolutions](const std::optional<session::SessionModelPreference> &stored_model) {
+            ++resolutions;
+            return application::resolve_session_model(models, std::nullopt, stored_model);
+        });
+    application::SessionCoordinator coordinator(*store, std::move(services));
+
+    auto acquired = coordinator.acquire(target.id);
+    require(acquired && resolutions == 0, "durable acquisition consulted model policy before discovery completed");
+    auto conflicting_lease = store->lease(target.id);
+    require(!conflicting_lease && conflicting_lease.error().detail.contains("in use"),
+            "durable acquisition did not retain exclusive ownership before model discovery");
+
+    *current_model = "second";
+    refresh_catalog(models);
+    auto prepared = coordinator.resolve_model(*std::move(acquired));
+    require(prepared && resolutions == 1 && prepared->model.entry.id == "second" &&
+                std::ranges::any_of(prepared->notices, [](const std::string &notice) { return notice.contains("using test/second"); }),
+            "session completion did not resolve fallback policy from the refreshed catalog");
 }
 
 void test_prepared_switch_is_atomic_and_explicit_about_unsaved_history() {
@@ -734,7 +810,9 @@ void test_prepared_switch_is_atomic_and_explicit_about_unsaved_history() {
             "projection failure disturbed the live session");
 
     auto invalid_model_services = preparation_services(models);
-    invalid_model_services.configured_model = "test/does-not-exist";
+    invalid_model_services.resolve_model = [&models](const std::optional<session::SessionModelPreference> &stored_model) {
+        return application::resolve_session_model(models, std::optional<std::string>{"test/does-not-exist"}, stored_model);
+    };
     application::SessionCoordinator invalid_model_coordinator(*store, std::move(invalid_model_services));
     auto model_failure = invalid_model_coordinator.begin_switch(live.id, target.id);
     require(!model_failure && model_failure.error().detail.contains("unknown model") && live.entries.size() == live_entries,
@@ -754,7 +832,10 @@ void test_prepared_switch_is_atomic_and_explicit_about_unsaved_history() {
         require(degraded_switch && degraded_switch->state() == application::SessionSwitchState::PREPARED,
                 "target recovery persistence degradation incorrectly rejected the prepared target");
         degraded_switch->flush_current(nullptr);
-        auto degraded_target = degraded_switch->take_target();
+        auto &switch_state = *degraded_switch;
+        auto degraded_target = std::move(switch_state).take_target();
+        require(switch_state.state() == application::SessionSwitchState::CONSUMED,
+                "taking a prepared target did not consume its switch state");
         const auto degraded_status = degraded_target.session.persistence_queue()->status();
         require(degraded_status.degraded && degraded_status.pending_mutations != 0 &&
                     std::ranges::any_of(degraded_target.notices, [](const std::string &notice) { return notice.contains("not saving"); }) &&
@@ -787,7 +868,10 @@ void test_prepared_switch_is_atomic_and_explicit_about_unsaved_history() {
                 "valid target did not reach the prepared switch state");
         switching->flush_current(nullptr);
         require(switching->state() == application::SessionSwitchState::READY, "a session without queued persistence did not become ready");
-        auto prepared = switching->take_target();
+        auto &switch_state = *switching;
+        auto prepared = std::move(switch_state).take_target();
+        require(switch_state.state() == application::SessionSwitchState::CONSUMED,
+                "successful target extraction did not become single-use");
         require(prepared.session.entries.size() > target.entries.size() && !prepared.notices.empty() &&
                     prepared.notices.back().contains("stored model") && prepared.model.entry.id == "fallback" &&
                     std::holds_alternative<provider::ProviderOpaqueItem>(
@@ -835,6 +919,121 @@ void test_prepared_switch_is_atomic_and_explicit_about_unsaved_history() {
         require(switching->state() == application::SessionSwitchState::READY && !switching->abandoned_unsaved_history(),
                 "a tail saved during confirmation was still classified as abandoned");
     }
+}
+
+lighter::Task<lighter::Error> drive_session_picker(tui::SelectableListDialog &dialog, tui::ConsoleRenderer &renderer,
+                                                   std::optional<session::SessionId> selection) {
+    co_await dialog.wait_until_active();
+    if (!selection) co_return dialog.apply(tui::SelectableListAction::CANCEL);
+
+    const auto target = session::to_string(*selection);
+    for (usize attempts = 0; attempts < 50 && renderer.selectable_list_selection() != std::optional<std::string_view>{target}; ++attempts) {
+        if (auto error = dialog.apply(tui::SelectableListAction::DOWN)) co_return error;
+    }
+    if (renderer.selectable_list_selection() != std::optional<std::string_view>{target}) {
+        co_return lighter::Error::k_invalid_argument;
+    }
+    co_return dialog.apply(tui::SelectableListAction::CONFIRM);
+}
+
+enum struct ResumeExpectation {
+    CANCELLED,
+    PREPARATION_FAILED,
+    SWITCHED,
+};
+
+void exercise_resume_command(model::Catalog &models, ToolSet &tools, application::SessionCoordinator &coordinator,
+                             session::SessionId target, ResumeExpectation expectation) {
+    auto current_model = models.select("test/fallback");
+    require(current_model.has_value(), "failed to select current model for resume command fixture");
+    session::Session current;
+    current.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    current.metadata.working_directory = "workspace";
+    const auto current_id = current.id;
+    Agent agent(*std::move(current_model), tools, {}, std::move(current));
+
+    lighter::TerminalSession terminal;
+    tui::ConsoleRenderer renderer(&terminal);
+    renderer.pause_rendering();
+    require(!renderer.load_transcript({{.kind = tui::BlockKind::USER, .text = "current transcript"}}),
+            "failed to seed rendered current transcript");
+    tui::SelectableListDialog dialog;
+
+    lighter::EventLoop loop;
+    auto command = tui::resume_session(agent, &coordinator, renderer, dialog);
+    auto driver =
+        drive_session_picker(dialog, renderer, expectation == ResumeExpectation::CANCELLED ? std::nullopt : std::optional{target});
+    loop.schedule(command);
+    loop.schedule(driver);
+    loop.run();
+    require(!driver.result(), "deterministic resume picker driver failed");
+    require(!command.result(), "resume command returned a rendering error");
+
+    if (expectation == ResumeExpectation::SWITCHED) {
+        require(agent.session.id == target && agent.model.entry.id == "fallback" && !renderer.screen.transcript.blocks.empty() &&
+                    renderer.screen.transcript.blocks.front().text.starts_with("projected "),
+                "successful /resume did not atomically replace agent identity, model, and rendered transcript");
+        return;
+    }
+    require(agent.session.id == current_id && agent.model.entry.id == "fallback" && renderer.screen.transcript.blocks.size() == 1 &&
+                renderer.screen.transcript.blocks.front().text == "current transcript",
+            "cancelled or failed /resume changed the live agent or rendered transcript");
+}
+
+void test_resume_command_transaction_preserves_or_swaps_complete_state() {
+    TemporaryDatabase database;
+    auto store = session::Store::open(database.path);
+    require(store.has_value(), "failed to open resume command transaction store");
+    auto models = test_model_catalog();
+    ToolSet tools(database.directory);
+
+    session::Session target;
+    target.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    target.metadata.working_directory = "workspace";
+    target.start_task("target transcript");
+    persist_session(*store, target);
+
+    session::Session corrupt;
+    corrupt.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    corrupt.metadata.working_directory = "workspace";
+    corrupt.start_task("corrupt transcript");
+    persist_session(*store, corrupt);
+    sqlite3 *raw = nullptr;
+    require(sqlite3_open(database.path.string().c_str(), &raw) == SQLITE_OK, "failed to open resume command corruption fixture");
+    sqlite3_stmt *corrupt_payload = nullptr;
+    require(sqlite3_prepare_v2(raw, "UPDATE session_entries SET payload_version=99 WHERE session_id=?1", -1, &corrupt_payload, nullptr) ==
+                SQLITE_OK,
+            "failed to prepare resume command corruption fixture");
+    sqlite3_bind_blob(corrupt_payload, 1, corrupt.id.bytes.data(), static_cast<int>(corrupt.id.bytes.size()), SQLITE_TRANSIENT);
+    require(sqlite3_step(corrupt_payload) == SQLITE_DONE, "failed to corrupt resume command target");
+    sqlite3_finalize(corrupt_payload);
+    sqlite3_close(raw);
+
+    application::SessionCoordinator coordinator(*store, preparation_services(models));
+    exercise_resume_command(models, tools, coordinator, target.id, ResumeExpectation::CANCELLED);
+    {
+        auto locked = store->lease(target.id);
+        require(locked.has_value(), "failed to hold resume command target lock");
+        exercise_resume_command(models, tools, coordinator, target.id, ResumeExpectation::PREPARATION_FAILED);
+    }
+    exercise_resume_command(models, tools, coordinator, corrupt.id, ResumeExpectation::PREPARATION_FAILED);
+
+    auto projection_services = preparation_services(models);
+    projection_services.project = [](const session::Session &) -> Result<std::vector<tui::Block>> {
+        return lighter::outcome_error(Error::protocol("injected projection failure"));
+    };
+    application::SessionCoordinator projection_coordinator(*store, std::move(projection_services));
+    exercise_resume_command(models, tools, projection_coordinator, target.id, ResumeExpectation::PREPARATION_FAILED);
+
+    auto model_services = preparation_services(models);
+    model_services.resolve_model =
+        [](const std::optional<session::SessionModelPreference> &) -> Result<application::SessionModelResolution> {
+        return lighter::outcome_error(Error::config("injected model resolution failure"));
+    };
+    application::SessionCoordinator model_coordinator(*store, std::move(model_services));
+    exercise_resume_command(models, tools, model_coordinator, target.id, ResumeExpectation::PREPARATION_FAILED);
+
+    exercise_resume_command(models, tools, coordinator, target.id, ResumeExpectation::SWITCHED);
 }
 
 void test_recovery_never_replays_tools() {
@@ -1122,7 +1321,9 @@ i32 run_all() {
     test_catalog_keyset_paging();
     test_large_catalog_uses_indexed_keyset_query();
     test_session_catalog_mutations_persist_and_respect_ownership();
+    test_durable_acquisition_precedes_live_model_resolution();
     test_prepared_switch_is_atomic_and_explicit_about_unsaved_history();
+    test_resume_command_transaction_preserves_or_swaps_complete_state();
     test_recovery_never_replays_tools();
     test_session_rejects_mismatched_persistence_queue();
     test_ordered_queue_failure_and_retry();

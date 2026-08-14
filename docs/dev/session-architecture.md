@@ -36,7 +36,9 @@ Provider context is derived from the active branch according to provider compati
 
 Session discovery reads bounded, indexed catalog metadata without decoding entry payloads. Workspace association is discovery metadata, not an execution sandbox: the current invocation still controls the working directory and instruction discovery.
 
-Interactive switching must preserve the current live session until the target lease, load, and transcript projection all succeed. Abandoning an unsaved tail requires an explicit user decision and does not imply that tool effects are reverted.
+Target preparation has two ordered stages. Durable acquisition takes the exclusive lease, loads and recovers the session, attaches persistence, and projects the transcript without depending on provider discovery. Model resolution then consults the current catalog and policy, so startup claims a requested session before discovery and interactive switching cannot retain a stale fallback.
+
+Interactive switching must preserve the current live session until both preparation stages succeed. Abandoning an unsaved tail requires an explicit user decision and does not imply that tool effects are reverted.
 
 ## Evolution constraints
 

@@ -90,18 +90,18 @@ Result<void> mutate_selected_session(Agent &agent, application::SessionCoordinat
 lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
                                              SelectableListDialog &dialog) {
     if (!sessions || !renderer.terminal || !agent.session.metadata.workspace) {
-        co_return renderer.notice("[resume picker is unavailable in this session]\n");
+        co_return renderer.status("Resume picker is unavailable in this session");
     }
     auto opened = open_session_picker(dialog, renderer, *sessions, agent.session.metadata.workspace->key,
                                       session::SessionCatalogState::ACTIVE, "Resume session", "No resumable sessions in this workspace");
-    if (!opened) co_return renderer.notice("[resume error: " + opened.error().message() + "]\n");
+    if (!opened) co_return renderer.status("Resume error: " + opened.error().message());
     auto choice = co_await dialog.next();
     if (!choice) co_return lighter::Error{};
     auto id = session::parse_session_id(*choice);
-    if (!id) co_return renderer.notice("[resume error: " + id.error().message() + "]\n");
+    if (!id) co_return renderer.status("Resume error: " + id.error().message());
 
     auto switching = sessions->begin_switch(agent.session.id, *id);
-    if (!switching) co_return renderer.notice("[resume error: " + switching.error().message() + "]\n");
+    if (!switching) co_return renderer.status("Resume error: " + switching.error().message());
     if (switching->state() == application::SessionSwitchState::CURRENT_SELECTED) {
         co_return renderer.status("Already in the selected session");
     }
@@ -110,14 +110,15 @@ lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionC
     switching->flush_current(current_queue);
     if (switching->state() == application::SessionSwitchState::AWAITING_UNSAVED_CONFIRMATION) {
         auto confirmation = open_unsaved_confirmation(dialog, renderer);
-        if (!confirmation) co_return renderer.notice("[resume error: " + confirmation.error().message() + "]\n");
+        if (!confirmation) co_return renderer.status("Resume error: " + confirmation.error().message());
         auto decision = co_await dialog.next();
         switching->resolve_unsaved(decision && *decision == "switch" ? application::UnsavedSwitchDecision::ABANDON_UNSAVED_HISTORY :
                                                                        application::UnsavedSwitchDecision::STAY,
                                    current_queue->status());
     }
     if (switching->state() == application::SessionSwitchState::CANCELLED) co_return lighter::Error{};
-    auto prepared = switching->take_target();
+    const auto abandoned_unsaved_history = switching->abandoned_unsaved_history();
+    auto prepared = std::move(*switching).take_target();
     if (auto error = renderer.load_transcript(std::move(prepared.transcript))) co_return error;
     const auto resumed_id = session::to_string(prepared.session.id).substr(0, 8);
     agent.replace_session(std::move(prepared.model), std::move(prepared.session));
@@ -125,7 +126,7 @@ lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionC
     for (const auto &notice : prepared.notices) {
         if (auto error = renderer.notice(notice)) co_return error;
     }
-    if (switching->abandoned_unsaved_history()) {
+    if (abandoned_unsaved_history) {
         if (auto error = renderer.notice("[switched sessions; the old unsaved history was abandoned and external tool effects were not "
                                          "undone]\n"))
             co_return error;

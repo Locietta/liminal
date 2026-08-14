@@ -29,13 +29,32 @@ struct PreparedSession {
     std::vector<std::string> notices;
 };
 
-struct SessionPreparationServices {
-    model::Catalog *models = nullptr;
-    std::optional<std::string> configured_model;
-    std::string fallback_model;
-    std::copyable_function<std::shared_ptr<session::PersistenceQueue>(session::SessionWriter) const> persistence;
-    std::copyable_function<Result<std::vector<tui::Block>>(const session::Session &) const> project;
+struct AcquiredSession {
+    session::Session session;
+    std::vector<tui::Block> transcript;
+    std::vector<std::string> notices;
 };
+
+struct SessionModelResolution {
+    model::Choice model;
+    std::optional<std::string> notice;
+};
+
+struct SessionPreparationServices {
+    using PersistenceFactory = std::copyable_function<std::shared_ptr<session::PersistenceQueue>(session::SessionWriter) const>;
+    using TranscriptProjector = std::copyable_function<Result<std::vector<tui::Block>>(const session::Session &) const>;
+    using ModelResolver =
+        std::copyable_function<Result<SessionModelResolution>(const std::optional<session::SessionModelPreference> &) const>;
+
+    SessionPreparationServices(TranscriptProjector project, ModelResolver resolve_model, PersistenceFactory persistence = {});
+
+    PersistenceFactory persistence;
+    TranscriptProjector project;
+    ModelResolver resolve_model;
+};
+
+Result<SessionModelResolution> resolve_session_model(model::Catalog &models, const std::optional<std::string> &configured_model,
+                                                     const std::optional<session::SessionModelPreference> &stored_model);
 
 enum struct SessionSwitchState {
     CURRENT_SELECTED,
@@ -43,6 +62,7 @@ enum struct SessionSwitchState {
     AWAITING_UNSAVED_CONFIRMATION,
     READY,
     CANCELLED,
+    CONSUMED,
 };
 
 enum struct UnsavedSwitchDecision {
@@ -57,7 +77,7 @@ struct SessionSwitch {
     void flush_current(session::PersistenceQueue *queue) pre(current_state == SessionSwitchState::PREPARED);
     void resolve_unsaved(UnsavedSwitchDecision decision, const session::PersistenceStatus &current_status)
         pre(current_state == SessionSwitchState::AWAITING_UNSAVED_CONFIRMATION);
-    PreparedSession take_target() pre(current_state == SessionSwitchState::READY);
+    PreparedSession take_target() && pre(current_state == SessionSwitchState::READY);
 
 private:
     friend struct SessionCoordinator;
@@ -74,6 +94,8 @@ struct SessionCoordinator {
     SessionCoordinator(session::Store store, SessionPreparationServices services);
 
     Result<session::SessionPage> page(const session::SessionPageQuery &query) const;
+    Result<AcquiredSession> acquire(session::SessionId id) const;
+    Result<PreparedSession> resolve_model(AcquiredSession acquired) const;
     Result<PreparedSession> prepare(session::SessionId id) const;
     Result<SessionSwitch> begin_switch(session::SessionId current, session::SessionId target) const;
     Result<void> mutate_inactive(session::SessionId id, const SessionCatalogMutation &mutation) const;
