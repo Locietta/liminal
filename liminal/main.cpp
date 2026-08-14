@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -12,6 +13,7 @@
 
 #include <liminal/agent/agent.h>
 #include <liminal/agent/default_instructions.h>
+#include <liminal/application/session_coordinator.h>
 #include <liminal/context/context.h>
 #include <liminal/context/project_instructions.h>
 #include <liminal/model/catalog.h>
@@ -19,9 +21,9 @@
 #include <liminal/provider/registry.h>
 #include <liminal/session/paths.h>
 #include <liminal/session/persistence.h>
-#include <liminal/session/recovery.h>
 #include <liminal/session/store.h>
 #include <liminal/tools/tools.h>
+#include <liminal/tui/hydration.h>
 #include <liminal/tui/repl.h>
 
 namespace {
@@ -46,15 +48,34 @@ struct StartupOptions {
 
 struct SessionSelection {
     session::Session session;
+    model::Choice model;
+    std::vector<tui::Block> transcript;
     std::vector<std::string> notices;
+    std::optional<application::SessionCoordinator> coordinator;
 };
 
 Result<SessionSelection> select_session(const StartupOptions &options, const std::filesystem::path &working_directory,
-                                        const session::WorkspaceIdentity &workspace) {
+                                        const session::WorkspaceIdentity &workspace, model::Catalog &models, ToolSet &tools) {
+    const auto configured_selector = env_or("LIMINAL_MODEL", "");
+    const auto &first_model = models.entries().front();
+    const auto fallback_selector = first_model.provider + "/" + first_model.id;
+    auto select_default_model = [&]() { return models.select(configured_selector.empty() ? fallback_selector : configured_selector); };
+    auto services = [&]() {
+        return application::SessionPreparationServices{
+            .models = &models,
+            .configured_model = configured_selector.empty() ? std::nullopt : std::optional{configured_selector},
+            .fallback_model = fallback_selector,
+            .project = [&tools](const session::Session &value) -> Result<std::vector<tui::Block>> {
+                return tui::project_transcript(value, tools);
+            },
+        };
+    };
     auto path = session::state_database_path();
     if (!path) {
         if (options.kind != StartupKind::NEW) return lighter::outcome_error(std::move(path).error());
-        SessionSelection selection;
+        auto selected_model = select_default_model();
+        if (!selected_model) return lighter::outcome_error(std::move(selected_model).error());
+        SessionSelection selection{.model = *std::move(selected_model)};
         selection.session.metadata.workspace = session::SessionWorkspace{.root = workspace.root, .key = workspace.key};
         selection.session.metadata.working_directory = working_directory.generic_string();
         auto attached =
@@ -67,7 +88,9 @@ Result<SessionSelection> select_session(const StartupOptions &options, const std
     auto opened = session::Store::open(*path);
     if (!opened) {
         if (options.kind != StartupKind::NEW) return lighter::outcome_error(std::move(opened).error());
-        SessionSelection selection;
+        auto selected_model = select_default_model();
+        if (!selected_model) return lighter::outcome_error(std::move(selected_model).error());
+        SessionSelection selection{.model = *std::move(selected_model)};
         selection.session.metadata.workspace = session::SessionWorkspace{.root = workspace.root, .key = workspace.key};
         selection.session.metadata.working_directory = working_directory.generic_string();
         auto queue = session::PersistenceQueue::create_reopening(*path, selection.session.id, opened.error().message());
@@ -77,9 +100,12 @@ Result<SessionSelection> select_session(const StartupOptions &options, const std
         return selection;
     }
     auto store = *std::move(opened);
+    application::SessionCoordinator coordinator(store, services());
 
     if (options.kind == StartupKind::NEW) {
-        SessionSelection selection;
+        auto selected_model = select_default_model();
+        if (!selected_model) return lighter::outcome_error(std::move(selected_model).error());
+        SessionSelection selection{.model = *std::move(selected_model), .coordinator = std::move(coordinator)};
         selection.session.metadata.workspace = session::SessionWorkspace{.root = workspace.root, .key = workspace.key};
         selection.session.metadata.working_directory = working_directory.generic_string();
         auto writer = store.lease(selection.session.id);
@@ -106,20 +132,15 @@ Result<SessionSelection> select_session(const StartupOptions &options, const std
         selected_id = latest->id;
     }
 
-    auto writer = store.lease(selected_id);
-    if (!writer) return lighter::outcome_error(std::move(writer).error());
-    auto loaded = writer->load();
-    if (!loaded) return lighter::outcome_error(std::move(loaded).error());
-    SessionSelection selection{.session = *std::move(loaded)};
-    auto queue = session::PersistenceQueue::create(*std::move(writer));
-    auto attached = selection.session.attach_persistence(queue);
-    if (!attached) return lighter::outcome_error(std::move(attached).error());
-    const auto recovered = session::recover_interrupted(selection.session);
-    if (recovered.recovered_tasks != 0) {
-        selection.notices.push_back("[recovered an interrupted task; tools were not re-executed]\n");
-        auto flushed = queue->flush();
-        if (!flushed) selection.notices.push_back("[session not saving: " + flushed.error().message() + "]\n");
-    }
+    auto prepared = coordinator.prepare(selected_id);
+    if (!prepared) return lighter::outcome_error(std::move(prepared).error());
+    SessionSelection selection{
+        .session = std::move(prepared->session),
+        .model = std::move(prepared->model),
+        .transcript = std::move(prepared->transcript),
+        .notices = std::move(prepared->notices),
+        .coordinator = std::move(coordinator),
+    };
     if (options.kind == StartupKind::RESUME && selection.session.metadata.workspace &&
         selection.session.metadata.workspace->key != workspace.key) {
         selection.notices.push_back("[workspace warning: session belongs to " + selection.session.metadata.workspace->root +
@@ -139,12 +160,6 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
         std::fprintf(stderr, "error: %s\n", workspace.error().message().c_str());
         co_return 1;
     }
-    auto selected_session = select_session(options, tools.working_directory, *workspace);
-    if (!selected_session) {
-        std::fprintf(stderr, "error: %s\n", selected_session.error().message().c_str());
-        co_return 1;
-    }
-
     auto refreshed = co_await models.refresh();
     if (!refreshed) {
         std::fprintf(stderr, "error: %s\n", refreshed.error().message().c_str());
@@ -159,31 +174,10 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
         co_return 1;
     }
 
-    auto selector = env_or("LIMINAL_MODEL", "");
-    const auto &metadata = selected_session->session.metadata;
-    if (selector.empty() && metadata.model_preference) {
-        selector = metadata.model_preference->provider + "/" + metadata.model_preference->model;
-        if (metadata.model_preference->reasoning_effort) selector += "@" + *metadata.model_preference->reasoning_effort;
-    }
-    if (selector.empty()) {
-        const auto &first = models.entries().front();
-        selector = first.provider + "/" + first.id;
-    }
-    auto initial = models.select(selector);
-    if (!initial) {
-        if (!metadata.model_preference || !env_or("LIMINAL_MODEL", "").empty()) {
-            std::fprintf(stderr, "error: %s\n", initial.error().message().c_str());
-            co_return 1;
-        }
-        const auto &first = models.entries().front();
-        auto fallback = models.select(first.provider + "/" + first.id);
-        if (!fallback) {
-            std::fprintf(stderr, "error: %s\n", fallback.error().message().c_str());
-            co_return 1;
-        }
-        selected_session->notices.push_back("[stored model " + selector + " is unavailable; using " + first.provider + "/" + first.id +
-                                            "]\n");
-        initial = *std::move(fallback);
+    auto selected_session = select_session(options, tools.working_directory, *workspace, models, tools);
+    if (!selected_session) {
+        std::fprintf(stderr, "error: %s\n", selected_session.error().message().c_str());
+        co_return 1;
     }
 
     std::vector<context::InstructionSource> instructions;
@@ -218,8 +212,10 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
         instructions.push_back(std::move(instruction));
     }
     auto selection = *std::move(selected_session);
-    Agent agent(*std::move(initial), tools, std::move(instructions), std::move(selection.session));
-    co_return co_await tui::run_repl(agent, interrupts, models, std::move(selection.notices));
+    auto coordinator = std::move(selection.coordinator);
+    Agent agent(std::move(selection.model), tools, std::move(instructions), std::move(selection.session));
+    co_return co_await tui::run_repl(agent, interrupts, models, coordinator ? &*coordinator : nullptr, std::move(selection.transcript),
+                                     std::move(selection.notices));
 }
 
 int run_codex_login() {

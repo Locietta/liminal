@@ -96,6 +96,28 @@ std::string_view name(SessionState state) {
     return "editing";
 }
 
+std::string_view name(SelectableListEffect effect) {
+    switch (effect) {
+        case SelectableListEffect::NONE: return "none";
+        case SelectableListEffect::LOAD_NEXT_PAGE: return "load_next_page";
+        case SelectableListEffect::CONFIRMED: return "confirmed";
+        case SelectableListEffect::CANCELLED: return "cancelled";
+    }
+    return "none";
+}
+
+SelectableListPage selectable_page(std::string_view text, bool has_more) {
+    SelectableListPage page{.has_more = has_more};
+    while (!text.empty()) {
+        const auto end = text.find('\n');
+        const auto row = text.substr(0, end);
+        if (!row.empty()) page.items.push_back({.id = std::string(row), .primary = std::string(row)});
+        if (end == std::string_view::npos) break;
+        text.remove_prefix(end + 1);
+    }
+    return page;
+}
+
 std::expected<void, std::string> validate_size(i32 columns, i32 rows) {
     if (columns < 1 || columns > k_max_columns || rows < 1 || rows > k_max_rows) {
         return std::unexpected("terminal size must be within 1..500 columns and 1..200 rows");
@@ -156,9 +178,15 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "word_right") {
         screen.move_word_right();
     } else if (action.type == "up") {
-        screen.move_up();
+        if (selectable_list)
+            selection_effect = selectable_list->apply(SelectableListAction::UP);
+        else
+            screen.move_up();
     } else if (action.type == "down") {
-        screen.move_down();
+        if (selectable_list)
+            selection_effect = selectable_list->apply(SelectableListAction::DOWN);
+        else
+            screen.move_down();
     } else if (action.type == "home") {
         screen.move_home();
     } else if (action.type == "end") {
@@ -170,12 +198,18 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "clear") {
         screen.clear_prompt();
     } else if (action.type == "submit") {
-        auto prompt = screen.take_prompt();
-        if (!action.text.empty()) {
-            prompt = action.text;
-            screen.prompt_history.record(prompt);
+        if (selectable_list) {
+            selection_effect = selectable_list->apply(SelectableListAction::CONFIRM);
+        } else {
+            auto prompt = screen.take_prompt();
+            if (!action.text.empty()) {
+                prompt = action.text;
+                screen.prompt_history.record(prompt);
+            }
+            screen.apply(PromptSubmitted{.text = std::move(prompt)});
         }
-        screen.apply(PromptSubmitted{.text = std::move(prompt)});
+    } else if (action.type == "escape") {
+        if (selectable_list) selection_effect = selectable_list->apply(SelectableListAction::CANCEL);
     } else if (action.type == "assistant_delta") {
         screen.apply(AssistantTextDelta{.item_id = action.item_id, .text = action.text});
     } else if (action.type == "assistant_message_completed") {
@@ -201,9 +235,15 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "scroll") {
         screen.scroll(action.amount);
     } else if (action.type == "page_up") {
-        screen.page(-1);
+        if (selectable_list)
+            selection_effect = selectable_list->apply(SelectableListAction::PAGE_UP);
+        else
+            screen.page(-1);
     } else if (action.type == "page_down") {
-        screen.page(1);
+        if (selectable_list)
+            selection_effect = selectable_list->apply(SelectableListAction::PAGE_DOWN);
+        else
+            screen.page(1);
     } else if (action.type == "follow_tail") {
         screen.follow_tail();
     } else if (action.type == "resize") {
@@ -211,6 +251,21 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
         screen.resize({.columns = action.columns, .rows = action.rows});
     } else if (action.type == "set_model") {
         screen.apply(ModelSelected{.name = action.name, .effort = action.effort});
+    } else if (action.type == "open_list") {
+        selectable_list.emplace(action.name.empty() ? "Select" : action.name, action.command.empty() ? "No items" : action.command,
+                                selectable_page(action.text, action.amount != 0));
+        selection_effect = SelectableListEffect::NONE;
+    } else if (action.type == "list_next_page") {
+        if (!selectable_list || !selectable_list->waiting_for_page) return std::unexpected("selectable list is not loading a page");
+        selectable_list->append_page(selectable_page(action.text, action.amount != 0));
+        selection_effect = SelectableListEffect::NONE;
+    } else if (action.type == "list_page_error") {
+        if (!selectable_list || !selectable_list->waiting_for_page) return std::unexpected("selectable list is not loading a page");
+        selectable_list->fail_page(action.text);
+        selection_effect = SelectableListEffect::NONE;
+    } else if (action.type == "close_list") {
+        selectable_list.reset();
+        selection_effect = SelectableListEffect::NONE;
     } else if (action.type == "advance_time") {
         if (action.milliseconds < 0) return std::unexpected("virtual time cannot move backwards");
         now_ms += action.milliseconds;
@@ -239,7 +294,7 @@ HeadlessSnapshot HeadlessSession::inspect() const {
     // Projection populates mutable layout caches. Inspect a copy so this
     // read-only operation cannot alter future diagnostics or rendering.
     auto projected_screen = screen;
-    const auto frame = projected_screen.frame();
+    const auto frame = selectable_list ? selectable_list->frame(screen.size.columns, screen.size.rows) : projected_screen.frame();
     HeadlessSnapshot snapshot{.now_ms = now_ms,
                               .render_pending = render_pending,
                               .render_count = render_count,
@@ -249,6 +304,11 @@ HeadlessSnapshot HeadlessSession::inspect() const {
                               .rows = screen.size.rows,
                               .model = screen.model,
                               .semantic_state = std::string(name(screen.state)),
+                              .focused_surface = selectable_list ? "selectable_list" : "session",
+                              .selection_effect = std::string(name(selection_effect)),
+                              .selected_id = selectable_list && selectable_list->selected_id() ?
+                                                 std::optional<std::string>(*selectable_list->selected_id()) :
+                                                 std::nullopt,
                               .effort = screen.effort,
                               .composer_text = screen.composer.text,
                               .composer_cursor = screen.composer.cursor,
@@ -289,7 +349,7 @@ void HeadlessSession::invalidate() {
 }
 
 void HeadlessSession::flush() {
-    auto frame = screen.frame();
+    auto frame = selectable_list ? selectable_list->frame(screen.size.columns, screen.size.rows) : screen.frame();
     auto encoded = encode_frame_diff(previous_frame ? &*previous_frame : nullptr, frame);
     if (!encoded.empty()) {
         if (ansi_operations.size() == k_max_ansi_operations) ansi_operations.erase(ansi_operations.begin());

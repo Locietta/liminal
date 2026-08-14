@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <concepts>
 #include <cstdlib>
@@ -16,8 +18,11 @@
 #include <sqlite3.h>
 
 #include <lighter/types.hpp>
+#include <lighter/async/io/loop.h>
 
+#include <liminal/application/session_coordinator.h>
 #include <liminal/context/context.h>
+#include <liminal/model/catalog.h>
 #include <liminal/session/codec.h>
 #include <liminal/session/persistence.h>
 #include <liminal/session/paths.h>
@@ -65,6 +70,91 @@ struct TemporaryDatabase {
     std::filesystem::path directory;
     std::filesystem::path path;
 };
+
+session::SessionId deterministic_id(u64 value) {
+    session::SessionId id;
+    for (usize index = 0; index < sizeof(value); ++index) {
+        id.bytes[id.bytes.size() - 1 - index] = static_cast<u8>(value >> (index * 8));
+    }
+    return id;
+}
+
+void insert_catalog_rows(const std::filesystem::path &path, u64 first, u64 count, std::string_view workspace, i64 first_timestamp,
+                         bool archived = false, i64 timestamp_step = 1) {
+    sqlite3 *raw = nullptr;
+    require(sqlite3_open(path.string().c_str(), &raw) == SQLITE_OK, "failed to open catalog fixture database");
+    require(sqlite3_exec(raw, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) == SQLITE_OK, "failed to begin catalog fixture");
+    sqlite3_stmt *insert = nullptr;
+    constexpr auto sql = R"sql(
+INSERT INTO sessions(id,created_at_ms,updated_at_ms,workspace_root,workspace_key,working_directory,title,preview,
+                     archived_at_ms,revision)
+VALUES(?1,?2,?3,?4,?4,?4,?5,?6,?7,0)
+)sql";
+    require(sqlite3_prepare_v2(raw, sql, -1, &insert, nullptr) == SQLITE_OK, "failed to prepare catalog fixture insert");
+    for (u64 offset = 0; offset < count; ++offset) {
+        const auto id = deterministic_id(first + offset);
+        const auto updated = first_timestamp + static_cast<i64>(offset) * timestamp_step;
+        sqlite3_reset(insert);
+        sqlite3_clear_bindings(insert);
+        sqlite3_bind_blob(insert, 1, id.bytes.data(), static_cast<int>(id.bytes.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(insert, 2, updated);
+        sqlite3_bind_int64(insert, 3, updated);
+        sqlite3_bind_text(insert, 4, workspace.data(), static_cast<int>(workspace.size()), SQLITE_TRANSIENT);
+        const auto title = "Session " + std::to_string(first + offset);
+        const auto preview = "Preview " + std::to_string(first + offset);
+        sqlite3_bind_text(insert, 5, title.data(), static_cast<int>(title.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(insert, 6, preview.data(), static_cast<int>(preview.size()), SQLITE_TRANSIENT);
+        if (archived)
+            sqlite3_bind_int64(insert, 7, updated);
+        else
+            sqlite3_bind_null(insert, 7);
+        require(sqlite3_step(insert) == SQLITE_DONE, "failed to insert catalog fixture row");
+    }
+    sqlite3_finalize(insert);
+    require(sqlite3_exec(raw, "COMMIT", nullptr, nullptr, nullptr) == SQLITE_OK, "failed to commit catalog fixture");
+    sqlite3_close(raw);
+}
+
+model::Catalog test_model_catalog() {
+    model::Catalog catalog(model::CatalogSources{
+        .load = []() -> Result<provider::Registry> {
+            provider::Registry registry;
+            registry.providers.push_back({
+                .id = "test",
+                .name = "Test",
+                .api = provider::ApiType::OPENAI_RESPONSES,
+                .base_url = "https://example.invalid",
+                .models = {{.provider = "test", .id = "fallback", .name = "Fallback"}},
+            });
+            return registry;
+        },
+        .discover = [](const provider::Registry &, const provider::Instance &)
+            -> lighter::Task<std::vector<provider::DiscoveredModel>, Error> { co_return std::vector<provider::DiscoveredModel>{}; },
+    });
+    lighter::EventLoop loop;
+    auto refreshed = catalog.refresh();
+    loop.schedule(refreshed);
+    loop.run();
+    require(refreshed.result().has_value(), "failed to refresh test model catalog");
+    return catalog;
+}
+
+application::SessionPreparationServices preparation_services(model::Catalog &models) {
+    return {
+        .models = &models,
+        .fallback_model = "test/fallback",
+        .project = [](const session::Session &value) -> Result<std::vector<tui::Block>> {
+            return std::vector<tui::Block>{{.kind = tui::BlockKind::NOTICE,
+                                            .state = tui::BlockState::COMPLETED,
+                                            .text = "projected " + std::to_string(value.entries.size())}};
+        },
+    };
+}
+
+void persist_session(session::Store &store, const session::Session &value) {
+    auto writer = store.lease(value.id);
+    require(writer && writer->commit(session::make_delta(value, value.entries)), "failed to persist session fixture");
+}
 
 void set_environment(std::string_view name, const std::optional<std::string> &value) {
 #ifdef _WIN32
@@ -301,6 +391,35 @@ SELECT
     sqlite3_close(raw);
 }
 
+void test_catalog_index_migrates_from_phase_one_schema() {
+    TemporaryDatabase database;
+    {
+        auto created = session::Store::open(database.path);
+        require(created.has_value(), "failed to create migration fixture");
+    }
+    sqlite3 *raw = nullptr;
+    require(sqlite3_open(database.path.string().c_str(), &raw) == SQLITE_OK, "failed to open migration fixture");
+    require(sqlite3_exec(raw, "DROP INDEX sessions_workspace_archived_recent; PRAGMA user_version=1", nullptr, nullptr, nullptr) ==
+                SQLITE_OK,
+            "failed to restore phase-one schema fixture");
+    sqlite3_close(raw);
+
+    auto migrated = session::Store::open(database.path);
+    require(migrated.has_value(), "failed to migrate phase-one session schema");
+    require(sqlite3_open(database.path.string().c_str(), &raw) == SQLITE_OK, "failed to inspect migrated schema");
+    sqlite3_stmt *inspection = nullptr;
+    constexpr auto query = R"sql(
+SELECT
+    (SELECT user_version FROM pragma_user_version),
+    (SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='sessions_workspace_archived_recent')
+)sql";
+    require(sqlite3_prepare_v2(raw, query, -1, &inspection, nullptr) == SQLITE_OK && sqlite3_step(inspection) == SQLITE_ROW &&
+                sqlite3_column_int(inspection, 0) == 2 && sqlite3_column_int(inspection, 1) == 1,
+            "phase-one migration did not install the archived-session index exactly once");
+    sqlite3_finalize(inspection);
+    sqlite3_close(raw);
+}
+
 void test_writer_rejects_updated_at_regression() {
     TemporaryDatabase database;
     auto store = session::Store::open(database.path);
@@ -427,7 +546,295 @@ void test_unknown_payload_version_isolated_from_catalog() {
     require(!loaded && loaded.error().detail.contains("unsupported TaskStarted payload version 99"),
             "unknown payload version did not fail with a precise error");
     auto latest = store->latest("workspace");
-    require(latest && latest->id == value.id, "unknown entry payload version made the catalog unlistable");
+    auto page = store->page({.workspace_key = "workspace"});
+    require(latest && latest->id == value.id && page && page->sessions.size() == 1 && page->sessions.front().id == value.id,
+            "unknown entry payload version made the catalog unlistable");
+}
+
+void test_catalog_keyset_paging() {
+    TemporaryDatabase database;
+    auto store = session::Store::open(database.path);
+    require(store.has_value(), "failed to open catalog paging store");
+    insert_catalog_rows(database.path, 1, 1, "workspace-a", 100);
+    insert_catalog_rows(database.path, 2, 2, "workspace-a", 200, false, 0);
+    insert_catalog_rows(database.path, 4, 3, "workspace-a", 300, false, 100);
+    insert_catalog_rows(database.path, 100, 1, "workspace-a", 1'000, true);
+    insert_catalog_rows(database.path, 200, 1, "workspace-b", 2'000);
+
+    auto first = store->page({.workspace_key = "workspace-a", .limit = 2});
+    require(first && first->sessions.size() == 2 && first->sessions[0].id == deterministic_id(6) &&
+                first->sessions[1].id == deterministic_id(5) && first->continuation,
+            "first catalog page was not newest-first or did not expose a continuation");
+    auto middle = store->page({.workspace_key = "workspace-a", .after = first->continuation, .limit = 2});
+    require(middle && middle->sessions.size() == 2 && middle->sessions[0].id == deterministic_id(4) &&
+                middle->sessions[1].id == deterministic_id(3) && middle->continuation,
+            "middle catalog page did not retain stable tied-timestamp ordering");
+    auto final = store->page({.workspace_key = "workspace-a", .after = middle->continuation, .limit = 2});
+    require(final && final->sessions.size() == 2 && final->sessions[0].id == deterministic_id(2) &&
+                final->sessions[1].id == deterministic_id(1) && !final->continuation,
+            "final catalog page was incorrect or exposed a false continuation");
+    auto beyond_final = store->page(
+        {.workspace_key = "workspace-a", .after = session::SessionPageCursor{.updated_at_ms = 100, .id = deterministic_id(1)}, .limit = 2});
+    auto empty = store->page({.workspace_key = "empty-workspace", .limit = 2});
+    require(beyond_final && beyond_final->sessions.empty() && !beyond_final->continuation && empty && empty->sessions.empty() &&
+                !empty->continuation,
+            "empty catalog pages were not successful terminal pages");
+
+    auto archived = store->page({.workspace_key = "workspace-a", .state = session::SessionCatalogState::ARCHIVED, .limit = 50});
+    require(archived && archived->sessions.size() == 1 && archived->sessions.front().id == deterministic_id(100),
+            "archived catalog did not isolate archived sessions");
+    auto other_workspace = store->page({.workspace_key = "workspace-b", .limit = 50});
+    require(other_workspace && other_workspace->sessions.size() == 1 && other_workspace->sessions.front().id == deterministic_id(200),
+            "catalog paging crossed canonical workspace boundaries");
+
+    insert_catalog_rows(database.path, 1'000, 60, "page-cap", 1'000);
+    auto capped = store->page({.workspace_key = "page-cap", .limit = 100});
+    require(capped && capped->sessions.size() == 50 && capped->continuation, "catalog query did not enforce its 50-row maximum page size");
+}
+
+void test_large_catalog_uses_indexed_keyset_query() {
+    TemporaryDatabase database;
+    auto store = session::Store::open(database.path);
+    require(store.has_value(), "failed to open large catalog store");
+    insert_catalog_rows(database.path, 10'000, 10'000, "large-workspace", 10'000);
+
+    usize total = 0;
+    std::optional<session::SessionPageCursor> cursor;
+    do {
+        auto page = store->page({.workspace_key = "large-workspace", .after = cursor, .limit = 50});
+        require(page.has_value(), "large catalog keyset page failed");
+        if (total == 0) {
+            require(page->sessions.size() == 50 && page->sessions.front().id == deterministic_id(19'999),
+                    "large catalog first page was incorrect");
+        }
+        total += page->sessions.size();
+        cursor = page->continuation;
+    } while (cursor);
+    require(total == 10'000, "deep keyset traversal skipped or duplicated large-catalog rows");
+
+    sqlite3 *raw = nullptr;
+    require(sqlite3_open(database.path.string().c_str(), &raw) == SQLITE_OK, "failed to inspect catalog query plan");
+    sqlite3_stmt *plan = nullptr;
+    constexpr auto query = R"sql(
+EXPLAIN QUERY PLAN
+SELECT id, updated_at_ms FROM sessions
+WHERE workspace_key=?1 AND archived_at_ms IS NULL
+  AND (updated_at_ms, id) < (?2, ?3)
+ORDER BY updated_at_ms DESC, id DESC LIMIT ?4
+)sql";
+    require(sqlite3_prepare_v2(raw, query, -1, &plan, nullptr) == SQLITE_OK, "failed to prepare catalog query plan");
+    sqlite3_bind_text(plan, 1, "large-workspace", -1, SQLITE_STATIC);
+    sqlite3_bind_int64(plan, 2, 15'000);
+    const auto id = deterministic_id(15'000);
+    sqlite3_bind_blob(plan, 3, id.bytes.data(), static_cast<int>(id.bytes.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int(plan, 4, 51);
+    std::string details;
+    while (sqlite3_step(plan) == SQLITE_ROW) {
+        details += reinterpret_cast<const char *>(sqlite3_column_text(plan, 3));
+        details += '\n';
+    }
+    sqlite3_finalize(plan);
+    sqlite3_close(raw);
+    require(details.contains("sessions_workspace_recent") && !details.contains("session_entries") && !details.contains("USE TEMP B-TREE"),
+            "catalog query plan did not use the workspace/recent index directly");
+}
+
+void test_session_catalog_mutations_persist_and_respect_ownership() {
+    TemporaryDatabase database;
+    auto store = session::Store::open(database.path);
+    require(store.has_value(), "failed to open catalog mutation store");
+    session::Session value;
+    value.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    value.metadata.working_directory = "workspace";
+    value.start_task("catalog mutation");
+    persist_session(*store, value);
+
+    application::SessionCoordinator coordinator(*store, {});
+    require(coordinator.mutate_inactive(value.id, application::RenameSession{.title = "Named session"}).has_value(),
+            "inactive session rename failed");
+    require(coordinator.mutate_inactive(value.id, application::ArchiveSession{}).has_value(), "inactive session archive failed");
+    auto active = coordinator.page({.workspace_key = "workspace"});
+    auto archived = coordinator.page({.workspace_key = "workspace", .state = session::SessionCatalogState::ARCHIVED});
+    require(active && active->sessions.empty() && archived && archived->sessions.size() == 1 &&
+                archived->sessions.front().title == "Named session",
+            "archive mutation did not update catalog visibility immediately");
+
+    {
+        auto locked = store->lease(value.id);
+        require(locked.has_value(), "failed to hold inactive-session ownership fixture");
+        auto rejected = coordinator.mutate_inactive(value.id, application::UnarchiveSession{});
+        require(!rejected && rejected.error().detail.contains("in use"), "inactive catalog mutation ignored exclusive session ownership");
+    }
+    require(coordinator.mutate_inactive(value.id, application::UnarchiveSession{}).has_value(), "inactive session unarchive failed");
+
+    auto restarted = session::Store::open(database.path);
+    require(restarted.has_value(), "failed to reopen catalog mutation store");
+    auto visible = restarted->page({.workspace_key = "workspace"});
+    require(visible && visible->sessions.size() == 1 && visible->sessions.front().title == "Named session",
+            "name or unarchive state did not survive restart");
+    auto writer = restarted->lease(value.id);
+    require(writer.has_value(), "failed to lease restarted catalog mutation session");
+    auto loaded = writer->load();
+    require(loaded && loaded->metadata.title == "Named session" && !loaded->metadata.archived_at_ms,
+            "restart did not hydrate persisted title and archive state");
+}
+
+void test_prepared_switch_is_atomic_and_explicit_about_unsaved_history() {
+    TemporaryDatabase database;
+    auto store = session::Store::open(database.path);
+    require(store.has_value(), "failed to open switch coordination store");
+    auto models = test_model_catalog();
+
+    session::Session target;
+    target.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    target.metadata.working_directory = "workspace";
+    target.metadata.model_preference = session::SessionModelPreference{.provider = "missing", .model = "removed"};
+    const auto target_task = target.start_task("unfinished target");
+    const auto target_call = target.next_provider_call();
+    target.append(session::OutputItemCompleted{
+        .task_id = target_task,
+        .provider_call_id = target_call,
+        .item =
+            provider::ProviderOpaqueItem{.id = {.value = "private"}, .part = {.provider_tag = "missing", .payload = "provider-private"}},
+    });
+    persist_session(*store, target);
+
+    session::Session recovery_degraded;
+    recovery_degraded.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    recovery_degraded.metadata.working_directory = "workspace";
+    recovery_degraded.start_task("recovery cannot save");
+    persist_session(*store, recovery_degraded);
+
+    session::Session live;
+    live.start_task("live session remains authoritative");
+    const auto live_entries = live.entries.size();
+    const auto live_leaf = live.active_leaf;
+    application::SessionCoordinator coordinator(*store, preparation_services(models));
+
+    auto same = coordinator.begin_switch(live.id, live.id);
+    require(same && same->state() == application::SessionSwitchState::CURRENT_SELECTED,
+            "selecting the current session was not a no-op result");
+
+    {
+        auto locked = store->lease(target.id);
+        require(locked.has_value(), "failed to hold target lease fixture");
+        auto rejected = coordinator.begin_switch(live.id, target.id);
+        require(!rejected && rejected.error().detail.contains("in use") && live.entries.size() == live_entries &&
+                    live.active_leaf == live_leaf,
+                "target lease failure disturbed the live session");
+    }
+
+    application::SessionPreparationServices failing_projection = preparation_services(models);
+    failing_projection.project = [](const session::Session &) -> Result<std::vector<tui::Block>> {
+        return lighter::outcome_error(Error::protocol("injected projection failure"));
+    };
+    application::SessionCoordinator projection_coordinator(*store, std::move(failing_projection));
+    auto projection_failure = projection_coordinator.begin_switch(live.id, target.id);
+    require(!projection_failure && projection_failure.error().detail.contains("projection") && live.entries.size() == live_entries,
+            "projection failure disturbed the live session");
+
+    auto invalid_model_services = preparation_services(models);
+    invalid_model_services.configured_model = "test/does-not-exist";
+    application::SessionCoordinator invalid_model_coordinator(*store, std::move(invalid_model_services));
+    auto model_failure = invalid_model_coordinator.begin_switch(live.id, target.id);
+    require(!model_failure && model_failure.error().detail.contains("unknown model") && live.entries.size() == live_entries,
+            "model-selection failure disturbed the live session");
+
+    {
+        auto degraded_services = preparation_services(models);
+        degraded_services.persistence = [](session::SessionWriter writer) {
+            const auto id = writer.session_id();
+            auto lease_owner = std::make_shared<session::SessionWriter>(std::move(writer));
+            return session::PersistenceQueue::create_for_test(id, [lease_owner](const session::SessionDelta &) -> Result<void> {
+                return lighter::outcome_error(Error::storage("injected recovery save failure"));
+            });
+        };
+        application::SessionCoordinator degraded_coordinator(*store, std::move(degraded_services));
+        auto degraded_switch = degraded_coordinator.begin_switch(live.id, recovery_degraded.id);
+        require(degraded_switch && degraded_switch->state() == application::SessionSwitchState::PREPARED,
+                "target recovery persistence degradation incorrectly rejected the prepared target");
+        degraded_switch->flush_current(nullptr);
+        auto degraded_target = degraded_switch->take_target();
+        const auto degraded_status = degraded_target.session.persistence_queue()->status();
+        require(degraded_status.degraded && degraded_status.pending_mutations != 0 &&
+                    std::ranges::any_of(degraded_target.notices, [](const std::string &notice) { return notice.contains("not saving"); }) &&
+                    live.entries.size() == live_entries,
+                "target recovery persistence degradation was not exposed as an unsaved prepared session");
+    }
+
+    session::Session corrupt;
+    corrupt.metadata.workspace = session::SessionWorkspace{.root = "workspace", .key = "workspace"};
+    corrupt.metadata.working_directory = "workspace";
+    corrupt.start_task("corrupt target");
+    persist_session(*store, corrupt);
+    sqlite3 *raw = nullptr;
+    require(sqlite3_open(database.path.string().c_str(), &raw) == SQLITE_OK, "failed to open corrupt switch fixture");
+    sqlite3_stmt *corrupt_payload = nullptr;
+    require(sqlite3_prepare_v2(raw, "UPDATE session_entries SET payload_version=99 WHERE session_id=?1", -1, &corrupt_payload, nullptr) ==
+                SQLITE_OK,
+            "failed to prepare corrupt switch fixture");
+    sqlite3_bind_blob(corrupt_payload, 1, corrupt.id.bytes.data(), static_cast<int>(corrupt.id.bytes.size()), SQLITE_TRANSIENT);
+    require(sqlite3_step(corrupt_payload) == SQLITE_DONE, "failed to corrupt switch payload");
+    sqlite3_finalize(corrupt_payload);
+    sqlite3_close(raw);
+    auto load_failure = coordinator.begin_switch(live.id, corrupt.id);
+    require(!load_failure && load_failure.error().detail.contains("unsupported") && live.entries.size() == live_entries,
+            "target load failure disturbed the live session");
+
+    {
+        auto switching = coordinator.begin_switch(live.id, target.id);
+        require(switching && switching->state() == application::SessionSwitchState::PREPARED,
+                "valid target did not reach the prepared switch state");
+        switching->flush_current(nullptr);
+        require(switching->state() == application::SessionSwitchState::READY, "a session without queued persistence did not become ready");
+        auto prepared = switching->take_target();
+        require(prepared.session.entries.size() > target.entries.size() && !prepared.notices.empty() &&
+                    prepared.notices.back().contains("stored model") && prepared.model.entry.id == "fallback" &&
+                    std::holds_alternative<provider::ProviderOpaqueItem>(
+                        std::get<session::OutputItemCompleted>(prepared.session.entries[1].payload).item),
+                "target preparation did not recover, fall back, and preserve provider-private history");
+    }
+
+    std::atomic<bool> writes_succeed = false;
+    session::Session unsaved;
+    auto failing_queue =
+        session::PersistenceQueue::create_for_test(unsaved.id, [&writes_succeed](const session::SessionDelta &) -> Result<void> {
+            if (writes_succeed.load()) return {};
+            return lighter::outcome_error(Error::storage("injected unsaved tail"));
+        });
+    require(unsaved.attach_persistence(failing_queue).has_value(), "failed to attach unsaved-tail fixture");
+    unsaved.start_task("unsaved current history");
+
+    {
+        auto switching = coordinator.begin_switch(unsaved.id, target.id);
+        require(switching.has_value(), "failed to prepare target for decline branch");
+        switching->flush_current(failing_queue.get());
+        require(switching->state() == application::SessionSwitchState::AWAITING_UNSAVED_CONFIRMATION,
+                "failed flush did not require explicit confirmation");
+        switching->resolve_unsaved(application::UnsavedSwitchDecision::STAY, failing_queue->status());
+        require(switching->state() == application::SessionSwitchState::CANCELLED && unsaved.entries.size() == 1,
+                "declining unsaved-tail abandonment changed the live session");
+    }
+    {
+        auto switching = coordinator.begin_switch(unsaved.id, target.id);
+        require(switching.has_value(), "failed to prepare target for abandonment branch");
+        switching->flush_current(failing_queue.get());
+        switching->resolve_unsaved(application::UnsavedSwitchDecision::ABANDON_UNSAVED_HISTORY, failing_queue->status());
+        require(switching->state() == application::SessionSwitchState::READY && switching->abandoned_unsaved_history(),
+                "accepting confirmation did not explicitly mark old unsaved history abandoned");
+    }
+    {
+        auto switching = coordinator.begin_switch(unsaved.id, target.id);
+        require(switching.has_value(), "failed to prepare target for retry branch");
+        switching->flush_current(failing_queue.get());
+        require(switching->state() == application::SessionSwitchState::AWAITING_UNSAVED_CONFIRMATION,
+                "retry branch did not enter confirmation state");
+        writes_succeed = true;
+        require(failing_queue->flush().has_value(), "observable background retry fixture did not save the pending tail");
+        switching->resolve_unsaved(application::UnsavedSwitchDecision::ABANDON_UNSAVED_HISTORY, failing_queue->status());
+        require(switching->state() == application::SessionSwitchState::READY && !switching->abandoned_unsaved_history(),
+                "a tail saved during confirmation was still classified as abandoned");
+    }
 }
 
 void test_recovery_never_replays_tools() {
@@ -707,10 +1114,15 @@ i32 run_all() {
     test_store_preserves_caller_owned_directory_permissions();
     test_established_database_requires_application_identity();
     test_unidentified_nonempty_database_is_not_adopted();
+    test_catalog_index_migrates_from_phase_one_schema();
     test_writer_rejects_updated_at_regression();
     test_windows_workspace_key_uses_unicode_case_mapping();
     test_store_round_trip_and_restart_branching();
     test_unknown_payload_version_isolated_from_catalog();
+    test_catalog_keyset_paging();
+    test_large_catalog_uses_indexed_keyset_query();
+    test_session_catalog_mutations_persist_and_respect_ownership();
+    test_prepared_switch_is_atomic_and_explicit_about_unsaved_history();
     test_recovery_never_replays_tools();
     test_session_rejects_mismatched_persistence_queue();
     test_ordered_queue_failure_and_retry();

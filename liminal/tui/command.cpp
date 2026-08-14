@@ -7,6 +7,8 @@
 #include <system_error>
 #include <utility>
 
+#include <lighter/encoding/utf8.h>
+
 namespace liminal::tui {
 
 namespace {
@@ -45,6 +47,10 @@ Result<CommandKind> resolve_command(std::string_view name) {
     if (name == "context") return CommandKind::CONTEXT;
     if (name == "compact") return CommandKind::COMPACT;
     if (name == "model") return CommandKind::MODEL;
+    if (name == "resume") return CommandKind::RESUME;
+    if (name == "name") return CommandKind::NAME;
+    if (name == "archive") return CommandKind::ARCHIVE;
+    if (name == "unarchive") return CommandKind::UNARCHIVE;
     return lighter::outcome_error(Error::command("unknown command '/" + std::string(name) + "'"));
 }
 
@@ -58,6 +64,15 @@ Result<CopyArguments> parse_copy_arguments(std::string_view arguments) {
         return lighter::outcome_error(Error::command("usage: /copy [positive reply number]"));
     }
     return CopyArguments{.ordinal = ordinal};
+}
+
+Result<NameArguments> parse_name_arguments(std::string_view arguments) {
+    arguments = trim(arguments);
+    if (arguments == "--clear") return NameArguments{};
+    if (arguments.empty() || arguments.size() > 200 || !lighter::encoding::utf8::is_valid(arguments)) {
+        return lighter::outcome_error(Error::command("usage: /name <title> | /name --clear"));
+    }
+    return NameArguments{.title = std::string(arguments)};
 }
 
 Result<void> require_no_arguments(std::string_view command, std::string_view arguments) {

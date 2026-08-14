@@ -36,6 +36,30 @@ struct SessionSummary {
     u64 tokens_used = 0;
 };
 
+struct SessionPageCursor {
+    i64 updated_at_ms = 0;
+    SessionId id;
+
+    auto operator<=>(const SessionPageCursor &) const = default;
+};
+
+enum struct SessionCatalogState {
+    ACTIVE,
+    ARCHIVED,
+};
+
+struct SessionPageQuery {
+    std::string workspace_key;
+    SessionCatalogState state = SessionCatalogState::ACTIVE;
+    std::optional<SessionPageCursor> after;
+    usize limit = 50;
+};
+
+struct SessionPage {
+    std::vector<SessionSummary> sessions;
+    std::optional<SessionPageCursor> continuation;
+};
+
 struct SessionWriter;
 
 struct Store {
@@ -47,6 +71,7 @@ struct Store {
     Result<SessionWriter> lease(SessionId id) const;
     Result<SessionId> resolve_id(std::string_view text) const;
     Result<SessionSummary> latest(std::string_view workspace_key) const;
+    Result<SessionPage> page(const SessionPageQuery &query) const pre(query.limit > 0);
 
 private:
     explicit Store(std::shared_ptr<State> state) : state(std::move(state)) {}

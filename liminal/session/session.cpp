@@ -109,6 +109,27 @@ void Session::set_model_preference(std::string provider, std::string model, std:
     if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
 }
 
+void Session::set_title(std::optional<std::string> title) {
+    if (title && title->empty()) title.reset();
+    contract_assert(!title || (title->size() <= 200 && lighter::encoding::utf8::is_valid(*title)));
+    metadata.title = std::move(title);
+    metadata.updated_at_ms = mutation_timestamp(metadata);
+    if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
+}
+
+void Session::archive() {
+    const auto timestamp = mutation_timestamp(metadata);
+    metadata.archived_at_ms = timestamp;
+    metadata.updated_at_ms = timestamp;
+    if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
+}
+
+void Session::unarchive() {
+    metadata.archived_at_ms.reset();
+    metadata.updated_at_ms = mutation_timestamp(metadata);
+    if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
+}
+
 Result<void> Session::attach_persistence(std::shared_ptr<PersistenceQueue> queue) {
     if (!queue) return lighter::outcome_error(Error::storage("cannot attach an empty persistence queue"));
     if (queue->session_id() != id) {
@@ -166,6 +187,10 @@ Result<void> Session::validate() const {
     }
     if (metadata.preview.size() > 240 || !lighter::encoding::utf8::is_valid(metadata.preview)) {
         return lighter::outcome_error(Error::protocol("session preview is not valid bounded UTF-8"));
+    }
+    if (metadata.title &&
+        (metadata.title->empty() || metadata.title->size() > 200 || !lighter::encoding::utf8::is_valid(*metadata.title))) {
+        return lighter::outcome_error(Error::protocol("session title is not valid bounded UTF-8"));
     }
     if (metadata.workspace && (metadata.workspace->root.empty() || metadata.workspace->key.empty())) {
         return lighter::outcome_error(Error::protocol("session workspace metadata is incomplete"));

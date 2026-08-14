@@ -8,6 +8,7 @@
 #include <lighter/types.hpp>
 
 #include <liminal/tui/session_screen.h>
+#include <liminal/tui/selectable_list.h>
 
 namespace liminal::tui {
 
@@ -70,6 +71,9 @@ struct HeadlessSnapshot {
     i32 rows = 0;
     std::string model;
     std::string semantic_state;
+    std::string focused_surface = "session";
+    std::string selection_effect = "none";
+    std::optional<std::string> selected_id;
     std::optional<std::string> effort;
     std::string composer_text;
     usize composer_cursor = 0;
@@ -92,6 +96,8 @@ struct HeadlessSession {
     HeadlessSnapshot inspect() const;
 
     SessionScreen screen;
+    std::optional<SelectableList> selectable_list;
+    SelectableListEffect selection_effect = SelectableListEffect::NONE;
     i64 now_ms = 0;
     bool render_pending = false;
     i64 render_at_ms = 0;

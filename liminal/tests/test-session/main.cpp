@@ -73,6 +73,13 @@ void test_monotonic_timestamps_and_utf8_bounds() {
     log.set_model_preference("provider", "model", std::nullopt);
     require(log.metadata.updated_at_ms == future && log.validate().has_value(),
             "model preference mutation produced an unloadable timestamp");
+    log.set_title("Named session");
+    log.archive();
+    require(log.metadata.title == "Named session" && log.metadata.archived_at_ms == future && log.metadata.updated_at_ms == future,
+            "title or archive mutation bypassed the session timestamp boundary");
+    log.unarchive();
+    require(!log.metadata.archived_at_ms && log.metadata.updated_at_ms == future && log.validate().has_value(),
+            "unarchive mutation produced invalid session metadata");
 
     std::string diagnostic(4095, 'x');
     diagnostic += "\xF0\x9F\x98\x80";

@@ -138,6 +138,40 @@ lighter::Error ConsoleRenderer::status(std::string_view text) {
     return redraw();
 }
 
+lighter::Error ConsoleRenderer::show_selectable_list(SelectableList list) {
+    selectable_list = std::move(list);
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::close_selectable_list() {
+    selectable_list.reset();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::apply_selectable_list(SelectableListAction action, SelectableListEffect &effect) {
+    if (!selectable_list) return lighter::Error::k_invalid_argument;
+    effect = selectable_list->apply(action);
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::append_selectable_list_page(SelectableListPage page) {
+    if (!selectable_list) return lighter::Error::k_invalid_argument;
+    selectable_list->append_page(std::move(page));
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::fail_selectable_list_page(std::string detail) {
+    if (!selectable_list) return lighter::Error::k_invalid_argument;
+    selectable_list->fail_page(std::move(detail));
+    return redraw();
+}
+
+bool ConsoleRenderer::selectable_list_active() const noexcept { return selectable_list.has_value(); }
+
+std::optional<std::string_view> ConsoleRenderer::selectable_list_selection() const noexcept {
+    return selectable_list ? selectable_list->selected_id() : std::nullopt;
+}
+
 lighter::Error ConsoleRenderer::insert(std::string_view text) {
     screen.insert(text);
     return redraw();
@@ -291,7 +325,7 @@ lighter::Error ConsoleRenderer::redraw() {
 lighter::Error ConsoleRenderer::flush() {
     if (!terminal || rendering_paused) return {};
     redraw_pending = false;
-    auto frame = screen.frame();
+    auto frame = selectable_list ? selectable_list->frame(screen.size.columns, screen.size.rows) : screen.frame();
     auto encoded = encode_frame_diff(previous_frame ? &*previous_frame : nullptr, frame);
     if (!encoded.empty()) {
         if (auto error = terminal->write(encoded)) return error;

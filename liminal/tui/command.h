@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -31,6 +32,10 @@ enum struct CommandKind {
     CONTEXT,
     COMPACT,
     MODEL,
+    RESUME,
+    NAME,
+    ARCHIVE,
+    UNARCHIVE,
 };
 
 /// Resolves exact command names and their centrally registered aliases.
@@ -41,6 +46,12 @@ struct CopyArguments {
 };
 
 Result<CopyArguments> parse_copy_arguments(std::string_view arguments);
+
+struct NameArguments {
+    std::optional<std::string> title;
+};
+
+Result<NameArguments> parse_name_arguments(std::string_view arguments);
 Result<void> require_no_arguments(std::string_view command, std::string_view arguments);
 
 } // namespace liminal::tui

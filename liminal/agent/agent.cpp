@@ -91,6 +91,12 @@ void Agent::select_model(model::Choice next) {
     session.set_model_preference(model.entry.provider, model.entry.id, model.reasoning_effort);
 }
 
+void Agent::replace_session(model::Choice next_model, session::Session next_session) {
+    model = std::move(next_model);
+    session = std::move(next_session);
+    session.set_model_preference(model.entry.provider, model.entry.id, model.reasoning_effort);
+}
+
 Result<context::ContextManifest> Agent::context_manifest() const {
     return context::ContextBuilder{}.build(instructions, session, context_budget(model.entry));
 }

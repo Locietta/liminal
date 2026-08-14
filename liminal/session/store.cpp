@@ -15,13 +15,14 @@
 
 #include <lighter/async/vocab/outcome.h>
 #include <lighter/encoding/utf8.h>
+#include <lighter/utils/panic.h>
 
 namespace liminal::session {
 
 namespace {
 
 constexpr int k_application_id = 0x4c494d4e;
-constexpr int k_schema_version = 1;
+constexpr int k_schema_version = 2;
 
 std::string path_utf8(const std::filesystem::path &path) {
     const auto value = path.generic_u8string();
@@ -186,6 +187,17 @@ Result<void> migrate(sqlite3 *database) {
         return lighter::outcome_error(Error::storage("state database does not have Liminal's application identity"));
     }
     if (schema_version == k_schema_version) return {};
+    if (schema_version == 1) {
+        constexpr std::string_view migration = R"sql(
+BEGIN IMMEDIATE;
+CREATE INDEX sessions_workspace_archived_recent
+    ON sessions(workspace_key, updated_at_ms DESC, id DESC)
+    WHERE archived_at_ms IS NOT NULL;
+PRAGMA user_version = 2;
+COMMIT;
+)sql";
+        return execute(database, migration);
+    }
     if (schema_version != 0) return lighter::outcome_error(Error::storage("unsupported state database schema version"));
     if (application_id == 0) {
         auto has_objects = has_user_schema_objects(database);
@@ -234,11 +246,14 @@ CREATE TABLE session_entries (
     FOREIGN KEY (session_id, parent_entry_id) REFERENCES session_entries(session_id, entry_id)
 );
 CREATE INDEX sessions_workspace_recent ON sessions(workspace_key, archived_at_ms, updated_at_ms DESC, id DESC);
+CREATE INDEX sessions_workspace_archived_recent
+    ON sessions(workspace_key, updated_at_ms DESC, id DESC)
+    WHERE archived_at_ms IS NOT NULL;
 CREATE INDEX sessions_recent ON sessions(archived_at_ms, updated_at_ms DESC, id DESC);
 CREATE INDEX session_entries_children ON session_entries(session_id, parent_entry_id);
 CREATE INDEX session_entries_provider_calls ON session_entries(session_id, task_id, provider_call_id, entry_id);
 PRAGMA application_id = 1279872334;
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 COMMIT;
 )sql";
     return execute(database, migration);
@@ -497,46 +512,106 @@ Result<SessionId> Store::resolve_id(std::string_view value) const {
 }
 
 Result<SessionSummary> Store::latest(std::string_view workspace_key) const {
-    std::scoped_lock lock(state->mutex);
-    auto query = prepare(state->database, R"sql(
+    auto result = page({.workspace_key = std::string(workspace_key), .limit = 1});
+    if (!result) return lighter::outcome_error(std::move(result).error());
+    if (result->sessions.empty()) return lighter::outcome_error(Error::storage("no saved session exists in this workspace"));
+    return std::move(result->sessions.front());
+}
+
+Result<SessionPage> Store::page(const SessionPageQuery &request) const {
+    lighter::check(request.limit > 0, "session catalog page size must be positive");
+    constexpr usize k_maximum_page_size = 50;
+    const auto page_size = std::min(request.limit, k_maximum_page_size);
+    const bool archived = request.state == SessionCatalogState::ARCHIVED;
+    const bool continued = request.after.has_value();
+    const std::string_view active_first = R"sql(
 SELECT id, created_at_ms, updated_at_ms, workspace_root, title, preview, last_provider, last_model,
        last_reasoning_effort, entry_count, tokens_used
 FROM sessions
 WHERE workspace_key=?1 AND archived_at_ms IS NULL
-ORDER BY updated_at_ms DESC, id DESC LIMIT 1
-)sql");
+ORDER BY updated_at_ms DESC, id DESC LIMIT ?2
+)sql";
+    const std::string_view active_continued = R"sql(
+SELECT id, created_at_ms, updated_at_ms, workspace_root, title, preview, last_provider, last_model,
+       last_reasoning_effort, entry_count, tokens_used
+FROM sessions
+WHERE workspace_key=?1 AND archived_at_ms IS NULL
+  AND (updated_at_ms, id) < (?2, ?3)
+ORDER BY updated_at_ms DESC, id DESC LIMIT ?4
+)sql";
+    const std::string_view archived_first = R"sql(
+SELECT id, created_at_ms, updated_at_ms, workspace_root, title, preview, last_provider, last_model,
+       last_reasoning_effort, entry_count, tokens_used
+FROM sessions
+WHERE workspace_key=?1 AND archived_at_ms IS NOT NULL
+ORDER BY updated_at_ms DESC, id DESC LIMIT ?2
+)sql";
+    const std::string_view archived_continued = R"sql(
+SELECT id, created_at_ms, updated_at_ms, workspace_root, title, preview, last_provider, last_model,
+       last_reasoning_effort, entry_count, tokens_used
+FROM sessions
+WHERE workspace_key=?1 AND archived_at_ms IS NOT NULL
+  AND (updated_at_ms, id) < (?2, ?3)
+ORDER BY updated_at_ms DESC, id DESC LIMIT ?4
+)sql";
+    const auto sql = archived ? (continued ? archived_continued : archived_first) : (continued ? active_continued : active_first);
+
+    std::scoped_lock lock(state->mutex);
+    auto query = prepare(state->database, sql);
     if (!query) return lighter::outcome_error(std::move(query).error());
-    sqlite3_bind_text(query->value, 1, workspace_key.data(), static_cast<int>(workspace_key.size()), SQLITE_TRANSIENT);
-    const auto row = sqlite3_step(query->value);
-    if (row == SQLITE_DONE) return lighter::outcome_error(Error::storage("no saved session exists in this workspace"));
-    if (row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(state->database, "cannot find latest session", row));
-    auto id = column_id(query->value, 0);
-    if (!id) return lighter::outcome_error(std::move(id).error());
-    auto provider = optional_text(query->value, 6);
-    auto model = optional_text(query->value, 7);
-    auto reasoning_effort = optional_text(query->value, 8);
-    if (provider.has_value() != model.has_value() || (reasoning_effort && !provider)) {
-        return lighter::outcome_error(Error::storage("session catalog has an incomplete model preference"));
+    sqlite3_bind_text(query->value, 1, request.workspace_key.data(), static_cast<int>(request.workspace_key.size()), SQLITE_TRANSIENT);
+    const auto row_limit = static_cast<sqlite3_int64>(page_size + 1);
+    if (request.after) {
+        sqlite3_bind_int64(query->value, 2, request.after->updated_at_ms);
+        bind_id(query->value, 3, request.after->id);
+        sqlite3_bind_int64(query->value, 4, row_limit);
+    } else {
+        sqlite3_bind_int64(query->value, 2, row_limit);
     }
-    std::optional<SessionModelPreference> model_preference;
-    if (provider) {
-        model_preference = SessionModelPreference{
-            .provider = *std::move(provider),
-            .model = *std::move(model),
-            .reasoning_effort = std::move(reasoning_effort),
-        };
+
+    SessionPage page;
+    bool has_more = false;
+    while (true) {
+        const auto row = sqlite3_step(query->value);
+        if (row == SQLITE_DONE) break;
+        if (row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(state->database, "cannot list sessions", row));
+        if (page.sessions.size() == page_size) {
+            has_more = true;
+            break;
+        }
+        auto id = column_id(query->value, 0);
+        if (!id) return lighter::outcome_error(std::move(id).error());
+        auto provider = optional_text(query->value, 6);
+        auto model = optional_text(query->value, 7);
+        auto reasoning_effort = optional_text(query->value, 8);
+        if (provider.has_value() != model.has_value() || (reasoning_effort && !provider)) {
+            return lighter::outcome_error(Error::storage("session catalog has an incomplete model preference"));
+        }
+        std::optional<SessionModelPreference> model_preference;
+        if (provider) {
+            model_preference = SessionModelPreference{
+                .provider = *std::move(provider),
+                .model = *std::move(model),
+                .reasoning_effort = std::move(reasoning_effort),
+            };
+        }
+        page.sessions.push_back({
+            .id = *id,
+            .created_at_ms = sqlite3_column_int64(query->value, 1),
+            .updated_at_ms = sqlite3_column_int64(query->value, 2),
+            .workspace_root = optional_text(query->value, 3),
+            .title = optional_text(query->value, 4),
+            .preview = text(query->value, 5),
+            .model_preference = std::move(model_preference),
+            .entry_count = static_cast<u64>(sqlite3_column_int64(query->value, 9)),
+            .tokens_used = static_cast<u64>(sqlite3_column_int64(query->value, 10)),
+        });
     }
-    return SessionSummary{
-        .id = *id,
-        .created_at_ms = sqlite3_column_int64(query->value, 1),
-        .updated_at_ms = sqlite3_column_int64(query->value, 2),
-        .workspace_root = optional_text(query->value, 3),
-        .title = optional_text(query->value, 4),
-        .preview = text(query->value, 5),
-        .model_preference = std::move(model_preference),
-        .entry_count = static_cast<u64>(sqlite3_column_int64(query->value, 9)),
-        .tokens_used = static_cast<u64>(sqlite3_column_int64(query->value, 10)),
-    };
+    if (has_more) {
+        const auto &last = page.sessions.back();
+        page.continuation = SessionPageCursor{.updated_at_ms = last.updated_at_ms, .id = last.id};
+    }
+    return page;
 }
 
 namespace {
@@ -561,6 +636,10 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
     }
     if (delta.metadata.preview.size() > 240 || !lighter::encoding::utf8::is_valid(delta.metadata.preview)) {
         return lighter::outcome_error(Error::storage("session delta has an invalid preview"));
+    }
+    if (delta.metadata.title && (delta.metadata.title->empty() || delta.metadata.title->size() > 200 ||
+                                 !lighter::encoding::utf8::is_valid(*delta.metadata.title))) {
+        return lighter::outcome_error(Error::storage("session delta has an invalid title"));
     }
     if (delta.metadata.workspace && (delta.metadata.workspace->root.empty() || delta.metadata.workspace->key.empty())) {
         return lighter::outcome_error(Error::storage("session delta has incomplete workspace metadata"));

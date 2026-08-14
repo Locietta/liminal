@@ -646,6 +646,16 @@ void check_command_parsing_and_status() {
 
     command = tui::resolve_command("exit");
     require(command && *command == tui::CommandKind::QUIT, "command aliases must be registered centrally");
+    const auto resume = tui::resolve_command("resume");
+    const auto archive = tui::resolve_command("archive");
+    const auto unarchive = tui::resolve_command("unarchive");
+    require(resume && *resume == tui::CommandKind::RESUME && archive && *archive == tui::CommandKind::ARCHIVE && unarchive &&
+                *unarchive == tui::CommandKind::UNARCHIVE,
+            "session commands must resolve through the central command registry");
+    const auto named = tui::parse_name_arguments("  Catalog work  ");
+    const auto cleared = tui::parse_name_arguments("--clear");
+    require(named && named->title == "Catalog work" && cleared && !cleared->title && !tui::parse_name_arguments(""),
+            "session naming arguments must distinguish a title, explicit clearing, and missing input");
     require(tui::require_no_arguments("quit", " ") && !tui::require_no_arguments("quit", "now"),
             "argument-free commands must reject unexpected arguments");
 
@@ -894,6 +904,61 @@ void check_headless_virtual_time_and_snapshots() {
             "virtual time must drive the same elapsed command refresh as the interactive timer");
 }
 
+void check_headless_selectable_list() {
+    tui::HeadlessSession session(48, 9);
+    require(session.apply({.type = "notice", .text = "underlying transcript"}).has_value(),
+            "selectable-list fixture must seed the underlying screen");
+    require(
+        session.apply({.type = "open_list", .text = "one\ntwo", .name = "Choose item", .command = "Nothing here", .amount = 1}).has_value(),
+        "headless selectable list must open");
+    auto snapshot = session.inspect();
+    require(snapshot.focused_surface == "selectable_list" && snapshot.selected_id == "one" &&
+                snapshot.visible_text[0].contains("Choose item") && !snapshot.visible_text[2].contains("underlying transcript"),
+            "selectable list must render as a focused layer without changing the underlying transcript");
+
+    require(session.apply({.type = "down"}).has_value() && session.inspect().selected_id == "two",
+            "Down must move selectable-list identity by one row");
+    require(session.apply({.type = "down"}).has_value(), "Down at a page boundary must request another page");
+    snapshot = session.inspect();
+    require(snapshot.selection_effect == "load_next_page" && snapshot.visible_text[2].contains("Loading"),
+            "page loading must be an observable deterministic list state");
+    require(session.apply({.type = "list_next_page", .text = "three\nfour"}).has_value() && session.inspect().selected_id == "three",
+            "a loaded page must establish a coherent first-row selection");
+    require(session.apply({.type = "page_up"}).has_value() && session.inspect().selected_id == "one" &&
+                session.apply({.type = "page_down"}).has_value() && session.inspect().selected_id == "three",
+            "PageUp and PageDown must navigate loaded pages coherently");
+    require(session.apply({.type = "submit"}).has_value() && session.inspect().selection_effect == "confirmed",
+            "Enter must confirm the selected item identity");
+    require(session.apply({.type = "close_list"}).has_value(), "headless selectable list must close");
+    snapshot = session.inspect();
+    std::string restored;
+    for (const auto &line : snapshot.visible_text) restored += line;
+    require(snapshot.focused_surface == "session" && restored.contains("underlying transcript"),
+            "closing the list must reveal the unchanged underlying screen");
+
+    require(session.apply({.type = "open_list", .name = "Empty", .command = "No sessions"}).has_value(), "empty selectable list must open");
+    snapshot = session.inspect();
+    require(snapshot.visible_text[2].contains("No sessions"), "empty selectable list must render its empty state");
+    require(session.apply({.type = "submit"}).has_value() && session.inspect().selection_effect == "none" &&
+                session.apply({.type = "escape"}).has_value() && session.inspect().selection_effect == "cancelled",
+            "empty confirmation must be ignored and Esc must cancel deterministically");
+
+    tui::HeadlessSession final_page(40, 8);
+    require(final_page.apply({.type = "open_list", .text = "only", .amount = 1}).has_value() &&
+                final_page.apply({.type = "page_down"}).has_value() && final_page.apply({.type = "list_next_page"}).has_value() &&
+                final_page.inspect().selected_id == "only",
+            "an empty final page must preserve the prior coherent selection");
+
+    tui::HeadlessSession failed_page(40, 8);
+    require(failed_page.apply({.type = "open_list", .text = "first", .amount = 1}).has_value() &&
+                failed_page.apply({.type = "page_down"}).has_value() &&
+                failed_page.apply({.type = "list_page_error", .text = "catalog failed"}).has_value(),
+            "selectable-list page failure fixture must apply");
+    snapshot = failed_page.inspect();
+    require(snapshot.visible_text[2].contains("catalog failed") && snapshot.selected_id == "first",
+            "page failure must render without losing the selected item identity");
+}
+
 void check_headless_resize_and_markup_stress() {
     tui::HeadlessSession session(80, 24);
     u32 state = 0x243f6a88;
@@ -965,6 +1030,7 @@ i32 run_all(std::string_view executable) {
     check_working_indicator();
     check_mouse_selection();
     check_headless_virtual_time_and_snapshots();
+    check_headless_selectable_list();
     check_headless_resize_and_markup_stress();
     return 0;
 }

@@ -27,7 +27,8 @@
 #include <liminal/tui/clipboard.h>
 #include <liminal/tui/command.h>
 #include <liminal/tui/external_editor.h>
-#include <liminal/tui/hydration.h>
+#include <liminal/tui/selectable_list_dialog.h>
+#include <liminal/tui/session_commands.h>
 #include <liminal/session/persistence.h>
 
 namespace liminal::tui {
@@ -196,7 +197,20 @@ struct PromptReader {
 
 lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, ConsoleRenderer &renderer, PromptQueue &prompts,
                                     ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
-                                    TaskControl &task_control, i32 &held_mouse_buttons) {
+                                    SelectableListDialog &dialog, TaskControl &task_control, i32 &held_mouse_buttons) {
+    if (dialog.active()) {
+        if (event.kind == TerminalEventKind::RESIZE) return renderer.resize(event.size);
+        if (event.kind != TerminalEventKind::KEY || !event.pressed) return {};
+        switch (event.key) {
+            case TerminalKey::ESCAPE: return dialog.apply(SelectableListAction::CANCEL);
+            case TerminalKey::ENTER: return dialog.apply(SelectableListAction::CONFIRM);
+            case TerminalKey::ARROW_UP: return dialog.apply(SelectableListAction::UP);
+            case TerminalKey::ARROW_DOWN: return dialog.apply(SelectableListAction::DOWN);
+            case TerminalKey::PAGE_UP: return dialog.apply(SelectableListAction::PAGE_UP);
+            case TerminalKey::PAGE_DOWN: return dialog.apply(SelectableListAction::PAGE_DOWN);
+            default: return {};
+        }
+    }
     switch (event.kind) {
         case TerminalEventKind::TEXT:
         case TerminalEventKind::PASTE: return renderer.insert(event.text);
@@ -269,7 +283,7 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
 
 Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &renderer, PromptQueue &prompts,
                               ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
-                              TaskControl &control, SessionFailure &failure) {
+                              SelectableListDialog &dialog, TaskControl &control, SessionFailure &failure) {
     i32 held_mouse_buttons = 0;
     while (true) {
         auto event = co_await terminal.next_event();
@@ -278,7 +292,7 @@ Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &render
             co_return 1;
         }
         if (event->kind == TerminalEventKind::CLOSED) co_return 0;
-        if (auto error = apply_terminal_event(*event, renderer, prompts, editor_requests, copy_requests, selection_copies, control,
+        if (auto error = apply_terminal_event(*event, renderer, prompts, editor_requests, copy_requests, selection_copies, dialog, control,
                                               held_mouse_buttons)) {
             failure.record("cannot render terminal input", error, control);
             co_return 1;
@@ -498,7 +512,7 @@ Task<lighter::Outcome<T, E, lighter::Cancellation>> guard_task(Task<T, E> work, 
 }
 
 Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &renderer, TaskControl &control, model::Catalog &models,
-                    SessionFailure &failure) {
+                    application::SessionCoordinator *sessions, SelectableListDialog &dialog, SessionFailure &failure) {
     lighter::Error render_error;
     EventSink events = [&renderer, &render_error, &control](const Event &event) {
         if (render_error) return;
@@ -607,6 +621,58 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                     if (!rendered(render_error, "cannot render compaction status")) co_return 1;
                     continue;
                 }
+                case CommandKind::RESUME: {
+                    auto arguments = require_no_arguments(command_line.name, command_line.arguments);
+                    if (!arguments) {
+                        if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"),
+                                      "cannot render command error"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (control.active_task) {
+                        if (!rendered(renderer.notice("[/resume is available only while the agent is idle]\n"),
+                                      "cannot render resume status"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (!rendered(co_await resume_session(agent, sessions, renderer, dialog), "cannot run resume command")) co_return 1;
+                    saving_notice_visible = false;
+                    continue;
+                }
+                case CommandKind::NAME: {
+                    auto arguments = parse_name_arguments(command_line.arguments);
+                    if (!arguments) {
+                        if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"),
+                                      "cannot render command error"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (!rendered(name_current_session(agent, renderer, std::move(arguments->title)), "cannot render session name status"))
+                        co_return 1;
+                    continue;
+                }
+                case CommandKind::ARCHIVE:
+                case CommandKind::UNARCHIVE: {
+                    auto arguments = require_no_arguments(command_line.name, command_line.arguments);
+                    if (!arguments) {
+                        if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"),
+                                      "cannot render command error"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (control.active_task) {
+                        if (!rendered(renderer.notice("[session catalogs are available only while the agent is idle]\n"),
+                                      "cannot render archive status"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (!rendered(co_await change_archive_state(agent, sessions, renderer, dialog,
+                                                                *command == CommandKind::ARCHIVE ? ArchiveCommand::ARCHIVE :
+                                                                                                   ArchiveCommand::UNARCHIVE),
+                                  "cannot render archive status"))
+                        co_return 1;
+                    continue;
+                }
                 case CommandKind::MODEL: {
                     auto refreshed = co_await guard_task(models.refresh(), control);
                     if (refreshed.is_cancelled()) {
@@ -692,7 +758,8 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
 
 } // namespace
 
-Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &models, std::vector<std::string> startup_notices) {
+Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &models, application::SessionCoordinator *sessions,
+                   std::vector<Block> initial_transcript, std::vector<std::string> startup_notices) {
     TerminalSession terminal;
     Pipe pipe;
     const bool input_attached = TerminalSession::attached(0);
@@ -734,7 +801,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
     TaskControl control;
     SessionFailure failure;
     i32 exit_code = 0;
-    if (auto error = renderer.load_transcript(project_transcript(agent.session, *agent.tools))) {
+    if (auto error = renderer.load_transcript(std::move(initial_transcript))) {
         failure.message = "cannot hydrate session transcript: " + std::string(error.message());
         exit_code = 1;
     }
@@ -769,19 +836,21 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             ExternalEditorRequests editor_requests;
             CopyRequests copy_requests;
             SelectionCopies selection_copies;
+            SelectableListDialog dialog;
             PromptReader reader{.prompts = &prompts};
             lighter::Event render_requested;
             renderer.set_redraw_scheduler([&render_requested] { render_requested.set(); });
 #ifndef _WIN32
-            auto raced = co_await WhenAny(
-                repl_body(agent, reader, renderer, control, models, failure),
-                signal_monitor(interrupts, renderer, control, failure, &selection_copies),
-                terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies, control, failure),
-                render_monitor(render_requested, renderer, control, failure),
-                external_editor_loop(editor_requests, terminal, renderer, control, failure),
-                copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
-                selection_copy_loop(selection_copies, renderer, control, failure), animation_monitor(renderer, control, failure),
-                suspend_monitor(suspend_controls, terminal, renderer, control, failure));
+            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, failure),
+                                          signal_monitor(interrupts, renderer, control, failure, &selection_copies),
+                                          terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies,
+                                                              dialog, control, failure),
+                                          render_monitor(render_requested, renderer, control, failure),
+                                          external_editor_loop(editor_requests, terminal, renderer, control, failure),
+                                          copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
+                                          selection_copy_loop(selection_copies, renderer, control, failure),
+                                          animation_monitor(renderer, control, failure),
+                                          suspend_monitor(suspend_controls, terminal, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
@@ -792,14 +861,15 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             if (raced.index() == 7) exit_code = std::get<7>(raced);
             if (raced.index() == 8) exit_code = std::get<8>(raced);
 #else
-            auto raced = co_await WhenAny(
-                repl_body(agent, reader, renderer, control, models, failure),
-                signal_monitor(interrupts, renderer, control, failure, &selection_copies),
-                terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies, control, failure),
-                render_monitor(render_requested, renderer, control, failure),
-                external_editor_loop(editor_requests, terminal, renderer, control, failure),
-                copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
-                selection_copy_loop(selection_copies, renderer, control, failure), animation_monitor(renderer, control, failure));
+            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, failure),
+                                          signal_monitor(interrupts, renderer, control, failure, &selection_copies),
+                                          terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies,
+                                                              dialog, control, failure),
+                                          render_monitor(render_requested, renderer, control, failure),
+                                          external_editor_loop(editor_requests, terminal, renderer, control, failure),
+                                          copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
+                                          selection_copy_loop(selection_copies, renderer, control, failure),
+                                          animation_monitor(renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
@@ -812,7 +882,8 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             renderer.set_redraw_scheduler({});
         } else {
             PromptReader reader{.input = &pipe};
-            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, failure),
+            SelectableListDialog dialog;
+            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, failure),
                                           signal_monitor(interrupts, renderer, control, failure));
             exit_code = raced.index() == 0 ? std::get<0>(raced) : std::get<1>(raced);
         }

@@ -31,6 +31,7 @@ struct Agent {
     Result<context::ContextManifest> context_manifest() const;
 
     void select_model(model::Choice next);
+    void replace_session(model::Choice next_model, session::Session next_session);
 
     model::Choice model;
     ToolSet *tools;

@@ -9,6 +9,7 @@
 #include <lighter/async/vocab/error.h>
 
 #include <liminal/event.h>
+#include <liminal/tui/selectable_list.h>
 #include <liminal/tui/session_screen.h>
 
 namespace liminal::tui {
@@ -26,6 +27,13 @@ struct ConsoleRenderer {
     lighter::Error notice(std::string_view text);
     lighter::Error load_transcript(std::vector<Block> blocks);
     lighter::Error status(std::string_view text);
+    lighter::Error show_selectable_list(SelectableList list);
+    lighter::Error close_selectable_list();
+    lighter::Error apply_selectable_list(SelectableListAction action, SelectableListEffect &effect);
+    lighter::Error append_selectable_list_page(SelectableListPage page);
+    lighter::Error fail_selectable_list_page(std::string detail);
+    bool selectable_list_active() const noexcept;
+    std::optional<std::string_view> selectable_list_selection() const noexcept;
 
     lighter::Error insert(std::string_view text);
     lighter::Error backspace();
@@ -68,6 +76,7 @@ struct ConsoleRenderer {
     lighter::TerminalSession *terminal;
     bool mirror_plain_output = false;
     SessionScreen screen;
+    std::optional<SelectableList> selectable_list;
     std::optional<Frame> previous_frame;
     std::copyable_function<void()> redraw_scheduler;
     bool redraw_pending = false;

@@ -69,3 +69,14 @@ The action and exact path or command stay bright, while completion metadata and 
 | Ctrl+O               | Copy the selection when one is active; otherwise copy the latest reply                     |
 
 Drag selection highlights whole screen cells and persists after you release the button; nothing reaches the clipboard until you press Ctrl+C or Ctrl+O. In Windows Terminal, Ctrl+Shift+C also works because the terminal passes it through when it has no selection of its own. A plain click clears the selection, and it also clears when content changes, the transcript scrolls, or the terminal resizes, since the highlight is anchored to screen cells. Terminal-native selection remains available through the terminal's usual modifier (typically Shift+drag).
+
+## Session discovery
+
+Session catalog commands are available while the agent is idle:
+
+- `/resume` opens recent, non-archived sessions for the current workspace. Up and Down move one row, PageUp and PageDown move between catalog pages, Enter confirms, and Esc cancels without changing the current session.
+- `/name <title>` names the current session. `/name --clear` returns it to the first-prompt preview.
+- `/archive` opens the active-session catalog and archives the selected session without deleting it.
+- `/unarchive` opens the archived-session catalog, so every archived session remains identifiable and restorable.
+
+Liminal fully prepares a selected resume target before replacing the current transcript. If the current session still has unsaved history after a final save attempt, Liminal asks before switching and explains that the unsaved tail will not be resumable and that external tool effects are not undone. Choosing to stay leaves the current session unchanged.
