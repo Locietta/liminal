@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
+#include <latch>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -1019,7 +1020,9 @@ void test_fork_publication_is_deferred_and_independently_durable() {
             "fork model-resolution failure disturbed the source session or leaked a catalog row");
 
     auto unavailable_persistence_services = preparation_services(models);
-    unavailable_persistence_services.persistence = [](session::SessionWriter) -> std::shared_ptr<session::PersistenceQueue> { return {}; };
+    unavailable_persistence_services.unpublished_persistence = [](session::SessionWriter) -> std::shared_ptr<session::PersistenceQueue> {
+        return {};
+    };
     application::SessionCoordinator unavailable_persistence_coordinator(*store, std::move(unavailable_persistence_services));
     auto persistence_preparation_failure = unavailable_persistence_coordinator.prepare_fork(source, checkpoint_id(checkpoint));
     require(!persistence_preparation_failure && persistence_preparation_failure.error().detail.contains("empty persistence queue") &&
@@ -1027,10 +1030,11 @@ void test_fork_publication_is_deferred_and_independently_durable() {
             "fork persistence preparation failure leaked a catalog row");
 
     auto persistence_services = preparation_services(models);
-    persistence_services.persistence = [](session::SessionWriter writer) {
-        return session::PersistenceQueue::create_for_test(writer.session_id(), [](const session::SessionDelta &) -> Result<void> {
-            return lighter::outcome_error(Error::storage("injected initial fork publication failure"));
-        });
+    persistence_services.unpublished_persistence = [](session::SessionWriter writer) {
+        return session::PersistenceQueue::create_unpublished_for_test(
+            writer.session_id(), [](const session::SessionDelta &) -> Result<void> {
+                return lighter::outcome_error(Error::storage("injected initial fork publication failure"));
+            });
     };
     application::SessionCoordinator persistence_coordinator(*store, std::move(persistence_services));
     auto failed_plan = persistence_coordinator.prepare_fork(source, checkpoint_id(checkpoint));
@@ -1460,6 +1464,69 @@ void test_session_rejects_mismatched_persistence_queue() {
     require(!owner.attach_persistence(queue), "session allowed its persistence owner to be replaced");
 }
 
+void test_initial_publication_serializes_enqueued_mutations_and_is_one_shot() {
+    struct PublicationGate {
+        std::latch initial_entered{1};
+        std::latch release_initial{1};
+        std::atomic<usize> attempts = 0;
+        std::atomic<usize> active_callbacks = 0;
+        std::atomic<usize> maximum_active_callbacks = 0;
+        std::mutex received_mutex;
+        std::vector<session::SessionDelta> received;
+    } gate;
+
+    session::Session value;
+    const auto initial = session::make_delta(value, value.entries);
+    auto queue =
+        session::PersistenceQueue::create_unpublished_for_test(value.id, [&gate](const session::SessionDelta &delta) -> Result<void> {
+            const auto attempt = gate.attempts.fetch_add(1) + 1;
+            const auto active = gate.active_callbacks.fetch_add(1) + 1;
+            auto maximum = gate.maximum_active_callbacks.load();
+            while (maximum < active && !gate.maximum_active_callbacks.compare_exchange_weak(maximum, active)) {}
+            {
+                std::scoped_lock lock(gate.received_mutex);
+                gate.received.push_back(delta);
+            }
+            if (attempt == 1) {
+                gate.initial_entered.count_down();
+                gate.release_initial.wait();
+            }
+            gate.active_callbacks.fetch_sub(1);
+            return {};
+        });
+    require(value.attach_persistence(queue).has_value(), "failed to attach unpublished persistence queue fixture");
+
+    std::atomic<bool> publication_succeeded = false;
+    std::jthread publisher([&] { publication_succeeded = queue->publish_initial(initial).has_value(); });
+    gate.initial_entered.wait();
+    value.start_task("queued during initial publication");
+    require(queue->status().pending_mutations == 1, "mutation enqueued during initial publication was not retained");
+    gate.release_initial.count_down();
+    publisher.join();
+
+    require(publication_succeeded && queue->flush().has_value(), "initial publication or its serialized pending mutation did not complete");
+    auto repeated = queue->publish_initial(initial);
+    require(!repeated && repeated.error().detail.contains("unused persistence queue"),
+            "persistence queue accepted repeated initial publication");
+    require(gate.attempts == 2 && gate.maximum_active_callbacks == 1,
+            "initial publication overlapped a queued commit or lost its pending mutation");
+    {
+        std::scoped_lock lock(gate.received_mutex);
+        require(gate.received.size() == 2 && gate.received.front().entries.empty() && gate.received.back().entries.size() == 1,
+                "publication queue did not preserve initial-before-enqueued commit order");
+    }
+
+    usize failed_attempts = 0;
+    auto failed_queue = session::PersistenceQueue::create_unpublished_for_test(
+        session::generate_session_id(), [&failed_attempts](const session::SessionDelta &) -> Result<void> {
+            ++failed_attempts;
+            return lighter::outcome_error(Error::storage("injected publication failure"));
+        });
+    require(!failed_queue->publish_initial(initial), "initial publication failure fixture unexpectedly succeeded");
+    require(!failed_queue->publish_initial(initial) && !failed_queue->flush() && failed_attempts == 1,
+            "failed initial publication was retried or allowed its queue to become active");
+}
+
 void test_ordered_queue_failure_and_retry() {
     struct Gate {
         std::mutex mutex;
@@ -1659,6 +1726,7 @@ i32 run_all() {
     test_history_command_is_atomic_and_uses_focused_dialogs();
     test_recovery_never_replays_tools();
     test_session_rejects_mismatched_persistence_queue();
+    test_initial_publication_serializes_enqueued_mutations_and_is_one_shot();
     test_ordered_queue_failure_and_retry();
     test_flush_waits_for_its_complete_pending_prefix();
     test_state_path_resolution_failure_retries();

@@ -37,8 +37,9 @@ void apply_mutation(session::Session &value, const SessionCatalogMutation &mutat
 } // namespace
 
 SessionPreparationServices::SessionPreparationServices(TranscriptProjector project, ModelResolver resolve_model,
-                                                       PersistenceFactory persistence)
-    : persistence(std::move(persistence)), project(std::move(project)), resolve_model(std::move(resolve_model)) {}
+                                                       PersistenceFactory persistence, PersistenceFactory unpublished_persistence)
+    : persistence(std::move(persistence)), unpublished_persistence(std::move(unpublished_persistence)), project(std::move(project)),
+      resolve_model(std::move(resolve_model)) {}
 
 Result<SessionModelResolution> resolve_session_model(model::Catalog &models, const std::optional<std::string> &configured_model,
                                                      const std::optional<session::SessionModelPreference> &stored_model) {
@@ -75,6 +76,11 @@ SessionCoordinator::SessionCoordinator(session::Store store, SessionPreparationS
     lighter::check(static_cast<bool>(this->services.resolve_model), "session preparation requires a model resolver");
     if (!this->services.persistence) {
         this->services.persistence = [](session::SessionWriter writer) { return session::PersistenceQueue::create(std::move(writer)); };
+    }
+    if (!this->services.unpublished_persistence) {
+        this->services.unpublished_persistence = [](session::SessionWriter writer) {
+            return session::PersistenceQueue::create_unpublished(std::move(writer));
+        };
     }
 }
 
@@ -155,7 +161,7 @@ Result<ForkPlan> SessionCoordinator::prepare_fork(const session::Session &source
     if (!writer) return lighter::outcome_error(std::move(writer).error());
 
     AcquiredSession acquired{.session = *std::move(fork)};
-    auto queue = services.persistence(*std::move(writer));
+    auto queue = services.unpublished_persistence(*std::move(writer));
     auto attached = acquired.session.attach_persistence(queue);
     if (!attached) return lighter::outcome_error(std::move(attached).error());
     auto transcript = services.project(acquired.session);

@@ -63,9 +63,11 @@ struct SessionPreparationServices {
     using ModelResolver =
         std::copyable_function<Result<SessionModelResolution>(const std::optional<session::SessionModelPreference> &) const>;
 
-    SessionPreparationServices(TranscriptProjector project, ModelResolver resolve_model, PersistenceFactory persistence = {});
+    SessionPreparationServices(TranscriptProjector project, ModelResolver resolve_model, PersistenceFactory persistence = {},
+                               PersistenceFactory unpublished_persistence = {});
 
     PersistenceFactory persistence;
+    PersistenceFactory unpublished_persistence;
     TranscriptProjector project;
     ModelResolver resolve_model;
 };

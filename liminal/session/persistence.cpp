@@ -25,11 +25,22 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create(SessionWriter writer)
     const auto id = writer.session_id();
     auto owned_writer = std::make_shared<SessionWriter>(std::move(writer));
     Commit commit = [owned_writer](const SessionDelta &delta) { return owned_writer->commit(delta); };
-    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit)));
+    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::ACTIVE));
+}
+
+std::shared_ptr<PersistenceQueue> PersistenceQueue::create_unpublished(SessionWriter writer) {
+    const auto id = writer.session_id();
+    auto owned_writer = std::make_shared<SessionWriter>(std::move(writer));
+    Commit commit = [owned_writer](const SessionDelta &delta) { return owned_writer->commit(delta); };
+    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::UNPUBLISHED));
 }
 
 std::shared_ptr<PersistenceQueue> PersistenceQueue::create_for_test(SessionId id, Commit commit) {
-    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit)));
+    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::ACTIVE));
+}
+
+std::shared_ptr<PersistenceQueue> PersistenceQueue::create_unpublished_for_test(SessionId id, Commit commit) {
+    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::UNPUBLISHED));
 }
 
 std::shared_ptr<PersistenceQueue> PersistenceQueue::create_reopening(std::filesystem::path database_path, SessionId id,
@@ -50,7 +61,7 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create_reopening(std::filesy
         }
         return reopening->writer->commit(delta);
     };
-    auto queue = std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit)));
+    auto queue = std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::ACTIVE));
     queue->mark_degraded(std::move(detail));
     return queue;
 }
@@ -73,13 +84,13 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create_resolving(SessionId i
         }
         return resolving->writer->commit(delta);
     };
-    auto queue = std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit)));
+    auto queue = std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::ACTIVE));
     queue->mark_degraded(std::move(detail));
     return queue;
 }
 
-PersistenceQueue::PersistenceQueue(SessionId id, Commit commit)
-    : id(id), commit(std::move(commit)), worker([this](std::stop_token stop) { run(stop); }) {}
+PersistenceQueue::PersistenceQueue(SessionId id, Commit commit, PublicationState publication_state)
+    : id(id), commit(std::move(commit)), publication_state(publication_state), worker([this](std::stop_token stop) { run(stop); }) {}
 
 PersistenceQueue::~PersistenceQueue() {
     worker.request_stop();
@@ -107,15 +118,27 @@ PersistenceStatus PersistenceQueue::status() const {
 Result<void> PersistenceQueue::publish_initial(const SessionDelta &delta) {
     {
         std::scoped_lock lock(mutex);
-        if (!pending.empty() || enqueued_mutations != 0 || persisted_mutations != 0 || commit_active) {
+        if (publication_state != PublicationState::UNPUBLISHED || !pending.empty() || enqueued_mutations != 0 || persisted_mutations != 0 ||
+            commit_active) {
             return lighter::outcome_error(Error::protocol("initial publication requires an unused persistence queue"));
         }
+        publication_state = PublicationState::PUBLISHING;
         commit_active = true;
     }
     auto published = commit(delta);
     {
         std::scoped_lock lock(mutex);
         commit_active = false;
+        if (published) {
+            publication_state = PublicationState::ACTIVE;
+            current_status = {.pending_mutations = pending.size()};
+            if (!pending.empty()) retry_requested = true;
+        } else {
+            publication_state = PublicationState::FAILED;
+            current_status.degraded = true;
+            current_status.pending_mutations = pending.size();
+            current_status.detail = published.error().message();
+        }
     }
     changed.notify_all();
     return published;
@@ -129,6 +152,16 @@ void PersistenceQueue::mark_degraded(std::string detail) {
 
 Result<void> PersistenceQueue::flush() {
     std::unique_lock lock(mutex);
+    if (publication_state == PublicationState::UNPUBLISHED) {
+        return lighter::outcome_error(Error::protocol("initial session publication has not started"));
+    }
+    if (publication_state == PublicationState::PUBLISHING) {
+        changed.wait(lock, [this] { return publication_state != PublicationState::PUBLISHING; });
+    }
+    if (publication_state == PublicationState::FAILED) {
+        return lighter::outcome_error(
+            Error::storage(current_status.detail.empty() ? "initial session publication failed" : current_status.detail));
+    }
     if (pending.empty()) return {};
     const auto target = enqueued_mutations;
     const auto observed_failure = failure_generation;
@@ -159,7 +192,9 @@ void PersistenceQueue::run(std::stop_token stop) {
         u64 attempt_through = 0;
         {
             std::unique_lock lock(mutex);
-            changed.wait(lock, stop, [this] { return !pending.empty() && retry_requested; });
+            changed.wait(lock, stop, [this] {
+                return publication_state == PublicationState::ACTIVE && !commit_active && !pending.empty() && retry_requested;
+            });
             if (stop.stop_requested()) return;
             retry_requested = false;
             count = pending.size();

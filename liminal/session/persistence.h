@@ -23,9 +23,11 @@ struct PersistenceQueue {
     using Commit = std::copyable_function<Result<void>(const SessionDelta &) const>;
 
     static std::shared_ptr<PersistenceQueue> create(SessionWriter writer);
+    static std::shared_ptr<PersistenceQueue> create_unpublished(SessionWriter writer);
     static std::shared_ptr<PersistenceQueue> create_reopening(std::filesystem::path database_path, SessionId id, std::string detail);
     static std::shared_ptr<PersistenceQueue> create_resolving(SessionId id, std::string detail);
     static std::shared_ptr<PersistenceQueue> create_for_test(SessionId id, Commit commit);
+    static std::shared_ptr<PersistenceQueue> create_unpublished_for_test(SessionId id, Commit commit);
     ~PersistenceQueue();
 
     PersistenceQueue(const PersistenceQueue &) = delete;
@@ -42,7 +44,14 @@ struct PersistenceQueue {
 private:
     friend struct Session;
 
-    PersistenceQueue(SessionId id, Commit commit);
+    enum struct PublicationState {
+        UNPUBLISHED,
+        PUBLISHING,
+        ACTIVE,
+        FAILED,
+    };
+
+    PersistenceQueue(SessionId id, Commit commit, PublicationState publication_state);
     void enqueue(SessionDelta delta);
     void mark_degraded(std::string detail);
     void run(std::stop_token stop);
@@ -59,6 +68,7 @@ private:
     u64 last_failed_through = 0;
     bool retry_requested = false;
     bool commit_active = false;
+    PublicationState publication_state;
     PersistenceStatus current_status;
     std::jthread worker;
 };
