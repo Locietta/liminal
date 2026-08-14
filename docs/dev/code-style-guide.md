@@ -120,6 +120,23 @@ Generally we will have 3 kinds of failures in our codebase:
 
 Distinguish these 3 kinds of failures by asking who can act on the failure. If the immediate caller can act on it, return `lighter::Outcome`. If only a distant recovery boundary can act on it, throw an exception. If no one can act on it, `panic`.
 
-# Synchronization in Tests
+## Synchronization in Tests
 
 We have a couple of mock tests for concurrent code in our codebase. These tests must be deterministic and not rely on timing assumptions. You should coordinate concurrency through observable state transitions (events, barriers, callbacks, process state waits, or mock handshakes), never through an arbitrary sleep or an assumption that enough wall-clock time has passed.
+
+## Commit Messages
+
+The headline of a commit should follow the format: `<type>(<scope>): <subject>`, type or scope can be omitted if not applicable.
+
+If the commit is big enough and you cannot describe all important changes in the headline, you can add a body to the commit message. The body should be separated from the headline by a blank line, and preferably be a list of bullet points.
+
+An example:
+
+```
+refactor(tui): centralize slash command parsing
+
+- Lexes REPL input once into either a user prompt or an exact command name and argument string.
+- Resolves commands and aliases centrally and keeps command recognition out of individual handlers.
+- Rejects unknown slash commands instead of submitting them to the model.
+- Supports a leading double slash as an escaped slash-prefixed user prompt.
+```
