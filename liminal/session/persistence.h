@@ -31,14 +31,16 @@ struct PersistenceQueue {
     PersistenceQueue(const PersistenceQueue &) = delete;
     PersistenceQueue &operator=(const PersistenceQueue &) = delete;
 
-    void enqueue(SessionDelta delta);
     SessionId session_id() const noexcept;
     PersistenceStatus status() const;
     Result<void> flush();
-    void mark_degraded(std::string detail);
 
 private:
+    friend struct Session;
+
     PersistenceQueue(SessionId id, Commit commit);
+    void enqueue(SessionDelta delta);
+    void mark_degraded(std::string detail);
     void run(std::stop_token stop);
     SessionDelta pending_delta_locked(usize count) const;
 

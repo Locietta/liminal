@@ -152,7 +152,7 @@ Result<bool> has_user_schema_objects(sqlite3 *database) {
     auto query = prepare(database, R"sql(
 SELECT EXISTS(
     SELECT 1 FROM sqlite_schema
-    WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%'
+    WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite\_%' ESCAPE '\'
 )
 )sql");
     if (!query) return lighter::outcome_error(std::move(query).error());

@@ -174,7 +174,8 @@ struct Session {
     Result<void> validate() const;
     void set_model_preference(std::string provider, std::string model, std::optional<std::string> reasoning_effort);
     Result<void> attach_persistence(std::shared_ptr<PersistenceQueue> queue);
-    PersistenceQueue *persistence_queue() const noexcept;
+    PersistenceQueue *persistence_queue() noexcept;
+    const PersistenceQueue *persistence_queue() const noexcept;
 
     const SessionEntry *find(EntryId id) const noexcept;
     std::vector<const SessionEntry *> active_branch() const;

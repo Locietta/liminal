@@ -31,11 +31,20 @@ namespace {
 using namespace lighter::types;
 using namespace liminal;
 
+template <typename T>
+concept PubliclyEnqueueable = requires(T &queue, session::SessionDelta delta) { queue.enqueue(std::move(delta)); };
+
+template <typename T>
+concept PubliclyDegradable = requires(T &queue) { queue.mark_degraded("failure"); };
+
 static_assert(!std::default_initializable<session::Store>);
 static_assert(!std::default_initializable<session::SessionWriter>);
 static_assert(std::movable<session::Session>);
 static_assert(!std::copy_constructible<session::Session>);
 static_assert(!std::assignable_from<session::Session &, const session::Session &>);
+static_assert(std::same_as<decltype(std::declval<const session::Session &>().persistence_queue()), const session::PersistenceQueue *>);
+static_assert(!PubliclyEnqueueable<session::PersistenceQueue>);
+static_assert(!PubliclyDegradable<session::PersistenceQueue>);
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -267,7 +276,7 @@ void test_unidentified_nonempty_database_is_not_adopted() {
     TemporaryDatabase database;
     sqlite3 *raw = nullptr;
     require(sqlite3_open(database.path.string().c_str(), &raw) == SQLITE_OK, "failed to create unidentified database fixture");
-    require(sqlite3_exec(raw, "CREATE TABLE foreign_data(value TEXT)", nullptr, nullptr, nullptr) == SQLITE_OK,
+    require(sqlite3_exec(raw, "CREATE TABLE sqliteX(value TEXT)", nullptr, nullptr, nullptr) == SQLITE_OK,
             "failed to create foreign table fixture");
     sqlite3_close(raw);
 
@@ -278,7 +287,7 @@ void test_unidentified_nonempty_database_is_not_adopted() {
     sqlite3_stmt *inspection = nullptr;
     constexpr auto query = R"sql(
 SELECT
-    (SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='foreign_data'),
+    (SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='sqliteX'),
     (SELECT application_id FROM pragma_application_id),
     (SELECT user_version FROM pragma_user_version),
     (SELECT journal_mode FROM pragma_journal_mode)

@@ -119,7 +119,9 @@ Result<void> Session::attach_persistence(std::shared_ptr<PersistenceQueue> queue
     return {};
 }
 
-PersistenceQueue *Session::persistence_queue() const noexcept { return persistence.get(); }
+PersistenceQueue *Session::persistence_queue() noexcept { return persistence.get(); }
+
+const PersistenceQueue *Session::persistence_queue() const noexcept { return persistence.get(); }
 
 Result<void> Session::validate() const {
     if (next_entry_id != entries.size() + 1) {
