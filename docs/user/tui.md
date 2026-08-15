@@ -74,10 +74,8 @@ Drag selection highlights whole screen cells and persists after you release the 
 
 Session catalog commands are available while the agent is idle:
 
-- `/resume` opens recent, non-archived sessions for the current workspace. Up and Down move one row, PageUp and PageDown move between catalog pages, Enter confirms, and Esc cancels without changing the current session.
+- `/resume` opens recent sessions for the current workspace. Up and Down move one row, PageUp and PageDown move between catalog pages, Enter confirms, and Esc cancels without changing the current session.
 - `/name <title>` names the current session. `/name --clear` returns it to the first-prompt preview.
-- `/archive` opens the active-session catalog and archives the selected session without deleting it.
-- `/unarchive` opens the archived-session catalog, so every archived session remains identifiable and restorable.
 
 Liminal fully prepares a selected resume target before replacing the current transcript. If the current session still has unsaved history after a final save attempt, Liminal asks before switching and explains that the unsaved tail will not be resumable and that external tool effects are not undone. Choosing to stay leaves the current session unchanged.
 

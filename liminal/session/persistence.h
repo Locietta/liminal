@@ -15,19 +15,22 @@ namespace liminal::session {
 
 struct PersistenceStatus {
     bool degraded = false;
+    bool catalog_degraded = false;
     usize pending_mutations = 0;
     std::string detail;
+    std::string catalog_detail;
 };
 
 struct PersistenceQueue {
-    using Commit = std::copyable_function<Result<void>(const SessionDelta &) const>;
+    using Commit = std::copyable_function<Result<SessionCommitResult>(const SessionDelta &) const>;
+    using TestCommit = std::copyable_function<Result<void>(const SessionDelta &) const>;
 
     static std::shared_ptr<PersistenceQueue> create(SessionWriter writer);
     static std::shared_ptr<PersistenceQueue> create_unpublished(SessionWriter writer);
-    static std::shared_ptr<PersistenceQueue> create_reopening(std::filesystem::path database_path, SessionId id, std::string detail);
+    static std::shared_ptr<PersistenceQueue> create_reopening(std::filesystem::path state_root, SessionId id, std::string detail);
     static std::shared_ptr<PersistenceQueue> create_resolving(SessionId id, std::string detail);
-    static std::shared_ptr<PersistenceQueue> create_for_test(SessionId id, Commit commit);
-    static std::shared_ptr<PersistenceQueue> create_unpublished_for_test(SessionId id, Commit commit);
+    static std::shared_ptr<PersistenceQueue> create_for_test(SessionId id, TestCommit commit);
+    static std::shared_ptr<PersistenceQueue> create_unpublished_for_test(SessionId id, TestCommit commit);
     ~PersistenceQueue();
 
     PersistenceQueue(const PersistenceQueue &) = delete;

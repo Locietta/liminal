@@ -141,7 +141,7 @@ def terminal_test_environment(
     env = os.environ.copy()
     env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
     env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
-    env["LIMINAL_STATE_DB"] = str(tmp_path / "state.sqlite3")
+    env["LIMINAL_STATE_DIR"] = str(tmp_path)
     env["LIMINAL_MODEL"] = "test-model"
     env["LIMINAL_SYSTEM_PROMPT"] = "Test system policy."
     env["LIMINAL_DEVELOPER_PROMPT"] = "Test developer policy."
@@ -396,7 +396,7 @@ def run_liminal(stdin, providers, tmp_path, selector="test-model"):
     env = os.environ.copy()
     env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
     env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
-    env["LIMINAL_STATE_DB"] = str(tmp_path / "state.sqlite3")
+    env["LIMINAL_STATE_DIR"] = str(tmp_path)
     env["LIMINAL_MODEL"] = selector
     env["LIMINAL_SYSTEM_PROMPT"] = "Test system policy."
     env["LIMINAL_DEVELOPER_PROMPT"] = "Test developer policy."
@@ -526,7 +526,7 @@ def test_session_continue_direct_resume_and_locking(openai_mock, tmp_path):
 
     import sqlite3
 
-    with sqlite3.connect(tmp_path / "state.sqlite3") as database:
+    with sqlite3.connect(tmp_path / "catalog.sqlite3") as database:
         session_hex = database.execute(
             "SELECT lower(hex(id)) FROM sessions"
         ).fetchone()[0]
@@ -704,7 +704,7 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
     auth_file = tmp_path / "auth.json"
     env = os.environ.copy()
     env["LIMINAL_AUTH_FILE"] = str(auth_file)
-    env["LIMINAL_STATE_DB"] = str(tmp_path / "state.sqlite3")
+    env["LIMINAL_STATE_DIR"] = str(tmp_path)
     env["LIMINAL_CODEX_AUTH_BASE_URL"] = url
     result = subprocess.run(
         [str(BINARY), "login", "codex"],
@@ -1040,7 +1040,7 @@ def test_terminal_restores_after_interrupt(tmp_path):
     env = os.environ.copy()
     env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
     env["LIMINAL_AUTH_FILE"] = str(tmp_path / "missing-auth.json")
-    env["LIMINAL_STATE_DB"] = str(tmp_path / "state.sqlite3")
+    env["LIMINAL_STATE_DIR"] = str(tmp_path)
     env["LIMINAL_MODEL"] = "test-model"
     process = subprocess.Popen(
         [str(BINARY)],

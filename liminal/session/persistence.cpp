@@ -2,6 +2,9 @@
 
 #include "paths.h"
 
+#include "catalog.h"
+#include "repository.h"
+
 #include <array>
 #include <chrono>
 #include <optional>
@@ -35,27 +38,38 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create_unpublished(SessionWr
     return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::UNPUBLISHED));
 }
 
-std::shared_ptr<PersistenceQueue> PersistenceQueue::create_for_test(SessionId id, Commit commit) {
-    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::ACTIVE));
+std::shared_ptr<PersistenceQueue> PersistenceQueue::create_for_test(SessionId id, TestCommit commit) {
+    Commit adapted = [commit = std::move(commit)](const SessionDelta &delta) -> Result<SessionCommitResult> {
+        auto result = commit(delta);
+        if (!result) return lighter::outcome_error(std::move(result).error());
+        return SessionCommitResult{};
+    };
+    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(adapted), PublicationState::ACTIVE));
 }
 
-std::shared_ptr<PersistenceQueue> PersistenceQueue::create_unpublished_for_test(SessionId id, Commit commit) {
-    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::UNPUBLISHED));
+std::shared_ptr<PersistenceQueue> PersistenceQueue::create_unpublished_for_test(SessionId id, TestCommit commit) {
+    Commit adapted = [commit = std::move(commit)](const SessionDelta &delta) -> Result<SessionCommitResult> {
+        auto result = commit(delta);
+        if (!result) return lighter::outcome_error(std::move(result).error());
+        return SessionCommitResult{};
+    };
+    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(adapted), PublicationState::UNPUBLISHED));
 }
 
-std::shared_ptr<PersistenceQueue> PersistenceQueue::create_reopening(std::filesystem::path database_path, SessionId id,
-                                                                     std::string detail) {
+std::shared_ptr<PersistenceQueue> PersistenceQueue::create_reopening(std::filesystem::path state_root, SessionId id, std::string detail) {
     struct ReopeningStore {
         std::filesystem::path path;
         SessionId id;
         std::optional<SessionWriter> writer;
     };
-    auto reopening = std::make_shared<ReopeningStore>(ReopeningStore{.path = std::move(database_path), .id = id});
-    Commit commit = [reopening](const SessionDelta &delta) -> Result<void> {
+    auto reopening = std::make_shared<ReopeningStore>(ReopeningStore{.path = std::move(state_root), .id = id});
+    Commit commit = [reopening](const SessionDelta &delta) -> Result<SessionCommitResult> {
         if (!reopening->writer) {
-            auto opened = Store::open(reopening->path);
-            if (!opened) return lighter::outcome_error(std::move(opened).error());
-            auto writer = opened->lease(reopening->id);
+            auto catalog = SessionCatalog::open(reopening->path);
+            if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+            auto repository = SessionRepository::open(reopening->path, *std::move(catalog));
+            if (!repository) return lighter::outcome_error(std::move(repository).error());
+            auto writer = repository->create(reopening->id);
             if (!writer) return lighter::outcome_error(std::move(writer).error());
             reopening->writer = *std::move(writer);
         }
@@ -72,13 +86,15 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create_resolving(SessionId i
         std::optional<SessionWriter> writer;
     };
     auto resolving = std::make_shared<ResolvingStore>(ResolvingStore{.id = id});
-    Commit commit = [resolving](const SessionDelta &delta) -> Result<void> {
+    Commit commit = [resolving](const SessionDelta &delta) -> Result<SessionCommitResult> {
         if (!resolving->writer) {
-            auto path = state_database_path();
+            auto path = state_root_path();
             if (!path) return lighter::outcome_error(std::move(path).error());
-            auto opened = Store::open(*path);
-            if (!opened) return lighter::outcome_error(std::move(opened).error());
-            auto writer = opened->lease(resolving->id);
+            auto catalog = SessionCatalog::open(*path);
+            if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+            auto repository = SessionRepository::open(*path, *std::move(catalog));
+            if (!repository) return lighter::outcome_error(std::move(repository).error());
+            auto writer = repository->create(resolving->id);
             if (!writer) return lighter::outcome_error(std::move(writer).error());
             resolving->writer = *std::move(writer);
         }
@@ -132,6 +148,10 @@ Result<void> PersistenceQueue::publish_initial(const SessionDelta &delta) {
         if (published) {
             publication_state = PublicationState::ACTIVE;
             current_status = {.pending_mutations = pending.size()};
+            if (published->catalog_degradation) {
+                current_status.catalog_degraded = true;
+                current_status.catalog_detail = *published->catalog_degradation;
+            }
             if (!pending.empty()) retry_requested = true;
         } else {
             publication_state = PublicationState::FAILED;
@@ -141,7 +161,8 @@ Result<void> PersistenceQueue::publish_initial(const SessionDelta &delta) {
         }
     }
     changed.notify_all();
-    return published;
+    if (!published) return lighter::outcome_error(std::move(published).error());
+    return {};
 }
 
 void PersistenceQueue::mark_degraded(std::string detail) {
@@ -211,6 +232,10 @@ void PersistenceQueue::run(std::stop_token stop) {
                 for (usize index = 0; index < count; ++index) pending.pop_front();
                 persisted_mutations += count;
                 current_status = {.pending_mutations = pending.size()};
+                if (result->catalog_degradation) {
+                    current_status.catalog_degraded = true;
+                    current_status.catalog_detail = *result->catalog_degradation;
+                }
                 failures = 0;
                 if (!pending.empty()) retry_requested = true;
                 changed.notify_all();

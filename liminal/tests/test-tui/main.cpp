@@ -651,9 +651,8 @@ void check_command_parsing_and_status() {
     const auto archive = tui::resolve_command("archive");
     const auto unarchive = tui::resolve_command("unarchive");
     const auto history = tui::resolve_command("history");
-    require(resume && *resume == tui::CommandKind::RESUME && archive && *archive == tui::CommandKind::ARCHIVE && unarchive &&
-                *unarchive == tui::CommandKind::UNARCHIVE && history && *history == tui::CommandKind::HISTORY,
-            "session commands must resolve through the central command registry");
+    require(resume && *resume == tui::CommandKind::RESUME && !archive && !unarchive && history && *history == tui::CommandKind::HISTORY,
+            "session commands and removed archive commands must resolve through the central command registry");
     const auto named = tui::parse_name_arguments("  Catalog work  ");
     const auto cleared = tui::parse_name_arguments("--clear");
     require(named && named->title == "Catalog work" && cleared && !cleared->title && !tui::parse_name_arguments(""),

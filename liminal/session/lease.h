@@ -19,11 +19,11 @@ struct SessionLease {
     SessionLease &operator=(const SessionLease &) = delete;
 
 private:
-    friend Result<SessionLease> acquire_session_lease(const std::filesystem::path &state_database, SessionId id);
+    friend Result<SessionLease> acquire_session_lease(const std::filesystem::path &state_root, SessionId id);
     explicit SessionLease(std::shared_ptr<State> state);
     std::shared_ptr<State> state;
 };
 
-Result<SessionLease> acquire_session_lease(const std::filesystem::path &state_database, SessionId id);
+Result<SessionLease> acquire_session_lease(const std::filesystem::path &state_root, SessionId id);
 
 } // namespace liminal::session

@@ -12,15 +12,8 @@
 
 namespace liminal::tui {
 
-enum struct ArchiveCommand {
-    ARCHIVE,
-    UNARCHIVE,
-};
-
 lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
                                              SelectableListDialog &dialog);
-lighter::Task<lighter::Error> change_archive_state(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
-                                                   SelectableListDialog &dialog, ArchiveCommand command);
 lighter::Task<lighter::Error> navigate_conversation(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
                                                     SelectableListDialog &dialog);
 lighter::Error name_current_session(Agent &agent, ConsoleRenderer &renderer, std::optional<std::string> title);

@@ -4,12 +4,12 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <variant>
 #include <vector>
 
 #include <liminal/model/catalog.h>
 #include <liminal/session/persistence.h>
-#include <liminal/session/store.h>
+#include <liminal/session/catalog.h>
+#include <liminal/session/repository.h>
 #include <liminal/tui/transcript.h>
 
 namespace liminal::application {
@@ -17,10 +17,6 @@ namespace liminal::application {
 struct RenameSession {
     std::optional<std::string> title;
 };
-
-struct ArchiveSession {};
-struct UnarchiveSession {};
-using SessionCatalogMutation = std::variant<RenameSession, ArchiveSession, UnarchiveSession>;
 
 struct PreparedSession {
     session::Session session;
@@ -110,7 +106,7 @@ private:
 /// Coordinates ownership, semantic recovery, transcript projection, and model
 /// resolution before a saved session can replace a live application session.
 struct SessionCoordinator {
-    SessionCoordinator(session::Store store, SessionPreparationServices services);
+    SessionCoordinator(session::SessionRepository repository, session::SessionCatalog catalog, SessionPreparationServices services);
 
     Result<session::SessionPage> page(const session::SessionPageQuery &query) const;
     Result<AcquiredSession> acquire(session::SessionId id) const;
@@ -119,10 +115,13 @@ struct SessionCoordinator {
     Result<ForkPlan> prepare_fork(const session::Session &source, session::ConversationCheckpointId checkpoint) const;
     Result<PreparedSession> publish_fork(ForkPlan plan) const;
     Result<SessionSwitch> begin_switch(session::SessionId current, session::SessionId target) const;
-    Result<void> mutate_inactive(session::SessionId id, const SessionCatalogMutation &mutation) const;
+    Result<session::PersistenceStatus> rename_inactive(session::SessionId id, RenameSession mutation) const;
 
 private:
-    session::Store store;
+    Result<AcquiredSession> acquire_with_workspace(session::SessionId id, const std::optional<std::string> &workspace_key) const;
+    Result<PreparedSession> prepare_catalog_hint(session::SessionId id) const;
+    session::SessionRepository repository;
+    session::SessionCatalog catalog;
     SessionPreparationServices services;
 };
 

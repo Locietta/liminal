@@ -20,8 +20,8 @@ struct SessionLease::State {
     }
 };
 
-Result<SessionLease> acquire_session_lease(const std::filesystem::path &state_database, SessionId id) {
-    const auto directory = state_database.parent_path() / "locks";
+Result<SessionLease> acquire_session_lease(const std::filesystem::path &state_root, SessionId id) {
+    const auto directory = state_root / "locks";
     std::error_code error;
     std::filesystem::create_directories(directory, error);
     if (error) return lighter::outcome_error(Error::storage("cannot create session lock directory: " + error.message()));

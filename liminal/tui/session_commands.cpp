@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <charconv>
-#include <type_traits>
 #include <utility>
 
 #include <lighter/async/vocab/outcome.h>
@@ -28,7 +27,6 @@ SelectableListPage picker_page(const session::SessionPage &page, i64 now_ms) {
     for (const auto &summary : page.sessions) {
         auto primary = summary.title.value_or(summary.preview.empty() ? "Untitled session" : summary.preview);
         auto secondary = relative_update_time(summary.updated_at_ms, now_ms);
-        if (summary.model_preference) secondary += " · " + summary.model_preference->provider + "/" + summary.model_preference->model;
         secondary += " · " + session::to_string(summary.id).substr(0, 8);
         result.items.push_back({.id = session::to_string(summary.id), .primary = std::move(primary), .secondary = std::move(secondary)});
     }
@@ -36,17 +34,16 @@ SelectableListPage picker_page(const session::SessionPage &page, i64 now_ms) {
 }
 
 Result<void> open_session_picker(SelectableListDialog &dialog, ConsoleRenderer &renderer, application::SessionCoordinator &sessions,
-                                 std::string workspace_key, session::SessionCatalogState state, std::string title,
-                                 std::string empty_message) {
+                                 std::string workspace_key, std::string title, std::string empty_message) {
     constexpr usize k_picker_page_size = 10;
-    auto first = sessions.page({.workspace_key = workspace_key, .state = state, .limit = k_picker_page_size});
+    auto first = sessions.page({.workspace_key = workspace_key, .limit = k_picker_page_size});
     if (!first) return lighter::outcome_error(std::move(first).error());
     const auto now_ms = session::unix_milliseconds_now();
     auto cursor = first->continuation;
     SelectableList list(std::move(title), std::move(empty_message), picker_page(*first, now_ms));
-    SelectableListDialog::LoadPage load = [&sessions, workspace_key = std::move(workspace_key), state, cursor,
+    SelectableListDialog::LoadPage load = [&sessions, workspace_key = std::move(workspace_key), cursor,
                                            now_ms]() mutable -> Result<SelectableListPage> {
-        auto next = sessions.page({.workspace_key = workspace_key, .state = state, .after = cursor, .limit = k_picker_page_size});
+        auto next = sessions.page({.workspace_key = workspace_key, .after = cursor, .limit = k_picker_page_size});
         if (!next) return lighter::outcome_error(std::move(next).error());
         cursor = next->continuation;
         return picker_page(*next, now_ms);
@@ -82,25 +79,6 @@ Result<void> open_unsaved_fork_confirmation(SelectableListDialog &dialog, Consol
         return lighter::outcome_error(Error::protocol("cannot render fork confirmation: " + std::string(error.message())));
     }
     return {};
-}
-
-Result<void> mutate_selected_session(Agent &agent, application::SessionCoordinator &sessions, session::SessionId id,
-                                     const application::SessionCatalogMutation &mutation) {
-    if (id != agent.session.id) return sessions.mutate_inactive(id, mutation);
-    std::visit(
-        [&agent](const auto &change) {
-            using T = std::remove_cvref_t<decltype(change)>;
-            if constexpr (std::same_as<T, application::RenameSession>) {
-                agent.session.set_title(change.title);
-            } else if constexpr (std::same_as<T, application::ArchiveSession>) {
-                agent.session.archive();
-            } else if constexpr (std::same_as<T, application::UnarchiveSession>) {
-                agent.session.unarchive();
-            }
-        },
-        mutation);
-    auto *queue = agent.session.persistence_queue();
-    return queue ? queue->flush() : Result<void>{};
 }
 
 std::string outcome_label(session::TaskOutcome outcome) {
@@ -243,8 +221,8 @@ lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionC
     if (!sessions || !renderer.terminal || !agent.session.metadata.workspace) {
         co_return renderer.status("Resume picker is unavailable in this session");
     }
-    auto opened = open_session_picker(dialog, renderer, *sessions, agent.session.metadata.workspace->key,
-                                      session::SessionCatalogState::ACTIVE, "Resume session", "No resumable sessions in this workspace");
+    auto opened = open_session_picker(dialog, renderer, *sessions, agent.session.metadata.workspace->key, "Resume session",
+                                      "No resumable sessions in this workspace");
     if (!opened) co_return renderer.status("Resume error: " + opened.error().message());
     auto choice = co_await dialog.next();
     if (!choice) co_return lighter::Error{};
@@ -261,32 +239,13 @@ lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionC
     co_return co_await finish_switch(agent, renderer, dialog, *std::move(switching), "Resumed session " + resumed_id);
 }
 
-lighter::Task<lighter::Error> change_archive_state(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
-                                                   SelectableListDialog &dialog, ArchiveCommand command) {
-    if (!sessions || !renderer.terminal || !agent.session.metadata.workspace) {
-        co_return renderer.notice("[session catalog is unavailable in this session]\n");
-    }
-    const bool archiving = command == ArchiveCommand::ARCHIVE;
-    auto opened = open_session_picker(dialog, renderer, *sessions, agent.session.metadata.workspace->key,
-                                      archiving ? session::SessionCatalogState::ACTIVE : session::SessionCatalogState::ARCHIVED,
-                                      archiving ? "Archive session" : "Unarchive session",
-                                      archiving ? "No active sessions in this workspace" : "No archived sessions in this workspace");
-    if (!opened) co_return renderer.notice("[archive error: " + opened.error().message() + "]\n");
-    auto choice = co_await dialog.next();
-    if (!choice) co_return lighter::Error{};
-    auto id = session::parse_session_id(*choice);
-    if (!id) co_return renderer.notice("[archive error: " + id.error().message() + "]\n");
-    application::SessionCatalogMutation mutation = archiving ? application::SessionCatalogMutation{application::ArchiveSession{}} :
-                                                               application::SessionCatalogMutation{application::UnarchiveSession{}};
-    auto changed = mutate_selected_session(agent, *sessions, *id, mutation);
-    if (!changed) co_return renderer.notice("[archive error: " + changed.error().message() + "]\n");
-    co_return renderer.status(archiving ? "Session archived" : "Session unarchived");
-}
-
 lighter::Error name_current_session(Agent &agent, ConsoleRenderer &renderer, std::optional<std::string> title) {
     agent.session.set_title(std::move(title));
     auto *queue = agent.session.persistence_queue();
     auto saved = queue ? queue->flush() : Result<void>{};
+    if (saved && queue && queue->status().catalog_degraded) {
+        return renderer.notice("[Session name updated; catalog refresh pending: " + queue->status().catalog_detail + "]\n");
+    }
     if (saved) return renderer.status("Session name updated");
     return renderer.notice("[Session name changed in memory; saving failed]\n");
 }

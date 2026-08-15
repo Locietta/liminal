@@ -1,6 +1,6 @@
 #include "session_coordinator.h"
 
-#include <type_traits>
+#include <algorithm>
 #include <utility>
 
 #include <lighter/async/vocab/outcome.h>
@@ -17,21 +17,6 @@ std::string stored_model_selector(const session::SessionModelPreference &prefere
     auto selector = preference.provider + "/" + preference.model;
     if (preference.reasoning_effort) selector += "@" + *preference.reasoning_effort;
     return selector;
-}
-
-void apply_mutation(session::Session &value, const SessionCatalogMutation &mutation) {
-    std::visit(
-        [&value](const auto &change) {
-            using T = std::remove_cvref_t<decltype(change)>;
-            if constexpr (std::same_as<T, RenameSession>) {
-                value.set_title(change.title);
-            } else if constexpr (std::same_as<T, ArchiveSession>) {
-                value.archive();
-            } else if constexpr (std::same_as<T, UnarchiveSession>) {
-                value.unarchive();
-            }
-        },
-        mutation);
 }
 
 } // namespace
@@ -70,8 +55,9 @@ Result<SessionModelResolution> resolve_session_model(model::Catalog &models, con
     };
 }
 
-SessionCoordinator::SessionCoordinator(session::Store store, SessionPreparationServices services)
-    : store(std::move(store)), services(std::move(services)) {
+SessionCoordinator::SessionCoordinator(session::SessionRepository repository, session::SessionCatalog catalog,
+                                       SessionPreparationServices services)
+    : repository(std::move(repository)), catalog(std::move(catalog)), services(std::move(services)) {
     lighter::check(static_cast<bool>(this->services.project), "session preparation requires a transcript projector");
     lighter::check(static_cast<bool>(this->services.resolve_model), "session preparation requires a model resolver");
     if (!this->services.persistence) {
@@ -84,7 +70,7 @@ SessionCoordinator::SessionCoordinator(session::Store store, SessionPreparationS
     }
 }
 
-Result<session::SessionPage> SessionCoordinator::page(const session::SessionPageQuery &query) const { return store.page(query); }
+Result<session::SessionPage> SessionCoordinator::page(const session::SessionPageQuery &query) const { return catalog.page(query); }
 
 void SessionSwitch::flush_current(session::PersistenceQueue *queue) {
     if (!queue) {
@@ -112,11 +98,17 @@ PreparedSession SessionSwitch::take_target() && {
     return prepared;
 }
 
-Result<AcquiredSession> SessionCoordinator::acquire(session::SessionId id) const {
-    auto writer = store.lease(id);
+Result<AcquiredSession> SessionCoordinator::acquire(session::SessionId id) const { return acquire_with_workspace(id, std::nullopt); }
+
+Result<AcquiredSession> SessionCoordinator::acquire_with_workspace(session::SessionId id,
+                                                                   const std::optional<std::string> &workspace_key) const {
+    auto writer = repository.acquire(id);
     if (!writer) return lighter::outcome_error(std::move(writer).error());
     auto loaded = writer->load();
     if (!loaded) return lighter::outcome_error(std::move(loaded).error());
+    if (workspace_key && (!loaded->metadata.workspace || loaded->metadata.workspace->key != *workspace_key)) {
+        return lighter::outcome_error(Error::storage("selected catalog row does not match the session's immutable workspace"));
+    }
 
     AcquiredSession acquired{.session = *std::move(loaded)};
     auto queue = services.persistence(*std::move(writer));
@@ -154,10 +146,25 @@ Result<PreparedSession> SessionCoordinator::prepare(session::SessionId id) const
     return resolve_model(*std::move(acquired));
 }
 
+Result<PreparedSession> SessionCoordinator::prepare_catalog_hint(session::SessionId id) const {
+    auto hint = catalog.find(id);
+    if (!hint) return lighter::outcome_error(std::move(hint).error());
+    if (!*hint) return lighter::outcome_error(Error::storage("selected session is no longer present in the catalog"));
+    auto acquired = acquire_with_workspace(id, (*hint)->workspace_key);
+    if (!acquired) {
+        if (acquired.error().detail == "session was not found" || acquired.error().detail == "published session database is absent" ||
+            acquired.error().detail == "selected catalog row does not match the session's immutable workspace") {
+            static_cast<void>(catalog.remove(id));
+        }
+        return lighter::outcome_error(std::move(acquired).error());
+    }
+    return resolve_model(*std::move(acquired));
+}
+
 Result<ForkPlan> SessionCoordinator::prepare_fork(const session::Session &source, session::ConversationCheckpointId checkpoint) const {
     auto fork = source.fork_at(checkpoint);
     if (!fork) return lighter::outcome_error(std::move(fork).error());
-    auto writer = store.lease(fork->id);
+    auto writer = repository.stage(fork->id, session::make_delta(*fork, fork->entries));
     if (!writer) return lighter::outcome_error(std::move(writer).error());
 
     AcquiredSession acquired{.session = *std::move(fork)};
@@ -175,6 +182,7 @@ Result<ForkPlan> SessionCoordinator::prepare_fork(const session::Session &source
 Result<PreparedSession> SessionCoordinator::publish_fork(ForkPlan plan) const {
     auto *queue = plan.target.session.persistence_queue();
     if (!queue) return lighter::outcome_error(Error::protocol("prepared fork has no persistence queue"));
+    plan.target.session.metadata.updated_at_ms = std::max(plan.target.session.metadata.updated_at_ms, session::unix_milliseconds_now());
     auto published = queue->publish_initial(session::make_delta(plan.target.session, plan.target.session.entries));
     if (!published) return lighter::outcome_error(std::move(published).error());
     return std::move(plan.target);
@@ -182,21 +190,23 @@ Result<PreparedSession> SessionCoordinator::publish_fork(ForkPlan plan) const {
 
 Result<SessionSwitch> SessionCoordinator::begin_switch(session::SessionId current, session::SessionId target) const {
     if (current == target) return SessionSwitch(SessionSwitchState::CURRENT_SELECTED);
-    auto prepared = prepare(target);
+    auto prepared = prepare_catalog_hint(target);
     if (!prepared) return lighter::outcome_error(std::move(prepared).error());
     return SessionSwitch(SessionSwitchState::PREPARED, *std::move(prepared));
 }
 
-Result<void> SessionCoordinator::mutate_inactive(session::SessionId id, const SessionCatalogMutation &mutation) const {
-    auto writer = store.lease(id);
+Result<session::PersistenceStatus> SessionCoordinator::rename_inactive(session::SessionId id, RenameSession mutation) const {
+    auto writer = repository.acquire(id);
     if (!writer) return lighter::outcome_error(std::move(writer).error());
     auto loaded = writer->load();
     if (!loaded) return lighter::outcome_error(std::move(loaded).error());
     auto queue = services.persistence(*std::move(writer));
     auto attached = loaded->attach_persistence(queue);
     if (!attached) return lighter::outcome_error(std::move(attached).error());
-    apply_mutation(*loaded, mutation);
-    return queue->flush();
+    loaded->set_title(std::move(mutation.title));
+    auto flushed = queue->flush();
+    if (!flushed) return lighter::outcome_error(std::move(flushed).error());
+    return queue->status();
 }
 
 } // namespace liminal::application

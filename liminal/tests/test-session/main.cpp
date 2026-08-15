@@ -90,12 +90,12 @@ void test_monotonic_timestamps_and_utf8_bounds() {
     require(log.metadata.updated_at_ms == future && log.validate().has_value(),
             "model preference mutation produced an unloadable timestamp");
     log.set_title("Named session");
-    log.archive();
-    require(log.metadata.title == "Named session" && log.metadata.archived_at_ms == future && log.metadata.updated_at_ms == future,
-            "title or archive mutation bypassed the session timestamp boundary");
-    log.unarchive();
-    require(!log.metadata.archived_at_ms && log.metadata.updated_at_ms == future && log.validate().has_value(),
-            "unarchive mutation produced invalid session metadata");
+    require(log.metadata.title == "Named session" && log.metadata.updated_at_ms == future, "rename advanced conversation recency");
+    log.start_task("older admission", future - 1);
+    require(log.metadata.updated_at_ms == future, "an older task admission regressed conversation recency");
+    log.start_task("newer admission", future + 1);
+    require(log.metadata.updated_at_ms == future + 1 && log.validate().has_value(),
+            "a newer task admission did not advance conversation recency");
 
     std::string diagnostic(4095, 'x');
     diagnostic += "\xF0\x9F\x98\x80";
@@ -349,7 +349,7 @@ void test_fork_remaps_lifecycle_and_preserves_private_items() {
     require(fork.has_value(), "failed to fork a safe checkpoint");
     require(fork->id != source.id && fork->metadata.forked_from == session::ForkOrigin{source.id, selected},
             "fork identity or exact provenance is incorrect");
-    require(!fork->metadata.title && !fork->metadata.archived_at_ms && fork->metadata.workspace == source.metadata.workspace &&
+    require(!fork->metadata.title && fork->metadata.workspace == source.metadata.workspace &&
                 fork->metadata.working_directory == source.metadata.working_directory,
             "fork catalog metadata did not follow copy policy");
     require(fork->entries.size() == 8 && fork->next_entry_id == 9 && fork->next_task_id == 3 && fork->next_provider_call_id == 3,

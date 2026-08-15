@@ -1,0 +1,53 @@
+#include "catalog_lease.h"
+
+#ifdef _WIN32
+
+#include <windows.h>
+
+#include <system_error>
+
+#include <lighter/async/vocab/outcome.h>
+
+namespace liminal::session::detail {
+
+struct CatalogLease::State {
+    HANDLE file = INVALID_HANDLE_VALUE;
+    ~State() {
+        OVERLAPPED overlap{};
+        UnlockFileEx(file, 0, 1, 0, &overlap);
+        CloseHandle(file);
+    }
+};
+
+Result<CatalogLease> acquire_catalog_lease(const std::filesystem::path &state_root, bool exclusive) {
+    std::error_code error;
+    const auto directory = state_root / "locks";
+    std::filesystem::create_directories(directory, error);
+    if (error) return lighter::outcome_error(Error::storage("cannot create catalog lock directory: " + error.message()));
+    const auto path = directory / "catalog-maintenance.lock";
+    const auto file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return lighter::outcome_error(
+            Error::storage("cannot open catalog maintenance lock: " + std::system_category().message(static_cast<int>(GetLastError()))));
+    }
+    OVERLAPPED overlap{};
+    const auto flags = (exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0) | LOCKFILE_FAIL_IMMEDIATELY;
+    if (!LockFileEx(file, flags, 0, 1, 0, &overlap)) {
+        const auto code = GetLastError();
+        CloseHandle(file);
+        if (code == ERROR_LOCK_VIOLATION || code == ERROR_IO_PENDING) {
+            return lighter::outcome_error(Error::storage(exclusive ? "catalog repair requires every Liminal process to close the catalog" :
+                                                                     "session catalog is under exclusive maintenance"));
+        }
+        return lighter::outcome_error(
+            Error::storage("cannot acquire catalog maintenance lock: " + std::system_category().message(static_cast<int>(code))));
+    }
+    auto state = std::make_shared<CatalogLease::State>();
+    state->file = file;
+    return CatalogLease(std::move(state));
+}
+
+} // namespace liminal::session::detail
+
+#endif

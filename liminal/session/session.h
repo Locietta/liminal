@@ -153,7 +153,6 @@ struct SessionMetadata {
     std::optional<std::string> title;
     std::string preview;
     std::optional<SessionModelPreference> model_preference;
-    std::optional<i64> archived_at_ms;
     std::optional<ForkOrigin> forked_from;
 };
 
@@ -197,7 +196,7 @@ struct Session {
     Session &operator=(const Session &) = delete;
 
     EntryId append(EntryPayload payload);
-    TaskId start_task(std::string text);
+    TaskId start_task(std::string text, std::optional<i64> admission_time_ms = std::nullopt);
     ProviderCallId next_provider_call();
 
     /// Moves the append point to a safe idle checkpoint without modifying
@@ -209,8 +208,6 @@ struct Session {
     Result<void> validate() const;
     void set_model_preference(std::string provider, std::string model, std::optional<std::string> reasoning_effort);
     void set_title(std::optional<std::string> title);
-    void archive();
-    void unarchive();
     Result<void> attach_persistence(std::shared_ptr<PersistenceQueue> queue);
     PersistenceQueue *persistence_queue() noexcept;
     const PersistenceQueue *persistence_queue() const noexcept;

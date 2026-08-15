@@ -1,12 +1,19 @@
 #include "store.h"
 
+#include "catalog.h"
 #include "codec.h"
+#include "durable_fs.h"
 #include "lease.h"
+#include "paths.h"
+#include "repository.h"
+#include "repository_state.h"
 
 #include <algorithm>
-#include <cctype>
+#include <charconv>
 #include <cstring>
+#include <fstream>
 #include <mutex>
+#include <random>
 #include <system_error>
 #include <type_traits>
 #include <utility>
@@ -15,14 +22,14 @@
 
 #include <lighter/async/vocab/outcome.h>
 #include <lighter/encoding/utf8.h>
-#include <lighter/utils/panic.h>
 
 namespace liminal::session {
 
 namespace {
 
-constexpr int k_application_id = 0x4c494d4e;
-constexpr int k_schema_version = 2;
+constexpr int k_session_application_id = 0x4c494d53;
+constexpr int k_session_schema_version = 1;
+constexpr usize k_marker_maximum_size = 64;
 
 std::string path_utf8(const std::filesystem::path &path) {
     const auto value = path.generic_u8string();
@@ -31,13 +38,12 @@ std::string path_utf8(const std::filesystem::path &path) {
 
 Error sqlite_error(sqlite3 *database, std::string_view action, int code = SQLITE_ERROR) {
     auto detail = std::string(action) + ": " + (database ? sqlite3_errmsg(database) : sqlite3_errstr(code));
-    if (code == SQLITE_BUSY || code == SQLITE_LOCKED) detail = "session store busy: " + detail;
+    if (code == SQLITE_BUSY || code == SQLITE_LOCKED) detail = "session database busy: " + detail;
     return Error::storage(std::move(detail));
 }
 
 struct Statement {
     sqlite3_stmt *value = nullptr;
-
     Statement() = default;
     Statement(Statement &&other) noexcept : value(std::exchange(other.value, nullptr)) {}
     Statement &operator=(Statement &&other) noexcept {
@@ -66,7 +72,7 @@ Result<void> execute(sqlite3 *database, std::string_view sql) {
     if (code == SQLITE_OK) return {};
     auto detail = std::string("cannot update session database: ") + (message ? message : sqlite3_errmsg(database));
     sqlite3_free(message);
-    if (code == SQLITE_BUSY || code == SQLITE_LOCKED) detail = "session store busy: " + detail;
+    if (code == SQLITE_BUSY || code == SQLITE_LOCKED) detail = "session database busy: " + detail;
     return lighter::outcome_error(Error::storage(std::move(detail)));
 }
 
@@ -74,46 +80,9 @@ void bind_id(sqlite3_stmt *statement, int index, SessionId id) {
     sqlite3_bind_blob(statement, index, id.bytes.data(), static_cast<int>(id.bytes.size()), SQLITE_TRANSIENT);
 }
 
-u8 hexadecimal_nibble(char character) noexcept {
-    if (character >= '0' && character <= '9') return static_cast<u8>(character - '0');
-    if (character >= 'a' && character <= 'f') return static_cast<u8>(character - 'a' + 10);
-    return static_cast<u8>(character - 'A' + 10);
-}
-
-void set_nibble(SessionId &id, usize index, u8 value) noexcept {
-    auto &byte = id.bytes[index / 2];
-    if (index % 2 == 0)
-        byte = static_cast<u8>((byte & 0x0f) | (value << 4));
-    else
-        byte = static_cast<u8>((byte & 0xf0) | value);
-}
-
-std::pair<SessionId, std::optional<SessionId>> prefix_bounds(std::string_view prefix) {
-    SessionId lower;
-    for (usize index = 0; index < prefix.size(); ++index) set_nibble(lower, index, hexadecimal_nibble(prefix[index]));
-
-    auto upper = lower;
-    for (usize index = prefix.size(); index-- > 0;) {
-        const auto value = hexadecimal_nibble(prefix[index]);
-        if (value == 0xf) continue;
-        set_nibble(upper, index, static_cast<u8>(value + 1));
-        for (usize trailing = index + 1; trailing < 32; ++trailing) set_nibble(upper, trailing, 0);
-        return {lower, upper};
-    }
-    return {lower, std::nullopt};
-}
-
 void bind_optional_text(sqlite3_stmt *statement, int index, const std::optional<std::string> &value) {
-    if (value) {
-        sqlite3_bind_text(statement, index, value->data(), static_cast<int>(value->size()), SQLITE_TRANSIENT);
-    } else {
-        sqlite3_bind_null(statement, index);
-    }
-}
-
-void bind_optional_i64(sqlite3_stmt *statement, int index, const std::optional<i64> &value) {
     if (value)
-        sqlite3_bind_int64(statement, index, *value);
+        sqlite3_bind_text(statement, index, value->data(), static_cast<int>(value->size()), SQLITE_TRANSIENT);
     else
         sqlite3_bind_null(statement, index);
 }
@@ -142,497 +111,154 @@ std::string text(sqlite3_stmt *statement, int column) { return optional_text(sta
 
 Result<SessionId> column_id(sqlite3_stmt *statement, int column) {
     if (sqlite3_column_type(statement, column) != SQLITE_BLOB || sqlite3_column_bytes(statement, column) != 16) {
-        return lighter::outcome_error(Error::storage("session catalog contains an invalid UUID"));
+        return lighter::outcome_error(Error::storage("session database contains an invalid identity"));
     }
     SessionId id;
     std::memcpy(id.bytes.data(), sqlite3_column_blob(statement, column), id.bytes.size());
     return id;
 }
 
-Result<bool> has_user_schema_objects(sqlite3 *database) {
-    auto query = prepare(database, R"sql(
-SELECT EXISTS(
-    SELECT 1 FROM sqlite_schema
-    WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite\_%' ESCAPE '\'
-)
-)sql");
-    if (!query) return lighter::outcome_error(std::move(query).error());
-    if (sqlite3_step(query->value) != SQLITE_ROW) {
-        return lighter::outcome_error(sqlite_error(database, "cannot inspect state database schema"));
-    }
-    return sqlite3_column_int(query->value, 0) != 0;
-}
-
-Result<void> migrate(sqlite3 *database) {
+Result<void> validate_session_schema(sqlite3 *database, bool create) {
     auto application = prepare(database, "PRAGMA application_id");
     if (!application) return lighter::outcome_error(std::move(application).error());
-    if (sqlite3_step(application->value) != SQLITE_ROW) return lighter::outcome_error(sqlite_error(database, "cannot read application id"));
+    if (sqlite3_step(application->value) != SQLITE_ROW)
+        return lighter::outcome_error(sqlite_error(database, "cannot read session identity"));
     const auto application_id = sqlite3_column_int(application->value, 0);
-    if (application_id != 0 && application_id != k_application_id) {
-        return lighter::outcome_error(Error::storage("state database belongs to another application"));
-    }
     sqlite3_finalize(application->value);
     application->value = nullptr;
     auto version = prepare(database, "PRAGMA user_version");
     if (!version) return lighter::outcome_error(std::move(version).error());
-    if (sqlite3_step(version->value) != SQLITE_ROW) return lighter::outcome_error(sqlite_error(database, "cannot read schema version"));
+    if (sqlite3_step(version->value) != SQLITE_ROW)
+        return lighter::outcome_error(sqlite_error(database, "cannot read session schema version"));
     const auto schema_version = sqlite3_column_int(version->value, 0);
-    sqlite3_finalize(version->value);
-    version->value = nullptr;
-    if (schema_version > k_schema_version) {
-        return lighter::outcome_error(
-            Error::storage("state database schema version " + std::to_string(schema_version) + " is newer than this Liminal build"));
+    if (application_id == k_session_application_id && schema_version == k_session_schema_version) return {};
+    if (!create) {
+        if (application_id != k_session_application_id)
+            return lighter::outcome_error(Error::storage("session database belongs to another application"));
+        return lighter::outcome_error(Error::storage("session database has an unsupported schema version"));
     }
-    if (schema_version != 0 && application_id != k_application_id) {
-        return lighter::outcome_error(Error::storage("state database does not have Liminal's application identity"));
-    }
-    if (schema_version == k_schema_version) return {};
-    if (schema_version == 1) {
-        constexpr std::string_view migration = R"sql(
+    if (application_id != 0 || schema_version != 0) return lighter::outcome_error(Error::storage("staging database has a foreign schema"));
+    auto objects = prepare(database, "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'");
+    if (!objects) return lighter::outcome_error(std::move(objects).error());
+    if (sqlite3_step(objects->value) != SQLITE_ROW) return lighter::outcome_error(sqlite_error(database, "cannot inspect staging schema"));
+    if (sqlite3_column_int64(objects->value, 0) != 0)
+        return lighter::outcome_error(Error::storage("unidentified non-empty staging database"));
+    return execute(database, R"sql(
 BEGIN IMMEDIATE;
-CREATE INDEX sessions_workspace_archived_recent
-    ON sessions(workspace_key, updated_at_ms DESC, id DESC)
-    WHERE archived_at_ms IS NOT NULL;
-PRAGMA user_version = 2;
-COMMIT;
-)sql";
-        return execute(database, migration);
-    }
-    if (schema_version != 0) return lighter::outcome_error(Error::storage("unsupported state database schema version"));
-    if (application_id == 0) {
-        auto has_objects = has_user_schema_objects(database);
-        if (!has_objects) return lighter::outcome_error(std::move(has_objects).error());
-        if (*has_objects) {
-            return lighter::outcome_error(Error::storage("unidentified non-empty SQLite database cannot be used as Liminal state"));
-        }
-    }
-    constexpr std::string_view migration = R"sql(
-BEGIN IMMEDIATE;
-CREATE TABLE sessions (
-    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+CREATE TABLE session (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    session_id BLOB NOT NULL UNIQUE CHECK(length(session_id)=16),
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    workspace_root TEXT,
-    workspace_key TEXT,
+    workspace_root TEXT NOT NULL,
+    workspace_key TEXT NOT NULL,
     working_directory TEXT NOT NULL,
     title TEXT,
-    preview TEXT NOT NULL DEFAULT '',
+    preview TEXT NOT NULL,
     active_leaf_entry_id INTEGER,
-    next_entry_id INTEGER NOT NULL DEFAULT 1,
-    next_task_id INTEGER NOT NULL DEFAULT 1,
-    next_provider_call_id INTEGER NOT NULL DEFAULT 1,
-    entry_count INTEGER NOT NULL DEFAULT 0,
-    tokens_used INTEGER NOT NULL DEFAULT 0,
+    next_entry_id INTEGER NOT NULL,
+    next_task_id INTEGER NOT NULL,
+    next_provider_call_id INTEGER NOT NULL,
+    entry_count INTEGER NOT NULL,
+    tokens_used INTEGER NOT NULL,
     last_provider TEXT,
     last_model TEXT,
     last_reasoning_effort TEXT,
-    archived_at_ms INTEGER,
-    revision INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL,
     forked_from_session_id BLOB,
     forked_from_entry_id INTEGER
 );
 CREATE TABLE session_entries (
-    session_id BLOB NOT NULL,
-    entry_id INTEGER NOT NULL,
+    entry_id INTEGER PRIMARY KEY,
     task_id INTEGER,
     provider_call_id INTEGER,
-    parent_entry_id INTEGER,
+    parent_entry_id INTEGER REFERENCES session_entries(entry_id),
     kind INTEGER NOT NULL,
     payload_version INTEGER NOT NULL,
     payload_json TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (session_id, entry_id),
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id, parent_entry_id) REFERENCES session_entries(session_id, entry_id)
+    created_at_ms INTEGER NOT NULL
 );
-CREATE INDEX sessions_workspace_recent ON sessions(workspace_key, archived_at_ms, updated_at_ms DESC, id DESC);
-CREATE INDEX sessions_workspace_archived_recent
-    ON sessions(workspace_key, updated_at_ms DESC, id DESC)
-    WHERE archived_at_ms IS NOT NULL;
-CREATE INDEX sessions_recent ON sessions(archived_at_ms, updated_at_ms DESC, id DESC);
-CREATE INDEX session_entries_children ON session_entries(session_id, parent_entry_id);
-CREATE INDEX session_entries_provider_calls ON session_entries(session_id, task_id, provider_call_id, entry_id);
-PRAGMA application_id = 1279872334;
-PRAGMA user_version = 2;
+CREATE INDEX session_entries_children ON session_entries(parent_entry_id);
+CREATE INDEX session_entries_provider_calls ON session_entries(task_id,provider_call_id,entry_id);
+PRAGMA application_id = 1279872339;
+PRAGMA user_version = 1;
 COMMIT;
-)sql";
-    return execute(database, migration);
+)sql");
 }
 
-Result<void> configure(sqlite3 *database) {
+Result<sqlite3 *> open_database(const std::filesystem::path &path, bool create, bool wal) {
+    sqlite3 *database = nullptr;
+    const auto encoded = path_utf8(path);
+    const auto flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | (create ? SQLITE_OPEN_CREATE : 0);
+    const auto code = sqlite3_open_v2(encoded.c_str(), &database, flags, nullptr);
+    if (code != SQLITE_OK) {
+        const auto error = sqlite_error(database, create ? "cannot create staged session database" : "cannot open session database", code);
+        if (database) sqlite3_close(database);
+        return lighter::outcome_error(error);
+    }
     if (sqlite3_libversion_number() < 3051003 || sqlite3_libversion_number() >= 4000000) {
+        sqlite3_close(database);
         return lighter::outcome_error(Error::storage("SQLite 3.51.3 or newer (and older than 4.0) is required"));
     }
-    if (auto result = execute(database, "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;"); !result)
-        return result;
-    if (auto migrated = migrate(database); !migrated) return migrated;
-    auto wal = prepare(database, "PRAGMA journal_mode=WAL");
-    if (!wal) return lighter::outcome_error(std::move(wal).error());
-    if (sqlite3_step(wal->value) != SQLITE_ROW || text(wal->value, 0) != "wal") {
-        return lighter::outcome_error(Error::storage("state database did not enter WAL journal mode"));
+    if (auto configured = execute(database, "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;"); !configured) {
+        sqlite3_close(database);
+        return lighter::outcome_error(std::move(configured).error());
     }
-    sqlite3_finalize(wal->value);
-    wal->value = nullptr;
-    return {};
+    if (auto valid = validate_session_schema(database, create); !valid) {
+        sqlite3_close(database);
+        return lighter::outcome_error(std::move(valid).error());
+    }
+    auto mode = prepare(database, wal ? "PRAGMA journal_mode=WAL" : "PRAGMA journal_mode=DELETE");
+    if (!mode) {
+        sqlite3_close(database);
+        return lighter::outcome_error(std::move(mode).error());
+    }
+    const auto expected = wal ? "wal" : "delete";
+    if (sqlite3_step(mode->value) != SQLITE_ROW || text(mode->value, 0) != expected) {
+        sqlite3_close(database);
+        return lighter::outcome_error(Error::storage(std::string("session database did not enter ") + expected + " journal mode"));
+    }
+    return database;
 }
 
-Result<void> begin(sqlite3 *database) { return execute(database, "BEGIN IMMEDIATE"); }
-
-struct Rollback {
-    sqlite3 *database;
-    bool active = true;
-    ~Rollback() {
-        if (active) sqlite3_exec(database, "ROLLBACK", nullptr, nullptr, nullptr);
-    }
+struct EncodedEntry {
+    EntryId id;
+    std::optional<EntryId> parent_id;
+    i64 created_at_ms = 0;
+    EncodedPayload payload;
 };
 
-} // namespace
-
-struct Store::State {
-    ~State() {
-        if (database) sqlite3_close(database);
-    }
-
-    std::filesystem::path path;
-    sqlite3 *database = nullptr;
-    mutable std::mutex mutex;
+struct PreparedDelta {
+    SessionDelta delta;
+    std::vector<EncodedEntry> entries;
 };
-
-struct SessionWriter::State {
-    State(std::shared_ptr<Store::State> store, SessionLease lease, SessionId id)
-        : store(std::move(store)), lease(std::move(lease)), id(id) {}
-
-    std::shared_ptr<Store::State> store;
-    SessionLease lease;
-    SessionId id;
-    u64 revision = 0;
-};
-
-SessionWriter::~SessionWriter() = default;
-SessionWriter::SessionWriter(SessionWriter &&) noexcept = default;
-SessionWriter &SessionWriter::operator=(SessionWriter &&) noexcept = default;
-
-SessionId SessionWriter::session_id() const noexcept { return state->id; }
-
-Result<Store> Store::open(std::filesystem::path database_path) {
-    std::error_code directory_error;
-    const auto directory = database_path.parent_path();
-    bool created_directory = false;
-    if (!directory.empty()) {
-        created_directory = std::filesystem::create_directories(directory, directory_error);
-        if (directory_error) {
-            return lighter::outcome_error(Error::storage("cannot create state directory: " + directory_error.message()));
-        }
-#ifndef _WIN32
-        if (created_directory) {
-            std::filesystem::permissions(directory, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace,
-                                         directory_error);
-            if (directory_error)
-                return lighter::outcome_error(Error::storage("cannot secure state directory: " + directory_error.message()));
-        }
-#endif
-    }
-    std::error_code database_error;
-    const auto database_existed = std::filesystem::exists(database_path, database_error);
-    if (database_error) return lighter::outcome_error(Error::storage("cannot inspect state database: " + database_error.message()));
-    auto state = std::make_shared<State>();
-    state->path = std::move(database_path);
-    const auto encoded_path = path_utf8(state->path);
-    const auto code = sqlite3_open_v2(encoded_path.c_str(), &state->database,
-                                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
-    if (code != SQLITE_OK) return lighter::outcome_error(sqlite_error(state->database, "cannot open state database", code));
-#ifndef _WIN32
-    if (!database_existed) {
-        std::filesystem::permissions(state->path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-                                     std::filesystem::perm_options::replace, directory_error);
-        if (directory_error) return lighter::outcome_error(Error::storage("cannot secure state database: " + directory_error.message()));
-    }
-#endif
-    if (auto configured = configure(state->database); !configured) return lighter::outcome_error(std::move(configured).error());
-    return Store(std::move(state));
-}
-
-const std::filesystem::path &Store::path() const noexcept { return state->path; }
-
-Result<SessionWriter> Store::lease(SessionId id) const {
-    auto lease = acquire_session_lease(state->path, id);
-    if (!lease) return lighter::outcome_error(std::move(lease).error());
-    return SessionWriter(std::make_shared<SessionWriter::State>(state, *std::move(lease), id));
-}
-
-Result<Session> SessionWriter::load() {
-    const auto &store = state->store;
-    const auto id = state->id;
-    std::scoped_lock lock(store->mutex);
-    auto catalog = prepare(store->database, R"sql(
-SELECT created_at_ms, updated_at_ms, workspace_root, workspace_key, working_directory, title, preview,
-       active_leaf_entry_id, next_entry_id, next_task_id, next_provider_call_id, last_provider, last_model,
-       last_reasoning_effort, archived_at_ms, revision, forked_from_session_id, forked_from_entry_id
-FROM sessions WHERE id = ?1
-)sql");
-    if (!catalog) return lighter::outcome_error(std::move(catalog).error());
-    bind_id(catalog->value, 1, id);
-    const auto row = sqlite3_step(catalog->value);
-    if (row == SQLITE_DONE) return lighter::outcome_error(Error::storage("session was not found"));
-    if (row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(store->database, "cannot load session catalog", row));
-
-    Session session(id);
-    session.metadata.created_at_ms = sqlite3_column_int64(catalog->value, 0);
-    session.metadata.updated_at_ms = sqlite3_column_int64(catalog->value, 1);
-    auto workspace_root = optional_text(catalog->value, 2);
-    auto workspace_key = optional_text(catalog->value, 3);
-    if (workspace_root.has_value() != workspace_key.has_value()) {
-        return lighter::outcome_error(Error::storage("durable session has incomplete workspace metadata"));
-    }
-    if (workspace_root) session.metadata.workspace = SessionWorkspace{*std::move(workspace_root), *std::move(workspace_key)};
-    session.metadata.working_directory = text(catalog->value, 4);
-    session.metadata.title = optional_text(catalog->value, 5);
-    session.metadata.preview = text(catalog->value, 6);
-    if (sqlite3_column_type(catalog->value, 7) != SQLITE_NULL)
-        session.active_leaf = EntryId{static_cast<u64>(sqlite3_column_int64(catalog->value, 7))};
-    session.next_entry_id = static_cast<u64>(sqlite3_column_int64(catalog->value, 8));
-    session.next_task_id = static_cast<u64>(sqlite3_column_int64(catalog->value, 9));
-    session.next_provider_call_id = static_cast<u64>(sqlite3_column_int64(catalog->value, 10));
-    auto provider = optional_text(catalog->value, 11);
-    auto model = optional_text(catalog->value, 12);
-    auto reasoning_effort = optional_text(catalog->value, 13);
-    if (provider.has_value() != model.has_value() || (reasoning_effort && !provider)) {
-        return lighter::outcome_error(Error::storage("durable session has incomplete model preference"));
-    }
-    if (provider) {
-        session.metadata.model_preference = SessionModelPreference{
-            .provider = *std::move(provider),
-            .model = *std::move(model),
-            .reasoning_effort = std::move(reasoning_effort),
-        };
-    }
-    if (sqlite3_column_type(catalog->value, 14) != SQLITE_NULL) session.metadata.archived_at_ms = sqlite3_column_int64(catalog->value, 14);
-    const auto revision = static_cast<u64>(sqlite3_column_int64(catalog->value, 15));
-    std::optional<SessionId> forked_session;
-    if (sqlite3_column_type(catalog->value, 16) != SQLITE_NULL) {
-        auto source = column_id(catalog->value, 16);
-        if (!source) return lighter::outcome_error(std::move(source).error());
-        forked_session = *source;
-    }
-    std::optional<EntryId> forked_entry;
-    if (sqlite3_column_type(catalog->value, 17) != SQLITE_NULL) {
-        forked_entry = EntryId{static_cast<u64>(sqlite3_column_int64(catalog->value, 17))};
-    }
-    if (forked_session.has_value() != forked_entry.has_value()) {
-        return lighter::outcome_error(Error::storage("durable session has incomplete fork origin"));
-    }
-    if (forked_session) session.metadata.forked_from = ForkOrigin{*forked_session, *forked_entry};
-
-    auto entries = prepare(store->database, R"sql(
-SELECT entry_id, task_id, provider_call_id, parent_entry_id, kind, payload_version, payload_json, created_at_ms
-FROM session_entries WHERE session_id = ?1 ORDER BY entry_id
-)sql");
-    if (!entries) return lighter::outcome_error(std::move(entries).error());
-    bind_id(entries->value, 1, id);
-    while (true) {
-        const auto entry_row = sqlite3_step(entries->value);
-        if (entry_row == SQLITE_DONE) break;
-        if (entry_row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(store->database, "cannot load session entries", entry_row));
-        const auto kind = static_cast<EntryKind>(sqlite3_column_int(entries->value, 4));
-        const auto version = static_cast<u32>(sqlite3_column_int(entries->value, 5));
-        auto payload = decode_payload(kind, version, text(entries->value, 6));
-        if (!payload) return lighter::outcome_error(std::move(payload).error());
-        auto encoded = encode_payload(*payload);
-        if (!encoded) return lighter::outcome_error(std::move(encoded).error());
-        const auto task_column = sqlite3_column_type(entries->value, 1) == SQLITE_NULL ?
-                                     std::optional<u64>{} :
-                                     static_cast<u64>(sqlite3_column_int64(entries->value, 1));
-        const auto call_column = sqlite3_column_type(entries->value, 2) == SQLITE_NULL ?
-                                     std::optional<u64>{} :
-                                     static_cast<u64>(sqlite3_column_int64(entries->value, 2));
-        if (task_column != (encoded->task_id ? std::optional<u64>{encoded->task_id->value} : std::nullopt) ||
-            call_column != (encoded->provider_call_id ? std::optional<u64>{encoded->provider_call_id->value} : std::nullopt)) {
-            return lighter::outcome_error(Error::storage("session entry lifecycle index does not match its payload"));
-        }
-        SessionEntry entry{
-            .id = {static_cast<u64>(sqlite3_column_int64(entries->value, 0))},
-            .payload = *std::move(payload),
-            .created_at_ms = sqlite3_column_int64(entries->value, 7),
-        };
-        if (sqlite3_column_type(entries->value, 3) != SQLITE_NULL) {
-            entry.parent_id = EntryId{static_cast<u64>(sqlite3_column_int64(entries->value, 3))};
-        }
-        session.entries.push_back(std::move(entry));
-    }
-    auto valid = session.validate();
-    if (!valid) return lighter::outcome_error(Error::storage("invalid durable session: " + valid.error().detail));
-    state->revision = revision;
-    return session;
-}
-
-Result<SessionId> Store::resolve_id(std::string_view value) const {
-    if (value.size() == 36) {
-        auto parsed = parse_session_id(value);
-        if (!parsed) return lighter::outcome_error(std::move(parsed).error());
-        std::scoped_lock lock(state->mutex);
-        auto found = prepare(state->database, "SELECT 1 FROM sessions WHERE id=?1");
-        if (!found) return lighter::outcome_error(std::move(found).error());
-        bind_id(found->value, 1, *parsed);
-        const auto row = sqlite3_step(found->value);
-        if (row == SQLITE_ROW) return *parsed;
-        if (row == SQLITE_DONE) return lighter::outcome_error(Error::storage("session was not found"));
-        return lighter::outcome_error(sqlite_error(state->database, "cannot resolve session id", row));
-    }
-    std::string prefix;
-    prefix.reserve(value.size());
-    for (const auto character : value) {
-        if (character == '-') continue;
-        if (!std::isxdigit(static_cast<unsigned char>(character))) {
-            return lighter::outcome_error(Error::config("invalid session id prefix"));
-        }
-        prefix.push_back(character);
-    }
-    if (prefix.size() < 8 || prefix.size() > 32) {
-        return lighter::outcome_error(Error::config("session id prefix must contain between 8 and 32 hexadecimal digits"));
-    }
-    const auto [lower, upper] = prefix_bounds(prefix);
-    std::scoped_lock lock(state->mutex);
-    auto matches = upper ? prepare(state->database, "SELECT id FROM sessions WHERE id >= ?1 AND id < ?2 ORDER BY id LIMIT 2") :
-                           prepare(state->database, "SELECT id FROM sessions WHERE id >= ?1 ORDER BY id LIMIT 2");
-    if (!matches) return lighter::outcome_error(std::move(matches).error());
-    bind_id(matches->value, 1, lower);
-    if (upper) bind_id(matches->value, 2, *upper);
-    std::optional<SessionId> result;
-    while (true) {
-        const auto row = sqlite3_step(matches->value);
-        if (row == SQLITE_DONE) break;
-        if (row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(state->database, "cannot resolve session id prefix", row));
-        auto id = column_id(matches->value, 0);
-        if (!id) return lighter::outcome_error(std::move(id).error());
-        if (result) return lighter::outcome_error(Error::storage("session id prefix is ambiguous"));
-        result = *id;
-    }
-    if (!result) return lighter::outcome_error(Error::storage("session was not found"));
-    return *result;
-}
-
-Result<SessionSummary> Store::latest(std::string_view workspace_key) const {
-    auto result = page({.workspace_key = std::string(workspace_key), .limit = 1});
-    if (!result) return lighter::outcome_error(std::move(result).error());
-    if (result->sessions.empty()) return lighter::outcome_error(Error::storage("no saved session exists in this workspace"));
-    return std::move(result->sessions.front());
-}
-
-Result<SessionPage> Store::page(const SessionPageQuery &request) const {
-    lighter::check(request.limit > 0, "session catalog page size must be positive");
-    constexpr usize k_maximum_page_size = 50;
-    const auto page_size = std::min(request.limit, k_maximum_page_size);
-    const bool archived = request.state == SessionCatalogState::ARCHIVED;
-    const bool continued = request.after.has_value();
-    const std::string_view active_first = R"sql(
-SELECT id, created_at_ms, updated_at_ms, workspace_root, title, preview, last_provider, last_model,
-       last_reasoning_effort, entry_count, tokens_used
-FROM sessions
-WHERE workspace_key=?1 AND archived_at_ms IS NULL
-ORDER BY updated_at_ms DESC, id DESC LIMIT ?2
-)sql";
-    const std::string_view active_continued = R"sql(
-SELECT id, created_at_ms, updated_at_ms, workspace_root, title, preview, last_provider, last_model,
-       last_reasoning_effort, entry_count, tokens_used
-FROM sessions
-WHERE workspace_key=?1 AND archived_at_ms IS NULL
-  AND (updated_at_ms, id) < (?2, ?3)
-ORDER BY updated_at_ms DESC, id DESC LIMIT ?4
-)sql";
-    const std::string_view archived_first = R"sql(
-SELECT id, created_at_ms, updated_at_ms, workspace_root, title, preview, last_provider, last_model,
-       last_reasoning_effort, entry_count, tokens_used
-FROM sessions
-WHERE workspace_key=?1 AND archived_at_ms IS NOT NULL
-ORDER BY updated_at_ms DESC, id DESC LIMIT ?2
-)sql";
-    const std::string_view archived_continued = R"sql(
-SELECT id, created_at_ms, updated_at_ms, workspace_root, title, preview, last_provider, last_model,
-       last_reasoning_effort, entry_count, tokens_used
-FROM sessions
-WHERE workspace_key=?1 AND archived_at_ms IS NOT NULL
-  AND (updated_at_ms, id) < (?2, ?3)
-ORDER BY updated_at_ms DESC, id DESC LIMIT ?4
-)sql";
-    const auto sql = archived ? (continued ? archived_continued : archived_first) : (continued ? active_continued : active_first);
-
-    std::scoped_lock lock(state->mutex);
-    auto query = prepare(state->database, sql);
-    if (!query) return lighter::outcome_error(std::move(query).error());
-    sqlite3_bind_text(query->value, 1, request.workspace_key.data(), static_cast<int>(request.workspace_key.size()), SQLITE_TRANSIENT);
-    const auto row_limit = static_cast<sqlite3_int64>(page_size + 1);
-    if (request.after) {
-        sqlite3_bind_int64(query->value, 2, request.after->updated_at_ms);
-        bind_id(query->value, 3, request.after->id);
-        sqlite3_bind_int64(query->value, 4, row_limit);
-    } else {
-        sqlite3_bind_int64(query->value, 2, row_limit);
-    }
-
-    SessionPage page;
-    bool has_more = false;
-    while (true) {
-        const auto row = sqlite3_step(query->value);
-        if (row == SQLITE_DONE) break;
-        if (row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(state->database, "cannot list sessions", row));
-        if (page.sessions.size() == page_size) {
-            has_more = true;
-            break;
-        }
-        auto id = column_id(query->value, 0);
-        if (!id) return lighter::outcome_error(std::move(id).error());
-        auto provider = optional_text(query->value, 6);
-        auto model = optional_text(query->value, 7);
-        auto reasoning_effort = optional_text(query->value, 8);
-        if (provider.has_value() != model.has_value() || (reasoning_effort && !provider)) {
-            return lighter::outcome_error(Error::storage("session catalog has an incomplete model preference"));
-        }
-        std::optional<SessionModelPreference> model_preference;
-        if (provider) {
-            model_preference = SessionModelPreference{
-                .provider = *std::move(provider),
-                .model = *std::move(model),
-                .reasoning_effort = std::move(reasoning_effort),
-            };
-        }
-        page.sessions.push_back({
-            .id = *id,
-            .created_at_ms = sqlite3_column_int64(query->value, 1),
-            .updated_at_ms = sqlite3_column_int64(query->value, 2),
-            .workspace_root = optional_text(query->value, 3),
-            .title = optional_text(query->value, 4),
-            .preview = text(query->value, 5),
-            .model_preference = std::move(model_preference),
-            .entry_count = static_cast<u64>(sqlite3_column_int64(query->value, 9)),
-            .tokens_used = static_cast<u64>(sqlite3_column_int64(query->value, 10)),
-        });
-    }
-    if (has_more) {
-        const auto &last = page.sessions.back();
-        page.continuation = SessionPageCursor{.updated_at_ms = last.updated_at_ms, .id = last.id};
-    }
-    return page;
-}
-
-namespace {
 
 struct DurableHead {
     bool exists = false;
+    u64 revision = 0;
     u64 entry_count = 0;
     u64 next_task_id = 1;
     u64 next_provider_call_id = 1;
     u64 tokens_used = 0;
     i64 created_at_ms = 0;
     i64 updated_at_ms = 0;
+    std::optional<SessionWorkspace> workspace;
+    std::optional<std::string> title;
+    std::string preview;
 };
 
 Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) {
-    if (!head.exists && delta.entries.empty()) {
+    if (!head.exists && delta.entries.empty())
         return lighter::outcome_error(Error::storage("cannot materialize a session without a semantic entry"));
+    if (!delta.metadata.workspace || delta.metadata.workspace->root.empty() || delta.metadata.workspace->key.empty()) {
+        return lighter::outcome_error(Error::storage("session delta has incomplete workspace metadata"));
     }
     if (delta.metadata.created_at_ms <= 0 || delta.metadata.updated_at_ms < delta.metadata.created_at_ms ||
         (head.exists && (delta.metadata.created_at_ms != head.created_at_ms || delta.metadata.updated_at_ms < head.updated_at_ms))) {
-        return lighter::outcome_error(Error::storage("session delta has invalid catalog timestamps"));
+        return lighter::outcome_error(Error::storage("session delta has invalid conversation timestamps"));
+    }
+    if (head.exists && delta.metadata.workspace != head.workspace) {
+        return lighter::outcome_error(Error::storage("session delta changes immutable workspace association"));
     }
     if (delta.metadata.preview.size() > 240 || !lighter::encoding::utf8::is_valid(delta.metadata.preview)) {
         return lighter::outcome_error(Error::storage("session delta has an invalid preview"));
@@ -640,9 +266,6 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
     if (delta.metadata.title && (delta.metadata.title->empty() || delta.metadata.title->size() > 200 ||
                                  !lighter::encoding::utf8::is_valid(*delta.metadata.title))) {
         return lighter::outcome_error(Error::storage("session delta has an invalid title"));
-    }
-    if (delta.metadata.workspace && (delta.metadata.workspace->root.empty() || delta.metadata.workspace->key.empty())) {
-        return lighter::outcome_error(Error::storage("session delta has incomplete workspace metadata"));
     }
     if (delta.metadata.model_preference &&
         (delta.metadata.model_preference->provider.empty() || delta.metadata.model_preference->model.empty())) {
@@ -661,7 +284,6 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
         delta.tokens_used < head.tokens_used) {
         return lighter::outcome_error(Error::storage("session delta regresses durable counters"));
     }
-
     u64 maximum_task_id = 0;
     u64 maximum_provider_call_id = 0;
     for (usize index = 0; index < delta.entries.size(); ++index) {
@@ -671,11 +293,11 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
             return lighter::outcome_error(Error::storage("session delta contains an invalid entry envelope"));
         }
         std::visit(
-            [&maximum_task_id, &maximum_provider_call_id](const auto &payload) {
+            [&](const auto &payload) {
                 using T = std::remove_cvref_t<decltype(payload)>;
-                if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>) {
+                if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>)
                     maximum_task_id = std::max(maximum_task_id, payload.id.value);
-                } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolResults>) {
+                else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolResults>) {
                     maximum_task_id = std::max(maximum_task_id, payload.task_id.value);
                     maximum_provider_call_id = std::max(maximum_provider_call_id, payload.provider_call_id.value);
                 } else if constexpr (std::same_as<T, ProviderCallCompleted> || std::same_as<T, ProviderCallAborted>) {
@@ -691,163 +313,777 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
     return {};
 }
 
-} // namespace
-
-Result<void> SessionWriter::commit(const SessionDelta &delta) {
-    const auto &store = state->store;
-    const auto id = state->id;
-    std::scoped_lock lock(store->mutex);
-    auto started = begin(store->database);
-    if (!started) return lighter::outcome_error(std::move(started).error());
-    Rollback rollback{store->database};
-
-    auto revision = prepare(store->database,
-                            "SELECT revision, entry_count, next_task_id, next_provider_call_id, tokens_used, created_at_ms, updated_at_ms "
-                            "FROM sessions WHERE id=?1");
-    if (!revision) return lighter::outcome_error(std::move(revision).error());
-    bind_id(revision->value, 1, id);
-    auto row = sqlite3_step(revision->value);
-    DurableHead head;
-    if (row == SQLITE_DONE) {
-        if (state->revision != 0) return lighter::outcome_error(Error::storage("session revision conflict: missing session"));
-    } else if (row != SQLITE_ROW) {
-        return lighter::outcome_error(sqlite_error(store->database, "cannot inspect session revision", row));
-    } else {
-        if (static_cast<u64>(sqlite3_column_int64(revision->value, 0)) != state->revision) {
-            return lighter::outcome_error(Error::storage("session revision conflict"));
-        }
-        head = {
-            .exists = true,
-            .entry_count = static_cast<u64>(sqlite3_column_int64(revision->value, 1)),
-            .next_task_id = static_cast<u64>(sqlite3_column_int64(revision->value, 2)),
-            .next_provider_call_id = static_cast<u64>(sqlite3_column_int64(revision->value, 3)),
-            .tokens_used = static_cast<u64>(sqlite3_column_int64(revision->value, 4)),
-            .created_at_ms = sqlite3_column_int64(revision->value, 5),
-            .updated_at_ms = sqlite3_column_int64(revision->value, 6),
-        };
-    }
-    if (auto valid = validate_delta(delta, head); !valid) return valid;
-
-    if (!head.exists) {
-        auto insert_session = prepare(store->database, R"sql(
-INSERT INTO sessions(id, created_at_ms, updated_at_ms, workspace_root, workspace_key, working_directory, title, preview,
-                     active_leaf_entry_id, next_entry_id, next_task_id, next_provider_call_id, entry_count, tokens_used,
-                     last_provider, last_model, last_reasoning_effort, archived_at_ms, revision,
-                     forked_from_session_id, forked_from_entry_id)
-VALUES(?1,?2,?3,?4,?5,?6,?7,?8,NULL,1,1,1,0,0,?9,?10,?11,?12,0,?13,?14)
-)sql");
-        if (!insert_session) return lighter::outcome_error(std::move(insert_session).error());
-        bind_id(insert_session->value, 1, id);
-        sqlite3_bind_int64(insert_session->value, 2, delta.metadata.created_at_ms);
-        sqlite3_bind_int64(insert_session->value, 3, delta.metadata.updated_at_ms);
-        bind_optional_text(insert_session->value, 4,
-                           delta.metadata.workspace ? std::optional{delta.metadata.workspace->root} : std::nullopt);
-        bind_optional_text(insert_session->value, 5,
-                           delta.metadata.workspace ? std::optional{delta.metadata.workspace->key} : std::nullopt);
-        sqlite3_bind_text(insert_session->value, 6, delta.metadata.working_directory.data(),
-                          static_cast<int>(delta.metadata.working_directory.size()), SQLITE_TRANSIENT);
-        bind_optional_text(insert_session->value, 7, delta.metadata.title);
-        sqlite3_bind_text(insert_session->value, 8, delta.metadata.preview.data(), static_cast<int>(delta.metadata.preview.size()),
-                          SQLITE_TRANSIENT);
-        bind_optional_text(insert_session->value, 9,
-                           delta.metadata.model_preference ? std::optional{delta.metadata.model_preference->provider} : std::nullopt);
-        bind_optional_text(insert_session->value, 10,
-                           delta.metadata.model_preference ? std::optional{delta.metadata.model_preference->model} : std::nullopt);
-        bind_optional_text(insert_session->value, 11,
-                           delta.metadata.model_preference ? delta.metadata.model_preference->reasoning_effort : std::nullopt);
-        bind_optional_i64(insert_session->value, 12, delta.metadata.archived_at_ms);
-        bind_optional_session(insert_session->value, 13,
-                              delta.metadata.forked_from ? std::optional{delta.metadata.forked_from->session} : std::nullopt);
-        bind_optional_entry(insert_session->value, 14,
-                            delta.metadata.forked_from ? std::optional{delta.metadata.forked_from->entry} : std::nullopt);
-        if (sqlite3_step(insert_session->value) != SQLITE_DONE) {
-            return lighter::outcome_error(sqlite_error(store->database, "cannot create session"));
-        }
-    }
-
-    auto insert_entry = prepare(store->database, R"sql(
-INSERT INTO session_entries(session_id,entry_id,task_id,provider_call_id,parent_entry_id,kind,payload_version,payload_json,created_at_ms)
-VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
-)sql");
-    if (!insert_entry) return lighter::outcome_error(std::move(insert_entry).error());
+Result<PreparedDelta> prepare_delta(const SessionDelta &delta, const DurableHead &head) {
+    if (auto valid = validate_delta(delta, head); !valid) return lighter::outcome_error(std::move(valid).error());
+    PreparedDelta prepared{.delta = delta};
+    prepared.entries.reserve(delta.entries.size());
     for (const auto &entry : delta.entries) {
         auto encoded = encode_payload(entry.payload);
         if (!encoded) return lighter::outcome_error(std::move(encoded).error());
-        sqlite3_reset(insert_entry->value);
-        sqlite3_clear_bindings(insert_entry->value);
-        bind_id(insert_entry->value, 1, id);
-        sqlite3_bind_int64(insert_entry->value, 2, static_cast<sqlite3_int64>(entry.id.value));
-        if (encoded->task_id)
-            sqlite3_bind_int64(insert_entry->value, 3, static_cast<sqlite3_int64>(encoded->task_id->value));
-        else
-            sqlite3_bind_null(insert_entry->value, 3);
-        if (encoded->provider_call_id)
-            sqlite3_bind_int64(insert_entry->value, 4, static_cast<sqlite3_int64>(encoded->provider_call_id->value));
-        else
-            sqlite3_bind_null(insert_entry->value, 4);
-        bind_optional_entry(insert_entry->value, 5, entry.parent_id);
-        sqlite3_bind_int(insert_entry->value, 6, static_cast<int>(encoded->kind));
-        sqlite3_bind_int(insert_entry->value, 7, static_cast<int>(encoded->version));
-        sqlite3_bind_text(insert_entry->value, 8, encoded->json.data(), static_cast<int>(encoded->json.size()), SQLITE_TRANSIENT);
-        sqlite3_bind_int64(insert_entry->value, 9, entry.created_at_ms);
-        const auto inserted = sqlite3_step(insert_entry->value);
-        if (inserted != SQLITE_DONE) return lighter::outcome_error(sqlite_error(store->database, "cannot append session entry", inserted));
+        prepared.entries.push_back(
+            {.id = entry.id, .parent_id = entry.parent_id, .created_at_ms = entry.created_at_ms, .payload = *std::move(encoded)});
     }
+    return prepared;
+}
 
-    auto update = prepare(store->database, R"sql(
-UPDATE sessions SET updated_at_ms=?2, workspace_root=?3, workspace_key=?4, working_directory=?5, title=?6, preview=?7,
- active_leaf_entry_id=?8, next_entry_id=?9, next_task_id=?10, next_provider_call_id=?11, entry_count=?12,
- tokens_used=?13, last_provider=?14, last_model=?15, last_reasoning_effort=?16, archived_at_ms=?17,
- revision=revision+1, forked_from_session_id=?18, forked_from_entry_id=?19
-WHERE id=?1 AND revision=?20
-)sql");
-    if (!update) return lighter::outcome_error(std::move(update).error());
-    bind_id(update->value, 1, id);
-    sqlite3_bind_int64(update->value, 2, delta.metadata.updated_at_ms);
-    bind_optional_text(update->value, 3, delta.metadata.workspace ? std::optional{delta.metadata.workspace->root} : std::nullopt);
-    bind_optional_text(update->value, 4, delta.metadata.workspace ? std::optional{delta.metadata.workspace->key} : std::nullopt);
-    sqlite3_bind_text(update->value, 5, delta.metadata.working_directory.data(), static_cast<int>(delta.metadata.working_directory.size()),
+std::string marker_contents(u64 revision) { return "1 " + std::to_string(revision) + "\n"; }
+
+Result<u64> read_marker(const std::filesystem::path &path) {
+    auto reparse = detail::is_reparse_point(path);
+    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+    if (*reparse) return lighter::outcome_error(Error::storage("catalog marker is a symlink, junction, or reparse point"));
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect catalog marker: " + error.message()));
+    if (size == 0 || size > k_marker_maximum_size)
+        return lighter::outcome_error(Error::storage("catalog marker has invalid bounded format"));
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return lighter::outcome_error(Error::storage("cannot read catalog marker"));
+    std::string contents(static_cast<usize>(size), '\0');
+    input.read(contents.data(), static_cast<std::streamsize>(contents.size()));
+    if (!input || !contents.starts_with("1 ") || !contents.ends_with('\n')) {
+        return lighter::outcome_error(Error::storage("catalog marker has invalid format version"));
+    }
+    std::string_view revision_text(contents);
+    revision_text.remove_prefix(2);
+    revision_text.remove_suffix(1);
+    u64 revision = 0;
+    const auto parsed = std::from_chars(revision_text.data(), revision_text.data() + revision_text.size(), revision);
+    if (parsed.ec != std::errc{} || parsed.ptr != revision_text.data() + revision_text.size() || revision == 0) {
+        return lighter::outcome_error(Error::storage("catalog marker has an invalid target revision"));
+    }
+    return revision;
+}
+
+Result<void> write_marker(const StatePaths &paths, SessionId id, u64 revision) {
+    std::error_code error;
+    std::filesystem::create_directories(paths.catalog_pending(), error);
+    if (error) return lighter::outcome_error(Error::storage("cannot create catalog-pending directory: " + error.message()));
+    const auto path = paths.pending_marker(id);
+    const auto exists = std::filesystem::exists(path, error);
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect catalog marker: " + error.message()));
+    if (exists) {
+        auto current = read_marker(path);
+        if (!current) return lighter::outcome_error(std::move(current).error());
+        if (*current >= revision) return {};
+    }
+    return detail::durable_replace_file(path, marker_contents(revision));
+}
+
+Result<void> remove_marker_if_satisfied(const StatePaths &paths, SessionId id, u64 revision) {
+    auto current = read_marker(paths.pending_marker(id));
+    if (!current) return lighter::outcome_error(std::move(current).error());
+    if (*current > revision) return {};
+    return detail::durable_remove_file(paths.pending_marker(id));
+}
+
+Result<CatalogProjection> read_projection(sqlite3 *database, SessionId expected) {
+    auto query = prepare(database, "SELECT session_id,revision,workspace_key,updated_at_ms,title,preview FROM session WHERE singleton=1");
+    if (!query) return lighter::outcome_error(std::move(query).error());
+    const auto row = sqlite3_step(query->value);
+    if (row == SQLITE_DONE) return lighter::outcome_error(Error::storage("session database has no singleton row"));
+    if (row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(database, "cannot read session singleton", row));
+    auto id = column_id(query->value, 0);
+    if (!id) return lighter::outcome_error(std::move(id).error());
+    if (*id != expected) return lighter::outcome_error(Error::storage("session database identity does not match its directory"));
+    return CatalogProjection{
+        .summary = {.id = *id,
+                    .updated_at_ms = sqlite3_column_int64(query->value, 3),
+                    .title = optional_text(query->value, 4),
+                    .preview = text(query->value, 5)},
+        .observed_revision = static_cast<u64>(sqlite3_column_int64(query->value, 1)),
+        .workspace_key = text(query->value, 2),
+    };
+}
+
+void bind_singleton(sqlite3_stmt *statement, const SessionDelta &delta, SessionId id, u64 revision) {
+    const auto &metadata = delta.metadata;
+    sqlite3_bind_int(statement, 1, 1);
+    bind_id(statement, 2, id);
+    sqlite3_bind_int64(statement, 3, metadata.created_at_ms);
+    sqlite3_bind_int64(statement, 4, metadata.updated_at_ms);
+    sqlite3_bind_text(statement, 5, metadata.workspace->root.data(), static_cast<int>(metadata.workspace->root.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 6, metadata.workspace->key.data(), static_cast<int>(metadata.workspace->key.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 7, metadata.working_directory.data(), static_cast<int>(metadata.working_directory.size()),
                       SQLITE_TRANSIENT);
-    bind_optional_text(update->value, 6, delta.metadata.title);
-    sqlite3_bind_text(update->value, 7, delta.metadata.preview.data(), static_cast<int>(delta.metadata.preview.size()), SQLITE_TRANSIENT);
-    bind_optional_entry(update->value, 8, delta.active_leaf);
-    sqlite3_bind_int64(update->value, 9, static_cast<sqlite3_int64>(delta.next_entry_id));
-    sqlite3_bind_int64(update->value, 10, static_cast<sqlite3_int64>(delta.next_task_id));
-    sqlite3_bind_int64(update->value, 11, static_cast<sqlite3_int64>(delta.next_provider_call_id));
-    sqlite3_bind_int64(update->value, 12, static_cast<sqlite3_int64>(delta.entry_count));
-    sqlite3_bind_int64(update->value, 13, static_cast<sqlite3_int64>(delta.tokens_used));
-    bind_optional_text(update->value, 14,
-                       delta.metadata.model_preference ? std::optional{delta.metadata.model_preference->provider} : std::nullopt);
-    bind_optional_text(update->value, 15,
-                       delta.metadata.model_preference ? std::optional{delta.metadata.model_preference->model} : std::nullopt);
-    bind_optional_text(update->value, 16,
-                       delta.metadata.model_preference ? delta.metadata.model_preference->reasoning_effort : std::nullopt);
-    bind_optional_i64(update->value, 17, delta.metadata.archived_at_ms);
-    bind_optional_session(update->value, 18,
-                          delta.metadata.forked_from ? std::optional{delta.metadata.forked_from->session} : std::nullopt);
-    bind_optional_entry(update->value, 19, delta.metadata.forked_from ? std::optional{delta.metadata.forked_from->entry} : std::nullopt);
-    sqlite3_bind_int64(update->value, 20, static_cast<sqlite3_int64>(state->revision));
-    const auto updated = sqlite3_step(update->value);
-    if (updated != SQLITE_DONE) return lighter::outcome_error(sqlite_error(store->database, "cannot update session catalog", updated));
-    if (sqlite3_changes(store->database) != 1) return lighter::outcome_error(Error::storage("session revision conflict"));
-    auto committed = execute(store->database, "COMMIT");
-    if (!committed) return lighter::outcome_error(std::move(committed).error());
-    rollback.active = false;
-    ++state->revision;
+    bind_optional_text(statement, 8, metadata.title);
+    sqlite3_bind_text(statement, 9, metadata.preview.data(), static_cast<int>(metadata.preview.size()), SQLITE_TRANSIENT);
+    bind_optional_entry(statement, 10, delta.active_leaf);
+    sqlite3_bind_int64(statement, 11, static_cast<sqlite3_int64>(delta.next_entry_id));
+    sqlite3_bind_int64(statement, 12, static_cast<sqlite3_int64>(delta.next_task_id));
+    sqlite3_bind_int64(statement, 13, static_cast<sqlite3_int64>(delta.next_provider_call_id));
+    sqlite3_bind_int64(statement, 14, static_cast<sqlite3_int64>(delta.entry_count));
+    sqlite3_bind_int64(statement, 15, static_cast<sqlite3_int64>(delta.tokens_used));
+    bind_optional_text(statement, 16, metadata.model_preference ? std::optional{metadata.model_preference->provider} : std::nullopt);
+    bind_optional_text(statement, 17, metadata.model_preference ? std::optional{metadata.model_preference->model} : std::nullopt);
+    bind_optional_text(statement, 18, metadata.model_preference ? metadata.model_preference->reasoning_effort : std::nullopt);
+    sqlite3_bind_int64(statement, 19, static_cast<sqlite3_int64>(revision));
+    bind_optional_session(statement, 20, metadata.forked_from ? std::optional{metadata.forked_from->session} : std::nullopt);
+    bind_optional_entry(statement, 21, metadata.forked_from ? std::optional{metadata.forked_from->entry} : std::nullopt);
+}
+
+Result<void> insert_entries(sqlite3 *database, const std::vector<EncodedEntry> &entries) {
+    auto insert = prepare(database, R"sql(
+INSERT INTO session_entries(entry_id,task_id,provider_call_id,parent_entry_id,kind,payload_version,payload_json,created_at_ms)
+VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+)sql");
+    if (!insert) return lighter::outcome_error(std::move(insert).error());
+    for (const auto &entry : entries) {
+        sqlite3_reset(insert->value);
+        sqlite3_clear_bindings(insert->value);
+        sqlite3_bind_int64(insert->value, 1, static_cast<sqlite3_int64>(entry.id.value));
+        if (entry.payload.task_id)
+            sqlite3_bind_int64(insert->value, 2, static_cast<sqlite3_int64>(entry.payload.task_id->value));
+        else
+            sqlite3_bind_null(insert->value, 2);
+        if (entry.payload.provider_call_id)
+            sqlite3_bind_int64(insert->value, 3, static_cast<sqlite3_int64>(entry.payload.provider_call_id->value));
+        else
+            sqlite3_bind_null(insert->value, 3);
+        bind_optional_entry(insert->value, 4, entry.parent_id);
+        sqlite3_bind_int(insert->value, 5, static_cast<int>(entry.payload.kind));
+        sqlite3_bind_int(insert->value, 6, static_cast<int>(entry.payload.version));
+        sqlite3_bind_text(insert->value, 7, entry.payload.json.data(), static_cast<int>(entry.payload.json.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(insert->value, 8, entry.created_at_ms);
+        const auto row = sqlite3_step(insert->value);
+        if (row != SQLITE_DONE) return lighter::outcome_error(sqlite_error(database, "cannot append session entry", row));
+    }
     return {};
 }
 
+DurableHead head_from_delta(const SessionDelta &delta, u64 revision) {
+    return {.exists = true,
+            .revision = revision,
+            .entry_count = delta.entry_count,
+            .next_task_id = delta.next_task_id,
+            .next_provider_call_id = delta.next_provider_call_id,
+            .tokens_used = delta.tokens_used,
+            .created_at_ms = delta.metadata.created_at_ms,
+            .updated_at_ms = delta.metadata.updated_at_ms,
+            .workspace = delta.metadata.workspace,
+            .title = delta.metadata.title,
+            .preview = delta.metadata.preview};
+}
+
+std::string staging_nonce() {
+    std::mt19937_64 random(std::random_device{}());
+    std::array<char, 17> output{};
+    std::to_chars(output.data(), output.data() + output.size() - 1, random(), 16);
+    return output.data();
+}
+
+Result<void> create_state_directory(const std::filesystem::path &path) {
+    std::error_code error;
+    const auto created = std::filesystem::create_directories(path, error);
+    if (error)
+        return lighter::outcome_error(Error::storage("cannot create state directory '" + path.generic_string() + "': " + error.message()));
+#ifndef _WIN32
+    if (created) {
+        std::filesystem::permissions(path, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, error);
+        if (error) return lighter::outcome_error(Error::storage("cannot secure state directory: " + error.message()));
+    }
+#endif
+    auto reparse = detail::is_reparse_point(path);
+    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+    if (*reparse)
+        return lighter::outcome_error(Error::storage("state directory is a symlink, junction, or reparse point: " + path.generic_string()));
+    return {};
+}
+
+bool has_related_staging(const StatePaths &paths, SessionId id) {
+    std::error_code error;
+    const auto prefix = to_string(id) + ".";
+    for (std::filesystem::directory_iterator iterator(paths.staging(), error), end; !error && iterator != end; iterator.increment(error)) {
+        if (iterator->path().filename().string().starts_with(prefix)) return true;
+    }
+    return static_cast<bool>(error);
+}
+
+Result<SessionId> canonical_path_id(const std::filesystem::path &path) {
+    const auto name = path.filename().string();
+    auto id = parse_session_id(name);
+    if (!id || to_string(*id) != name) return lighter::outcome_error(Error::storage("state entry name is not a canonical session ID"));
+    return *id;
+}
+
+} // namespace
+
+struct SessionWriter::State {
+    State(std::shared_ptr<SessionRepository::State> repository, SessionLease lease, SessionId id)
+        : repository(std::move(repository)), lease(std::move(lease)), id(id) {}
+    ~State() {
+        if (database) sqlite3_close(database);
+        if (!published && !staging_directory.empty()) {
+            std::error_code error;
+            std::filesystem::remove_all(staging_directory, error);
+        }
+    }
+    std::shared_ptr<SessionRepository::State> repository;
+    SessionLease lease;
+    SessionId id;
+    sqlite3 *database = nullptr;
+    std::filesystem::path staging_directory;
+    DurableHead head;
+    bool published = false;
+    bool staged = false;
+    std::mutex mutex;
+    std::mutex invalidation_mutex;
+};
+
+SessionWriter::~SessionWriter() = default;
+SessionWriter::SessionWriter(SessionWriter &&) noexcept = default;
+SessionWriter &SessionWriter::operator=(SessionWriter &&) noexcept = default;
+SessionId SessionWriter::session_id() const noexcept { return state->id; }
+
+namespace {
+
+Result<void> stage_prepared(SessionWriter::State &state, const PreparedDelta &prepared) {
+    const StatePaths paths{state.repository->root};
+    std::error_code error;
+    std::filesystem::create_directories(paths.staging(), error);
+    if (error) return lighter::outcome_error(Error::storage("cannot create session staging directory: " + error.message()));
+    state.staging_directory = paths.staging() / (to_string(state.id) + "." + staging_nonce());
+    if (!std::filesystem::create_directory(state.staging_directory, error) || error) {
+        return lighter::outcome_error(Error::storage("cannot create unique session staging directory: " + error.message()));
+    }
+    auto opened = open_database(state.staging_directory / "session.sqlite3", true, false);
+    if (!opened) return lighter::outcome_error(std::move(opened).error());
+    sqlite3 *database = *opened;
+    auto transaction = execute(database, "BEGIN IMMEDIATE");
+    if (!transaction) {
+        sqlite3_close(database);
+        return transaction;
+    }
+    auto insert = prepare(database, R"sql(
+INSERT INTO session(singleton,session_id,created_at_ms,updated_at_ms,workspace_root,workspace_key,working_directory,title,preview,
+ active_leaf_entry_id,next_entry_id,next_task_id,next_provider_call_id,entry_count,tokens_used,last_provider,last_model,
+ last_reasoning_effort,revision,forked_from_session_id,forked_from_entry_id)
+VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
+)sql");
+    if (!insert) {
+        static_cast<void>(execute(database, "ROLLBACK"));
+        sqlite3_close(database);
+        return lighter::outcome_error(std::move(insert).error());
+    }
+    bind_singleton(insert->value, prepared.delta, state.id, 1);
+    if (sqlite3_step(insert->value) != SQLITE_DONE) {
+        const auto error_result = sqlite_error(database, "cannot create session singleton");
+        static_cast<void>(execute(database, "ROLLBACK"));
+        sqlite3_close(database);
+        return lighter::outcome_error(error_result);
+    }
+    if (auto entries = insert_entries(database, prepared.entries); !entries) {
+        static_cast<void>(execute(database, "ROLLBACK"));
+        sqlite3_close(database);
+        return entries;
+    }
+    if (auto committed = execute(database, "COMMIT"); !committed) {
+        static_cast<void>(execute(database, "ROLLBACK"));
+        sqlite3_close(database);
+        return committed;
+    }
+    sqlite3_finalize(insert->value);
+    insert->value = nullptr;
+    if (sqlite3_close(database) != SQLITE_OK) return lighter::outcome_error(Error::storage("cannot close staged session database"));
+    state.head = head_from_delta(prepared.delta, 1);
+    state.staged = true;
+    return {};
+}
+
+Result<void> update_staged_singleton(SessionWriter::State &state, const SessionDelta &delta) {
+    auto opened = open_database(state.staging_directory / "session.sqlite3", false, false);
+    if (!opened) return lighter::outcome_error(std::move(opened).error());
+    sqlite3 *database = *opened;
+    auto update = prepare(database, R"sql(
+UPDATE session SET created_at_ms=?3,updated_at_ms=?4,workspace_root=?5,workspace_key=?6,working_directory=?7,title=?8,
+ preview=?9,active_leaf_entry_id=?10,next_entry_id=?11,next_task_id=?12,next_provider_call_id=?13,entry_count=?14,
+ tokens_used=?15,last_provider=?16,last_model=?17,last_reasoning_effort=?18,revision=?19,
+ forked_from_session_id=?20,forked_from_entry_id=?21 WHERE singleton=?1 AND session_id=?2
+)sql");
+    if (!update) {
+        sqlite3_close(database);
+        return lighter::outcome_error(std::move(update).error());
+    }
+    bind_singleton(update->value, delta, state.id, 1);
+    const auto row = sqlite3_step(update->value);
+    if (row != SQLITE_DONE || sqlite3_changes(database) != 1) {
+        const auto error = sqlite_error(database, "cannot finalize staged session singleton", row);
+        sqlite3_close(database);
+        return lighter::outcome_error(error);
+    }
+    sqlite3_finalize(update->value);
+    update->value = nullptr;
+    if (sqlite3_close(database) != SQLITE_OK) return lighter::outcome_error(Error::storage("cannot close finalized staging database"));
+    state.head = head_from_delta(delta, 1);
+    return {};
+}
+
+struct PublishedAuthority {
+    CatalogProjection projection;
+    std::optional<std::string> degradation;
+};
+
+Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const SessionDelta &delta) {
+    if (delta.entry_count != state.head.entry_count)
+        return lighter::outcome_error(Error::storage("staged publication snapshot changed semantic entries"));
+    if (auto updated = update_staged_singleton(state, delta); !updated) return lighter::outcome_error(std::move(updated).error());
+    const StatePaths paths{state.repository->root};
+    std::optional<std::string> degradation;
+    if (auto marker = write_marker(paths, state.id, 1); !marker) degradation = marker.error().message();
+    if (auto published = detail::publish_directory_without_replacement(state.staging_directory, paths.session_directory(state.id));
+        !published) {
+        return lighter::outcome_error(std::move(published).error());
+    }
+    state.staging_directory.clear();
+    state.published = true;
+    state.staged = false;
+    auto opened = open_database(paths.session_database(state.id), false, true);
+    if (!opened) return lighter::outcome_error(std::move(opened).error());
+    state.database = *opened;
+    auto projection = read_projection(state.database, state.id);
+    if (!projection) return lighter::outcome_error(std::move(projection).error());
+    return PublishedAuthority{.projection = *std::move(projection), .degradation = std::move(degradation)};
+}
+
+SessionCommitResult project_publication(SessionWriter::State &state, PublishedAuthority published) {
+    const StatePaths paths{state.repository->root};
+    if (auto projected = state.repository->catalog.upsert(published.projection); !projected) {
+        published.degradation = projected.error().message();
+    } else if (auto removed = remove_marker_if_satisfied(paths, state.id, published.projection.observed_revision); !removed) {
+        published.degradation = removed.error().message();
+    }
+    return {.catalog_degradation = std::move(published.degradation)};
+}
+
+} // namespace
+
+Result<Session> SessionWriter::load() {
+    std::scoped_lock lock(state->mutex);
+    if (!state->published || !state->database) return lighter::outcome_error(Error::storage("session is not published"));
+    auto singleton = prepare(state->database, R"sql(
+SELECT session_id,created_at_ms,updated_at_ms,workspace_root,workspace_key,working_directory,title,preview,
+ active_leaf_entry_id,next_entry_id,next_task_id,next_provider_call_id,last_provider,last_model,last_reasoning_effort,
+ revision,forked_from_session_id,forked_from_entry_id,entry_count,tokens_used
+FROM session WHERE singleton=1
+)sql");
+    if (!singleton) return lighter::outcome_error(std::move(singleton).error());
+    const auto row = sqlite3_step(singleton->value);
+    if (row == SQLITE_DONE) return lighter::outcome_error(Error::storage("session database has no singleton row"));
+    if (row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(state->database, "cannot load session singleton", row));
+    auto durable_id = column_id(singleton->value, 0);
+    if (!durable_id) return lighter::outcome_error(std::move(durable_id).error());
+    if (*durable_id != state->id)
+        return lighter::outcome_error(Error::storage("session database identity does not match requested session"));
+    Session session(state->id);
+    session.metadata.created_at_ms = sqlite3_column_int64(singleton->value, 1);
+    session.metadata.updated_at_ms = sqlite3_column_int64(singleton->value, 2);
+    session.metadata.workspace = SessionWorkspace{.root = text(singleton->value, 3), .key = text(singleton->value, 4)};
+    session.metadata.working_directory = text(singleton->value, 5);
+    session.metadata.title = optional_text(singleton->value, 6);
+    session.metadata.preview = text(singleton->value, 7);
+    if (sqlite3_column_type(singleton->value, 8) != SQLITE_NULL)
+        session.active_leaf = EntryId{static_cast<u64>(sqlite3_column_int64(singleton->value, 8))};
+    session.next_entry_id = static_cast<u64>(sqlite3_column_int64(singleton->value, 9));
+    session.next_task_id = static_cast<u64>(sqlite3_column_int64(singleton->value, 10));
+    session.next_provider_call_id = static_cast<u64>(sqlite3_column_int64(singleton->value, 11));
+    auto provider = optional_text(singleton->value, 12);
+    auto model = optional_text(singleton->value, 13);
+    auto reasoning = optional_text(singleton->value, 14);
+    if (provider.has_value() != model.has_value() || (reasoning && !provider))
+        return lighter::outcome_error(Error::storage("durable session has incomplete model preference"));
+    if (provider)
+        session.metadata.model_preference =
+            SessionModelPreference{.provider = *std::move(provider), .model = *std::move(model), .reasoning_effort = std::move(reasoning)};
+    const auto revision = static_cast<u64>(sqlite3_column_int64(singleton->value, 15));
+    std::optional<SessionId> fork_session;
+    if (sqlite3_column_type(singleton->value, 16) != SQLITE_NULL) {
+        auto id = column_id(singleton->value, 16);
+        if (!id) return lighter::outcome_error(std::move(id).error());
+        fork_session = *id;
+    }
+    std::optional<EntryId> fork_entry;
+    if (sqlite3_column_type(singleton->value, 17) != SQLITE_NULL)
+        fork_entry = EntryId{static_cast<u64>(sqlite3_column_int64(singleton->value, 17))};
+    if (fork_session.has_value() != fork_entry.has_value())
+        return lighter::outcome_error(Error::storage("durable session has incomplete fork origin"));
+    if (fork_session) session.metadata.forked_from = ForkOrigin{.session = *fork_session, .entry = *fork_entry};
+    const auto entry_count = static_cast<u64>(sqlite3_column_int64(singleton->value, 18));
+    const auto tokens = static_cast<u64>(sqlite3_column_int64(singleton->value, 19));
+
+    auto entries = prepare(state->database, R"sql(
+SELECT entry_id,task_id,provider_call_id,parent_entry_id,kind,payload_version,payload_json,created_at_ms
+FROM session_entries ORDER BY entry_id
+)sql");
+    if (!entries) return lighter::outcome_error(std::move(entries).error());
+    while (true) {
+        const auto entry_row = sqlite3_step(entries->value);
+        if (entry_row == SQLITE_DONE) break;
+        if (entry_row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(state->database, "cannot load session entries", entry_row));
+        const auto kind = static_cast<EntryKind>(sqlite3_column_int(entries->value, 4));
+        const auto version = static_cast<u32>(sqlite3_column_int(entries->value, 5));
+        auto payload = decode_payload(kind, version, text(entries->value, 6));
+        if (!payload) return lighter::outcome_error(std::move(payload).error());
+        auto encoded = encode_payload(*payload);
+        if (!encoded) return lighter::outcome_error(std::move(encoded).error());
+        const auto task = sqlite3_column_type(entries->value, 1) == SQLITE_NULL ?
+                              std::optional<u64>{} :
+                              std::optional<u64>{static_cast<u64>(sqlite3_column_int64(entries->value, 1))};
+        const auto call = sqlite3_column_type(entries->value, 2) == SQLITE_NULL ?
+                              std::optional<u64>{} :
+                              std::optional<u64>{static_cast<u64>(sqlite3_column_int64(entries->value, 2))};
+        if (task != (encoded->task_id ? std::optional<u64>{encoded->task_id->value} : std::nullopt) ||
+            call != (encoded->provider_call_id ? std::optional<u64>{encoded->provider_call_id->value} : std::nullopt)) {
+            return lighter::outcome_error(Error::storage("session entry lifecycle index does not match its payload"));
+        }
+        SessionEntry entry{.id = {static_cast<u64>(sqlite3_column_int64(entries->value, 0))},
+                           .payload = *std::move(payload),
+                           .created_at_ms = sqlite3_column_int64(entries->value, 7)};
+        if (sqlite3_column_type(entries->value, 3) != SQLITE_NULL)
+            entry.parent_id = EntryId{static_cast<u64>(sqlite3_column_int64(entries->value, 3))};
+        session.entries.push_back(std::move(entry));
+    }
+    if (session.entries.size() != entry_count || session.tokens_used() != tokens)
+        return lighter::outcome_error(Error::storage("session singleton counters do not match history"));
+    if (auto valid = session.validate(); !valid)
+        return lighter::outcome_error(Error::storage("invalid durable session: " + valid.error().detail));
+    state->head = head_from_delta(make_delta(session, {}), revision);
+    return session;
+}
+
+Result<void> SessionWriter::stage_initial(const SessionDelta &delta) {
+    DurableHead head;
+    auto prepared = prepare_delta(delta, head);
+    if (!prepared) return lighter::outcome_error(std::move(prepared).error());
+    std::scoped_lock lock(state->mutex);
+    if (state->published || state->staged) return lighter::outcome_error(Error::storage("session writer is already materialized"));
+    return stage_prepared(*state, *prepared);
+}
+
+Result<CatalogProjection> SessionWriter::projection() const {
+    std::scoped_lock lock(state->mutex);
+    if (!state->published || !state->database) return lighter::outcome_error(Error::storage("session is not published"));
+    return read_projection(state->database, state->id);
+}
+
+Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
+    std::unique_lock invalidation_lock(state->invalidation_mutex);
+    DurableHead head;
+    bool staged = false;
+    {
+        std::scoped_lock lock(state->mutex);
+        head = state->head;
+        staged = state->staged;
+    }
+    if (staged) {
+        if (delta.entry_count != head.entry_count || delta.next_entry_id != head.entry_count + 1 ||
+            delta.metadata.created_at_ms != head.created_at_ms || delta.metadata.workspace != head.workspace) {
+            return lighter::outcome_error(Error::storage("staged publication snapshot changed its authoritative prefix"));
+        }
+        std::unique_lock lock(state->mutex);
+        auto published = publish_staged(*state, delta);
+        if (!published) return lighter::outcome_error(std::move(published).error());
+        lock.unlock();
+        return project_publication(*state, *std::move(published));
+    }
+    auto prepared = prepare_delta(delta, head);
+    if (!prepared) return lighter::outcome_error(std::move(prepared).error());
+    std::unique_lock lock(state->mutex);
+    if (!state->published) {
+        if (auto staged_result = stage_prepared(*state, *prepared); !staged_result)
+            return lighter::outcome_error(std::move(staged_result).error());
+        auto published = publish_staged(*state, delta);
+        if (!published) return lighter::outcome_error(std::move(published).error());
+        lock.unlock();
+        return project_publication(*state, *std::move(published));
+    }
+    if (head.revision != state->head.revision) return lighter::outcome_error(Error::storage("session writer received concurrent commits"));
+    const auto target_revision = state->head.revision + 1;
+    const bool catalog_visible = delta.metadata.updated_at_ms != state->head.updated_at_ms || delta.metadata.title != state->head.title ||
+                                 delta.metadata.preview != state->head.preview;
+    const StatePaths paths{state->repository->root};
+    std::optional<std::string> degradation;
+    std::error_code marker_error;
+    const bool projection_pending = std::filesystem::exists(paths.pending_marker(state->id), marker_error);
+    if (marker_error && !degradation) degradation = "cannot inspect pending catalog marker: " + marker_error.message();
+    if (catalog_visible || projection_pending) {
+        if (auto marker = write_marker(paths, state->id, target_revision); !marker) degradation = marker.error().message();
+    }
+    if (auto begun = execute(state->database, "BEGIN IMMEDIATE"); !begun) return lighter::outcome_error(std::move(begun).error());
+    auto revision = prepare(state->database, "SELECT revision FROM session WHERE singleton=1");
+    if (!revision || sqlite3_step(revision->value) != SQLITE_ROW ||
+        static_cast<u64>(sqlite3_column_int64(revision->value, 0)) != state->head.revision) {
+        static_cast<void>(execute(state->database, "ROLLBACK"));
+        return lighter::outcome_error(Error::storage("session revision conflict"));
+    }
+    if (auto entries = insert_entries(state->database, prepared->entries); !entries) {
+        static_cast<void>(execute(state->database, "ROLLBACK"));
+        return lighter::outcome_error(std::move(entries).error());
+    }
+    auto update = prepare(state->database, R"sql(
+UPDATE session SET updated_at_ms=?2,working_directory=?3,title=?4,preview=?5,active_leaf_entry_id=?6,next_entry_id=?7,
+ next_task_id=?8,next_provider_call_id=?9,entry_count=?10,tokens_used=?11,last_provider=?12,last_model=?13,
+ last_reasoning_effort=?14,revision=?15,forked_from_session_id=?16,forked_from_entry_id=?17
+WHERE singleton=1 AND revision=?1
+)sql");
+    if (!update) {
+        static_cast<void>(execute(state->database, "ROLLBACK"));
+        return lighter::outcome_error(std::move(update).error());
+    }
+    sqlite3_bind_int64(update->value, 1, static_cast<sqlite3_int64>(state->head.revision));
+    sqlite3_bind_int64(update->value, 2, delta.metadata.updated_at_ms);
+    sqlite3_bind_text(update->value, 3, delta.metadata.working_directory.data(), static_cast<int>(delta.metadata.working_directory.size()),
+                      SQLITE_TRANSIENT);
+    bind_optional_text(update->value, 4, delta.metadata.title);
+    sqlite3_bind_text(update->value, 5, delta.metadata.preview.data(), static_cast<int>(delta.metadata.preview.size()), SQLITE_TRANSIENT);
+    bind_optional_entry(update->value, 6, delta.active_leaf);
+    sqlite3_bind_int64(update->value, 7, static_cast<sqlite3_int64>(delta.next_entry_id));
+    sqlite3_bind_int64(update->value, 8, static_cast<sqlite3_int64>(delta.next_task_id));
+    sqlite3_bind_int64(update->value, 9, static_cast<sqlite3_int64>(delta.next_provider_call_id));
+    sqlite3_bind_int64(update->value, 10, static_cast<sqlite3_int64>(delta.entry_count));
+    sqlite3_bind_int64(update->value, 11, static_cast<sqlite3_int64>(delta.tokens_used));
+    bind_optional_text(update->value, 12,
+                       delta.metadata.model_preference ? std::optional{delta.metadata.model_preference->provider} : std::nullopt);
+    bind_optional_text(update->value, 13,
+                       delta.metadata.model_preference ? std::optional{delta.metadata.model_preference->model} : std::nullopt);
+    bind_optional_text(update->value, 14,
+                       delta.metadata.model_preference ? delta.metadata.model_preference->reasoning_effort : std::nullopt);
+    sqlite3_bind_int64(update->value, 15, static_cast<sqlite3_int64>(target_revision));
+    bind_optional_session(update->value, 16,
+                          delta.metadata.forked_from ? std::optional{delta.metadata.forked_from->session} : std::nullopt);
+    bind_optional_entry(update->value, 17, delta.metadata.forked_from ? std::optional{delta.metadata.forked_from->entry} : std::nullopt);
+    const auto updated = sqlite3_step(update->value);
+    if (updated != SQLITE_DONE || sqlite3_changes(state->database) != 1) {
+        static_cast<void>(execute(state->database, "ROLLBACK"));
+        return lighter::outcome_error(sqlite_error(state->database, "cannot update session singleton", updated));
+    }
+    if (auto committed = execute(state->database, "COMMIT"); !committed) {
+        static_cast<void>(execute(state->database, "ROLLBACK"));
+        return lighter::outcome_error(std::move(committed).error());
+    }
+    state->head = head_from_delta(delta, target_revision);
+    lock.unlock();
+    if (catalog_visible || projection_pending) {
+        auto projection = read_projection(state->database, state->id);
+        if (!projection)
+            degradation = projection.error().message();
+        else if (auto projected = state->repository->catalog.upsert(*projection); !projected)
+            degradation = projected.error().message();
+        else if (auto removed = remove_marker_if_satisfied(paths, state->id, projection->observed_revision); !removed)
+            degradation = removed.error().message();
+    }
+    return SessionCommitResult{.catalog_degradation = std::move(degradation)};
+}
+
 SessionDelta make_delta(const Session &session, std::span<const SessionEntry> entries) {
-    return {
-        .entries = {entries.begin(), entries.end()},
-        .active_leaf = session.active_leaf,
-        .next_entry_id = session.next_entry_id,
-        .next_task_id = session.next_task_id,
-        .next_provider_call_id = session.next_provider_call_id,
-        .entry_count = session.entries.size(),
-        .tokens_used = session.tokens_used(),
-        .metadata = session.metadata,
-    };
+    return {.entries = {entries.begin(), entries.end()},
+            .active_leaf = session.active_leaf,
+            .next_entry_id = session.next_entry_id,
+            .next_task_id = session.next_task_id,
+            .next_provider_call_id = session.next_provider_call_id,
+            .entry_count = session.entries.size(),
+            .tokens_used = session.tokens_used(),
+            .metadata = session.metadata};
+}
+
+Result<SessionRepository> SessionRepository::open(std::filesystem::path state_root, SessionCatalog catalog) {
+    const StatePaths paths{state_root};
+    if (auto created = create_state_directory(paths.root); !created) return lighter::outcome_error(std::move(created).error());
+    for (const auto &directory : {paths.sessions(), paths.staging(), paths.catalog_pending(), paths.locks()}) {
+        if (auto created = create_state_directory(directory); !created) return lighter::outcome_error(std::move(created).error());
+    }
+    auto repository_state = std::make_shared<State>(std::move(state_root), std::move(catalog));
+    SessionRepository repository(std::move(repository_state));
+    if (repository.state->catalog.was_created()) {
+        auto rebuilt = repository.rebuild_catalog();
+        if (!rebuilt) return lighter::outcome_error(std::move(rebuilt).error());
+        repository.state->warnings.insert(repository.state->warnings.end(), std::make_move_iterator(rebuilt->warnings.begin()),
+                                          std::make_move_iterator(rebuilt->warnings.end()));
+    }
+    auto reconciled = repository.reconcile_pending();
+    if (!reconciled) return lighter::outcome_error(std::move(reconciled).error());
+    repository.state->warnings.insert(repository.state->warnings.end(), std::make_move_iterator(reconciled->warnings.begin()),
+                                      std::make_move_iterator(reconciled->warnings.end()));
+    return repository;
+}
+
+const std::filesystem::path &SessionRepository::root() const noexcept { return state->root; }
+const std::vector<std::string> &SessionRepository::warnings() const noexcept { return state->warnings; }
+
+Result<SessionWriter> SessionRepository::create(SessionId id) const {
+    const StatePaths paths{state->root};
+    std::error_code error;
+    if (std::filesystem::exists(paths.session_directory(id), error))
+        return lighter::outcome_error(Error::storage("session identity is already published"));
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect target session path: " + error.message()));
+    auto lease = acquire_session_lease(state->root, id);
+    if (!lease) return lighter::outcome_error(std::move(lease).error());
+    return SessionWriter(std::make_shared<SessionWriter::State>(state, *std::move(lease), id));
+}
+
+Result<SessionWriter> SessionRepository::stage(SessionId id, const SessionDelta &initial) const {
+    auto writer = create(id);
+    if (!writer) return lighter::outcome_error(std::move(writer).error());
+    if (auto staged = writer->stage_initial(initial); !staged) return lighter::outcome_error(std::move(staged).error());
+    return *std::move(writer);
+}
+
+Result<SessionWriter> SessionRepository::acquire(SessionId id) const {
+    const StatePaths paths{state->root};
+    auto lease = acquire_session_lease(state->root, id);
+    if (!lease) return lighter::outcome_error(std::move(lease).error());
+    std::error_code error;
+    if (!std::filesystem::is_directory(paths.session_directory(id), error)) {
+        if (error) return lighter::outcome_error(Error::storage("cannot inspect session directory: " + error.message()));
+        return lighter::outcome_error(Error::storage("session was not found"));
+    }
+    auto reparse = detail::is_reparse_point(paths.session_directory(id));
+    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+    if (*reparse) return lighter::outcome_error(Error::storage("session directory is a symlink, junction, or reparse point"));
+    if (!std::filesystem::is_regular_file(paths.session_database(id), error)) {
+        if (error) return lighter::outcome_error(Error::storage("cannot inspect session database: " + error.message()));
+        return lighter::outcome_error(Error::storage("published session database is absent"));
+    }
+    reparse = detail::is_reparse_point(paths.session_database(id));
+    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+    if (*reparse) return lighter::outcome_error(Error::storage("session database is a symlink, junction, or reparse point"));
+    auto writer_state = std::make_shared<SessionWriter::State>(state, *std::move(lease), id);
+    auto opened = open_database(paths.session_database(id), false, true);
+    if (!opened) return lighter::outcome_error(std::move(opened).error());
+    writer_state->database = *opened;
+    writer_state->published = true;
+    return SessionWriter(std::move(writer_state));
+}
+
+Result<SessionId> SessionRepository::resolve_exact(std::string_view value) const {
+    if (value.size() != 36) return lighter::outcome_error(Error::config("a full session ID must contain 36 characters"));
+    auto id = parse_session_id(value);
+    if (!id) return lighter::outcome_error(std::move(id).error());
+    const StatePaths paths{state->root};
+    std::error_code error;
+    if (std::filesystem::exists(paths.session_database(*id), error)) {
+        auto reparse = detail::is_reparse_point(paths.session_database(*id));
+        if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+        if (*reparse) return lighter::outcome_error(Error::storage("session database is a symlink, junction, or reparse point"));
+    }
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect exact session path: " + error.message()));
+    if (!std::filesystem::is_regular_file(paths.session_database(*id), error)) {
+        if (error) return lighter::outcome_error(Error::storage("cannot inspect exact session path: " + error.message()));
+        return lighter::outcome_error(Error::storage("session was not found"));
+    }
+    return *id;
+}
+
+Result<CatalogReconciliation> SessionRepository::reconcile_pending() const {
+    const StatePaths paths{state->root};
+    CatalogReconciliation result;
+    std::error_code iteration_error;
+    for (std::filesystem::directory_iterator iterator(paths.catalog_pending(), iteration_error), end; !iteration_error && iterator != end;
+         iterator.increment(iteration_error)) {
+        auto id = canonical_path_id(iterator->path());
+        if (!id) {
+            result.warnings.push_back(id.error().message());
+            continue;
+        }
+        auto reparse = detail::is_reparse_point(iterator->path());
+        if (!reparse || *reparse) {
+            result.warnings.push_back("catalog marker is unreadable or a reparse point: " + iterator->path().filename().string());
+            continue;
+        }
+        auto target = read_marker(iterator->path());
+        if (!target) {
+            result.warnings.push_back("catalog marker " + to_string(*id) + ": " + target.error().message());
+            continue;
+        }
+        auto writer = acquire(*id);
+        if (!writer) {
+            if (writer.error().detail.contains("in use by another")) {
+                ++result.busy;
+                continue;
+            }
+            std::error_code absent_error;
+            const auto absent = !std::filesystem::exists(paths.session_database(*id), absent_error);
+            if (absent && !absent_error && !has_related_staging(paths, *id)) {
+                if (auto removed_row = state->catalog.remove(*id); !removed_row) {
+                    result.warnings.push_back(removed_row.error().message());
+                    continue;
+                }
+                if (auto removed = detail::durable_remove_file(iterator->path()); !removed)
+                    result.warnings.push_back(removed.error().message());
+                else
+                    ++result.repaired;
+                continue;
+            }
+            result.warnings.push_back("cannot reconcile session " + to_string(*id) + ": " + writer.error().message());
+            continue;
+        }
+        auto projection = writer->projection();
+        if (!projection) {
+            result.warnings.push_back("cannot read authoritative singleton for " + to_string(*id) + ": " + projection.error().message());
+            continue;
+        }
+        if (auto projected = state->catalog.upsert(*projection); !projected) {
+            result.warnings.push_back("cannot refresh catalog for " + to_string(*id) + ": " + projected.error().message());
+            continue;
+        }
+        auto current = read_marker(iterator->path());
+        if (!current) {
+            result.warnings.push_back(current.error().message());
+            continue;
+        }
+        if (*current == *target) {
+            if (auto removed = detail::durable_remove_file(iterator->path()); !removed)
+                result.warnings.push_back(removed.error().message());
+            else
+                ++result.repaired;
+        }
+    }
+    if (iteration_error)
+        return lighter::outcome_error(Error::storage("cannot enumerate catalog-pending directory: " + iteration_error.message()));
+    return result;
+}
+
+Result<CatalogReconciliation> SessionRepository::rebuild_catalog() const {
+    const StatePaths paths{state->root};
+    CatalogReconciliation result;
+    std::vector<SessionId> authoritative;
+    std::error_code iteration_error;
+    for (std::filesystem::directory_iterator iterator(paths.sessions(), iteration_error), end; !iteration_error && iterator != end;
+         iterator.increment(iteration_error)) {
+        auto id = canonical_path_id(iterator->path());
+        if (!id) {
+            result.warnings.push_back("invalid published session directory: " + iterator->path().filename().string());
+            continue;
+        }
+        auto writer = acquire(*id);
+        if (!writer) {
+            if (writer.error().detail.contains("in use by another"))
+                ++result.busy;
+            else
+                result.warnings.push_back("cannot inspect published session " + to_string(*id) + ": " + writer.error().message());
+            continue;
+        }
+        auto projection = writer->projection();
+        if (!projection) {
+            result.warnings.push_back("cannot read published session singleton " + to_string(*id) + ": " + projection.error().message());
+            continue;
+        }
+        if (auto projected = state->catalog.upsert(*projection); !projected) return lighter::outcome_error(std::move(projected).error());
+        authoritative.push_back(*id);
+        ++result.repaired;
+    }
+    if (iteration_error) return lighter::outcome_error(Error::storage("cannot enumerate published sessions: " + iteration_error.message()));
+    auto catalog_ids = state->catalog.ids();
+    if (!catalog_ids) return lighter::outcome_error(std::move(catalog_ids).error());
+    for (const auto id : *catalog_ids) {
+        if (std::ranges::find(authoritative, id) != authoritative.end()) continue;
+        auto lease = acquire_session_lease(state->root, id);
+        if (!lease) continue;
+        std::error_code error;
+        if (!std::filesystem::exists(paths.session_database(id), error) && !error) {
+            if (auto removed = state->catalog.remove(id); !removed) result.warnings.push_back(removed.error().message());
+        }
+    }
+    return result;
 }
 
 } // namespace liminal::session

@@ -12,11 +12,15 @@ Provider-private items retain their provenance. A compatible adapter may replay 
 
 ## Durability and ownership
 
-One local SQLite database is the canonical catalog and payload store. Catalog metadata and semantic entries commit together; there is no parallel JSONL authority or foreground scan-and-repair path.
+Each published session owns one authoritative SQLite database under its deterministic, validated session-ID path. Its singleton row and append-only entry tree commit together. Separate sessions use separate connections, mutexes, and SQLite writer locks, so normal history writes never serialize through a process-global store.
 
-The live session changes immediately, while persistence follows through an ordered queue. Storage failure must not block model calls or tools after their effects may already have occurred. The UI exposes an unsaved tail, and a later successful retry persists the complete ordered prefix.
+A small global SQLite catalog is a disposable discovery projection. It contains only session ID, observed authoritative revision, workspace key, conversation recency, title, and bounded initial-prompt preview. Exact full-ID acquisition derives the session path directly and does not depend on this catalog.
 
-Only one process may actively own a session. The active writer retains an operating-system lease and its durable revision, and persistence work remains bound to that session identity. Public interfaces stay platform-neutral even though lease implementations differ between Windows and POSIX systems.
+The live session changes immediately, while semantic persistence follows through an ordered per-session queue. Storage failure must not block model calls or tools after their effects may already have occurred. The UI exposes an unsaved tail, and a later successful retry persists the complete ordered prefix. Catalog refresh failure is reported separately and cannot turn a successful authoritative commit into semantic persistence failure.
+
+Only one process may actively own a session. The active writer retains an operating-system lease and its durable revision, and persistence work remains bound to that session identity. Public interfaces stay platform-neutral even though lease, durable marker, and publication implementations differ between Windows and POSIX systems.
+
+Payload validation and encoding occur before a SQLite write transaction. A session commit compares and advances the singleton revision atomically with its already-encoded entry append and metadata update.
 
 ## Recovery
 
@@ -36,13 +40,13 @@ Conversation navigation exposes a distinct semantic checkpoint identity rather t
 
 Checkout is a session-domain cursor mutation. It validates the requested checkpoint, preserves every descendant, persists the selected append point, and then hydrates transcript and provider context from that ancestry. Appending after checkout creates a branch naturally. Conversation navigation never represents filesystem, process, network, or other external tool effects as reverted.
 
-A fork is a new durable session containing the exact semantic prefix through a selected safe checkpoint. It records the source session and source checkpoint, receives fresh session identity and timestamps, starts unnamed and unarchived, and remaps entry, task, and provider-call identifiers into fork-local sequences. Provider output items, tool identifiers, compaction items, and provider-private payloads retain their semantic content and provenance.
+A fork is a new durable session containing the exact semantic prefix through a selected safe checkpoint. It records the source session and source checkpoint, receives fresh session identity, starts unnamed, and remaps entry, task, and provider-call identifiers into fork-local sequences. Provider output items, tool identifiers, compaction items, and provider-private payloads retain their semantic content and provenance. Its conversation recency is the publication time.
 
-Fork preparation is not publication. A disposable fork plan owns the new identity's exclusive lease, unpublished persistence queue, projected transcript, and resolved model without creating a catalog row. The queue serializes its one-shot initial publication ahead of any later mutations and cannot become active after publication failure. Cancellation or preparation failure releases the plan without leaving a durable fork. After the source saves successfully or the user explicitly accepts its remaining unsaved state, publication commits the complete fork prefix atomically; only then may the fork replace the live session. If the source save is explicitly abandoned, the origin remains exact semantic provenance and may identify a checkpoint that never became durable in the source session.
+Fork preparation is not publication. A disposable fork plan owns the new identity's exclusive lease, rollback-journal staging database, unpublished persistence queue, projected transcript, and resolved model without creating a catalog row. Cancellation removes the staging directory. After the source saves successfully or the user explicitly accepts its remaining unsaved state, publication closes the staged database, creates its catalog-pending marker, atomically moves the directory without replacement, reopens the published database in verified WAL mode, and then attempts catalog projection. Only then may the fork replace the live session. If the source save is explicitly abandoned, the origin remains exact semantic provenance and may identify a checkpoint that never became durable in the source session.
 
 ## Discovery
 
-Session discovery reads bounded, indexed catalog metadata without decoding entry payloads. Workspace association is discovery metadata, not an execution sandbox: the current invocation still controls the working directory and instruction discovery.
+Session discovery reads bounded, indexed catalog metadata without decoding entry payloads. Workspace association is immutable session metadata used for discovery, not an execution sandbox: the current invocation still controls the working directory and instruction discovery.
 
 Workspace catalogs are ordered newest first and traversed with stable keyset cursors rather than offsets. A catalog summary contains only bounded identification metadata; the full session ID remains its durable identity. An empty page is a successful discovery result, while failure to resolve an explicitly requested session is an error.
 
@@ -50,11 +54,19 @@ Catalog navigation uses a reusable focused selection surface. Commands supply do
 
 Conversation navigation uses the same focused selection surface and is available only while the agent is idle. Cancellation, projection failure, persistence failure, fork preparation failure, and model-resolution failure must leave the live agent and displayed transcript on the same session and branch.
 
-Target preparation has two ordered stages. Durable acquisition takes the exclusive lease, loads and recovers the session, attaches persistence, and projects the transcript without depending on provider discovery. Model resolution then consults the current catalog and policy, so startup claims a requested session before discovery and interactive switching cannot retain a stale fallback.
+Target preparation has two ordered stages. Durable acquisition takes the exclusive lease, validates the deterministic database identity and immutable workspace association, loads and recovers the session, attaches persistence, and projects the transcript without depending on provider discovery. Model resolution then consults the current model catalog and policy, so startup claims a requested session before discovery and interactive switching cannot retain a stale fallback. A selected discovery row remains a hint until these checks complete.
 
 Interactive switching must preserve the current live session until both preparation stages succeed. Abandoning an unsaved tail requires an explicit user decision and does not imply that tool effects are reverted. Fork confirmation is distinct from resume confirmation because the selected prefix will be saved in the fork even when unsaved source-only history or metadata cannot be saved in the source.
 
-Naming and archive state are ordinary session mutations: they advance session metadata and follow the same ownership and persistence rules as semantic history. Archiving changes discovery visibility without deleting history, and mutating an inactive session first requires exclusive ownership.
+Naming is an authoritative session mutation and follows the same ownership and persistence rules as semantic history. It does not advance conversation recency. After its session commit, Liminal makes a bounded synchronous catalog-refresh attempt so selectors normally reflect the new title immediately.
+
+Every published session participates in ordinary workspace discovery. Conversation recency advances non-regressingly when a user task is admitted and becomes durable atomically with that task start. Output, tools, task completion, recovery bookkeeping, model changes, rename, checkout, compaction, catalog repair, and SQLite maintenance do not advance it.
+
+## Catalog recovery
+
+Before publication, rename, or durable user-task admission, Liminal durably replaces `catalog-pending/<session-id>` with the target authoritative revision. After the session commit, the projection reads the latest singleton row, performs a revision-guarded catalog upsert, and removes the marker only if it still names no later revision.
+
+Normal startup inspects only pending markers and tries each session lease without waiting. Busy sessions retain their markers. Missing-catalog rebuild and explicit repair may scan published session directories, but read only singleton rows and never decode history payloads. A corrupt catalog is not silently replaced while another process may hold it open.
 
 ## Evolution constraints
 

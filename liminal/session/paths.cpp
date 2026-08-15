@@ -28,17 +28,26 @@ std::string path_text(const std::filesystem::path &path) {
 
 } // namespace
 
-Result<std::filesystem::path> state_database_path() {
-    if (auto override = environment("LIMINAL_STATE_DB")) return std::filesystem::path(*override);
+std::filesystem::path StatePaths::catalog() const { return root / "catalog.sqlite3"; }
+std::filesystem::path StatePaths::sessions() const { return root / "sessions"; }
+std::filesystem::path StatePaths::staging() const { return root / "staging"; }
+std::filesystem::path StatePaths::catalog_pending() const { return root / "catalog-pending"; }
+std::filesystem::path StatePaths::locks() const { return root / "locks"; }
+std::filesystem::path StatePaths::session_directory(SessionId id) const { return sessions() / to_string(id); }
+std::filesystem::path StatePaths::session_database(SessionId id) const { return session_directory(id) / "session.sqlite3"; }
+std::filesystem::path StatePaths::pending_marker(SessionId id) const { return catalog_pending() / to_string(id); }
+
+Result<std::filesystem::path> state_root_path() {
+    if (auto override = environment("LIMINAL_STATE_DIR")) return std::filesystem::path(*override);
 #ifdef _WIN32
     auto local = environment("LOCALAPPDATA");
     if (!local) return lighter::outcome_error(Error::storage("LOCALAPPDATA is not set"));
-    return std::filesystem::path(*local) / "Liminal" / "state.sqlite3";
+    return std::filesystem::path(*local) / "Liminal";
 #else
-    if (auto state = environment("XDG_STATE_HOME")) return std::filesystem::path(*state) / "liminal" / "state.sqlite3";
+    if (auto state = environment("XDG_STATE_HOME")) return std::filesystem::path(*state) / "liminal";
     auto home = environment("HOME");
     if (!home) return lighter::outcome_error(Error::storage("neither XDG_STATE_HOME nor HOME is set"));
-    return std::filesystem::path(*home) / ".local" / "state" / "liminal" / "state.sqlite3";
+    return std::filesystem::path(*home) / ".local" / "state" / "liminal";
 #endif
 }
 

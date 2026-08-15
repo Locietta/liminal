@@ -526,6 +526,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
     };
 
     bool saving_notice_visible = false;
+    bool catalog_notice_visible = false;
     while (true) {
         if (const auto *queue = agent.session.persistence_queue()) {
             const auto persistence_status = queue->status();
@@ -536,6 +537,14 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                 saving_notice_visible = true;
             } else if (!persistence_status.degraded) {
                 saving_notice_visible = false;
+            }
+            if (persistence_status.catalog_degraded && !catalog_notice_visible) {
+                if (!rendered(renderer.notice("[session catalog refresh pending: " + persistence_status.catalog_detail + "]\n"),
+                              "cannot render catalog status"))
+                    co_return 1;
+                catalog_notice_visible = true;
+            } else if (!persistence_status.catalog_degraded) {
+                catalog_notice_visible = false;
             }
         }
         if (!rendered(renderer.prompt(agent.model.entry.id, agent.model.reasoning_effort, session_footer(agent)), "cannot render prompt"))
@@ -648,28 +657,6 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                         continue;
                     }
                     if (!rendered(name_current_session(agent, renderer, std::move(arguments->title)), "cannot render session name status"))
-                        co_return 1;
-                    continue;
-                }
-                case CommandKind::ARCHIVE:
-                case CommandKind::UNARCHIVE: {
-                    auto arguments = require_no_arguments(command_line.name, command_line.arguments);
-                    if (!arguments) {
-                        if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"),
-                                      "cannot render command error"))
-                            co_return 1;
-                        continue;
-                    }
-                    if (control.active_task) {
-                        if (!rendered(renderer.notice("[session catalogs are available only while the agent is idle]\n"),
-                                      "cannot render archive status"))
-                            co_return 1;
-                        continue;
-                    }
-                    if (!rendered(co_await change_archive_state(agent, sessions, renderer, dialog,
-                                                                *command == CommandKind::ARCHIVE ? ArchiveCommand::ARCHIVE :
-                                                                                                   ArchiveCommand::UNARCHIVE),
-                                  "cannot render archive status"))
                         co_return 1;
                     continue;
                 }

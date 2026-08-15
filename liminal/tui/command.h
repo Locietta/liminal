@@ -34,8 +34,6 @@ enum struct CommandKind {
     MODEL,
     RESUME,
     NAME,
-    ARCHIVE,
-    UNARCHIVE,
     HISTORY,
 };
 

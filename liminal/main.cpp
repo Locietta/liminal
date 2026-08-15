@@ -21,7 +21,8 @@
 #include <liminal/provider/registry.h>
 #include <liminal/session/paths.h>
 #include <liminal/session/persistence.h>
-#include <liminal/session/store.h>
+#include <liminal/session/catalog.h>
+#include <liminal/session/repository.h>
 #include <liminal/tools/tools.h>
 #include <liminal/tui/hydration.h>
 #include <liminal/tui/repl.h>
@@ -75,27 +76,30 @@ application::SessionPreparationServices preparation_services(model::Catalog &mod
 
 Result<AcquiredStartupSession> acquire_startup_session(const StartupOptions &options, const session::WorkspaceIdentity &workspace,
                                                        model::Catalog &models, ToolSet &tools) {
-    auto path = session::state_database_path();
+    auto path = session::state_root_path();
     if (!path) return lighter::outcome_error(std::move(path).error());
 
-    auto opened = session::Store::open(*path);
-    if (!opened) return lighter::outcome_error(std::move(opened).error());
-    auto store = *std::move(opened);
-    application::SessionCoordinator coordinator(store, preparation_services(models, tools, configured_model_selector()));
+    auto catalog = session::SessionCatalog::open(*path);
+    if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+    auto repository = session::SessionRepository::open(*path, *catalog);
+    if (!repository) return lighter::outcome_error(std::move(repository).error());
+    application::SessionCoordinator coordinator(*repository, *catalog, preparation_services(models, tools, configured_model_selector()));
 
     session::SessionId selected_id;
     if (options.kind == StartupKind::RESUME) {
-        auto resolved = store.resolve_id(options.session);
+        auto resolved =
+            options.session.size() == 36 ? repository->resolve_exact(options.session) : catalog->resolve_prefix(options.session);
         if (!resolved) return lighter::outcome_error(std::move(resolved).error());
         selected_id = *resolved;
     } else {
-        auto latest = store.latest(workspace.key);
+        auto latest = catalog->latest(workspace.key);
         if (!latest) return lighter::outcome_error(std::move(latest).error());
         selected_id = latest->id;
     }
 
     auto acquired = coordinator.acquire(selected_id);
     if (!acquired) return lighter::outcome_error(std::move(acquired).error());
+    for (const auto &warning : repository->warnings()) acquired->notices.push_back("[session catalog warning: " + warning + "]\n");
     return AcquiredStartupSession{.coordinator = std::move(coordinator), .acquired = *std::move(acquired)};
 }
 
@@ -127,7 +131,7 @@ Result<SessionSelection> create_session(const std::filesystem::path &working_dir
     selection.session.metadata.workspace = session::SessionWorkspace{.root = workspace.root, .key = workspace.key};
     selection.session.metadata.working_directory = working_directory.generic_string();
 
-    auto path = session::state_database_path();
+    auto path = session::state_root_path();
     if (!path) {
         auto attached =
             selection.session.attach_persistence(session::PersistenceQueue::create_resolving(selection.session.id, path.error().message()));
@@ -136,17 +140,25 @@ Result<SessionSelection> create_session(const std::filesystem::path &working_dir
         return selection;
     }
 
-    auto opened = session::Store::open(*path);
-    if (!opened) {
-        auto queue = session::PersistenceQueue::create_reopening(*path, selection.session.id, opened.error().message());
+    auto catalog = session::SessionCatalog::open(*path);
+    if (!catalog) {
+        auto queue = session::PersistenceQueue::create_reopening(*path, selection.session.id, catalog.error().message());
         auto attached = selection.session.attach_persistence(std::move(queue));
         if (!attached) return lighter::outcome_error(std::move(attached).error());
-        selection.notices.push_back("[session not saving: " + opened.error().message() + "]\n");
+        selection.notices.push_back("[session not saving: " + catalog.error().message() + "]\n");
         return selection;
     }
-    auto store = *std::move(opened);
-    selection.coordinator.emplace(store, preparation_services(models, tools, configured_model_selector()));
-    auto writer = store.lease(selection.session.id);
+    auto repository = session::SessionRepository::open(*path, *catalog);
+    if (!repository) {
+        auto queue = session::PersistenceQueue::create_reopening(*path, selection.session.id, repository.error().message());
+        auto attached = selection.session.attach_persistence(std::move(queue));
+        if (!attached) return lighter::outcome_error(std::move(attached).error());
+        selection.notices.push_back("[session not saving: " + repository.error().message() + "]\n");
+        return selection;
+    }
+    for (const auto &warning : repository->warnings()) selection.notices.push_back("[session catalog warning: " + warning + "]\n");
+    selection.coordinator.emplace(*repository, *catalog, preparation_services(models, tools, configured_model_selector()));
+    auto writer = repository->create(selection.session.id);
     if (!writer) {
         auto queue = session::PersistenceQueue::create_reopening(*path, selection.session.id, writer.error().message());
         auto attached = selection.session.attach_persistence(std::move(queue));

@@ -6,6 +6,7 @@
 #include <glaze/json.hpp>
 
 #include <lighter/async/vocab/outcome.h>
+#include <lighter/encoding/utf8.h>
 
 template <>
 struct glz::meta<liminal::provider::MessagePhase> {
@@ -86,6 +87,9 @@ Result<EncodedPayload> encode_payload(const EntryPayload &payload) {
             using T = std::remove_cvref_t<decltype(value)>;
             EncodedPayload encoded;
             if constexpr (std::same_as<T, TaskStarted>) {
+                if (!lighter::encoding::utf8::is_valid(value.text)) {
+                    return lighter::outcome_error(Error::protocol("cannot encode session payload: task text is not valid UTF-8"));
+                }
                 encoded.kind = EntryKind::TASK_STARTED;
                 encoded.task_id = value.id;
             } else if constexpr (std::same_as<T, OutputItemCompleted>) {

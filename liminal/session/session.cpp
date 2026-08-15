@@ -74,13 +74,13 @@ EntryId Session::append(EntryPayload payload) {
         .created_at_ms = created_at,
     });
     active_leaf = entry_id;
-    metadata.updated_at_ms = created_at;
     if (persistence) persistence->enqueue(make_delta(*this, std::span(&entries.back(), 1)));
     return entry_id;
 }
 
-TaskId Session::start_task(std::string text) {
+TaskId Session::start_task(std::string text, std::optional<i64> admission_time_ms) {
     const TaskId task_id{.value = next_task_id++};
+    metadata.updated_at_ms = std::max(metadata.updated_at_ms, admission_time_ms.value_or(unix_milliseconds_now()));
     if (metadata.preview.empty()) {
         constexpr usize k_preview_limit = 240;
         metadata.preview = bounded_utf8(text, k_preview_limit);
@@ -98,7 +98,6 @@ Result<void> Session::checkout(ConversationCheckpointId checkpoint) {
         return lighter::outcome_error(Error::protocol("requested conversation checkpoint is missing or unsafe"));
     }
     active_leaf = checkpoint.entry;
-    metadata.updated_at_ms = mutation_timestamp(metadata);
     if (persistence) persistence->enqueue(make_delta(*this, {}));
     return {};
 }
@@ -109,7 +108,6 @@ void Session::set_model_preference(std::string provider, std::string model, std:
         .model = std::move(model),
         .reasoning_effort = std::move(reasoning_effort),
     };
-    metadata.updated_at_ms = mutation_timestamp(metadata);
     if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
 }
 
@@ -117,20 +115,6 @@ void Session::set_title(std::optional<std::string> title) {
     if (title && title->empty()) title.reset();
     contract_assert(!title || (title->size() <= 200 && lighter::encoding::utf8::is_valid(*title)));
     metadata.title = std::move(title);
-    metadata.updated_at_ms = mutation_timestamp(metadata);
-    if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
-}
-
-void Session::archive() {
-    const auto timestamp = mutation_timestamp(metadata);
-    metadata.archived_at_ms = timestamp;
-    metadata.updated_at_ms = timestamp;
-    if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
-}
-
-void Session::unarchive() {
-    metadata.archived_at_ms.reset();
-    metadata.updated_at_ms = mutation_timestamp(metadata);
     if (persistence && !entries.empty()) persistence->enqueue(make_delta(*this, {}));
 }
 
