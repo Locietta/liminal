@@ -24,6 +24,7 @@ struct PersistenceStatus {
 struct PersistenceQueue {
     using Commit = std::copyable_function<Result<SessionCommitResult>(const SessionDelta &) const>;
     using TestCommit = std::copyable_function<Result<void>(const SessionDelta &) const>;
+    using CatalogStatus = std::copyable_function<CatalogRefreshStatus() const>;
 
     static std::shared_ptr<PersistenceQueue> create(SessionWriter writer);
     static std::shared_ptr<PersistenceQueue> create_unpublished(SessionWriter writer);
@@ -54,7 +55,7 @@ private:
         FAILED,
     };
 
-    PersistenceQueue(SessionId id, Commit commit, PublicationState publication_state);
+    PersistenceQueue(SessionId id, Commit commit, PublicationState publication_state, CatalogStatus catalog_status = {});
     void enqueue(SessionDelta delta);
     void mark_degraded(std::string detail);
     void run(std::stop_token stop);
@@ -62,6 +63,7 @@ private:
 
     const SessionId id;
     Commit commit;
+    CatalogStatus read_catalog_status;
     mutable std::mutex mutex;
     std::condition_variable_any changed;
     std::deque<SessionDelta> pending;

@@ -22,6 +22,7 @@ namespace {
 
 constexpr int k_catalog_application_id = 0x4c494d43;
 constexpr int k_catalog_schema_version = 1;
+std::mutex catalog_open_mutex;
 
 std::string path_utf8(const std::filesystem::path &path) {
     const auto value = path.generic_u8string();
@@ -89,30 +90,36 @@ std::optional<std::string> optional_text(sqlite3_stmt *statement, int column) {
 
 std::string text(sqlite3_stmt *statement, int column) { return optional_text(statement, column).value_or(""); }
 
-Result<void> initialize(sqlite3 *database) {
+Result<bool> initialize(sqlite3 *database) {
+    if (auto begun = execute(database, "BEGIN IMMEDIATE"); !begun) return lighter::outcome_error(std::move(begun).error());
+    const auto fail = [database](Error error) -> Result<bool> {
+        static_cast<void>(execute(database, "ROLLBACK"));
+        return lighter::outcome_error(std::move(error));
+    };
     auto application = prepare(database, "PRAGMA application_id");
-    if (!application) return lighter::outcome_error(std::move(application).error());
-    if (sqlite3_step(application->value) != SQLITE_ROW)
-        return lighter::outcome_error(sqlite_error(database, "cannot read catalog identity"));
+    if (!application) return fail(std::move(application).error());
+    if (sqlite3_step(application->value) != SQLITE_ROW) return fail(sqlite_error(database, "cannot read catalog identity"));
     const auto application_id = sqlite3_column_int(application->value, 0);
     sqlite3_finalize(application->value);
     application->value = nullptr;
     auto version = prepare(database, "PRAGMA user_version");
-    if (!version) return lighter::outcome_error(std::move(version).error());
-    if (sqlite3_step(version->value) != SQLITE_ROW) return lighter::outcome_error(sqlite_error(database, "cannot read catalog version"));
+    if (!version) return fail(std::move(version).error());
+    if (sqlite3_step(version->value) != SQLITE_ROW) return fail(sqlite_error(database, "cannot read catalog version"));
     const auto schema_version = sqlite3_column_int(version->value, 0);
-    if (application_id == k_catalog_application_id && schema_version == k_catalog_schema_version) return {};
+    if (application_id == k_catalog_application_id && schema_version == k_catalog_schema_version) {
+        if (auto committed = execute(database, "COMMIT"); !committed) return lighter::outcome_error(std::move(committed).error());
+        return false;
+    }
     if (application_id != 0 || schema_version != 0) {
-        return lighter::outcome_error(Error::storage("session catalog has a foreign or unsupported schema"));
+        return fail(Error::storage("session catalog has a foreign or unsupported schema"));
     }
     auto objects = prepare(database, "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'");
-    if (!objects) return lighter::outcome_error(std::move(objects).error());
-    if (sqlite3_step(objects->value) != SQLITE_ROW) return lighter::outcome_error(sqlite_error(database, "cannot inspect catalog schema"));
+    if (!objects) return fail(std::move(objects).error());
+    if (sqlite3_step(objects->value) != SQLITE_ROW) return fail(sqlite_error(database, "cannot inspect catalog schema"));
     if (sqlite3_column_int64(objects->value, 0) != 0) {
-        return lighter::outcome_error(Error::storage("unidentified non-empty SQLite database cannot be used as the session catalog"));
+        return fail(Error::storage("unidentified non-empty SQLite database cannot be used as the session catalog"));
     }
-    return execute(database, R"sql(
-BEGIN IMMEDIATE;
+    auto created = execute(database, R"sql(
 CREATE TABLE sessions (
     id BLOB PRIMARY KEY CHECK(length(id) = 16),
     observed_revision INTEGER NOT NULL,
@@ -124,8 +131,10 @@ CREATE TABLE sessions (
 CREATE INDEX sessions_workspace_recent ON sessions(workspace_key, updated_at_ms DESC, id DESC);
 PRAGMA application_id = 1279872323;
 PRAGMA user_version = 1;
-COMMIT;
 )sql");
+    if (!created) return fail(std::move(created).error());
+    if (auto committed = execute(database, "COMMIT"); !committed) return lighter::outcome_error(std::move(committed).error());
+    return true;
 }
 
 u8 hexadecimal_nibble(char character) noexcept {
@@ -166,10 +175,12 @@ struct SessionCatalog::State {
     sqlite3 *database = nullptr;
     bool created = false;
     std::optional<detail::CatalogLease> maintenance_lease;
+    std::optional<detail::CatalogLease> initialization_lease;
     mutable std::mutex mutex;
 };
 
 Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_root) {
+    std::scoped_lock process_lock(catalog_open_mutex);
     std::error_code error;
     const auto created_root = std::filesystem::create_directories(state_root, error);
     if (error) return lighter::outcome_error(Error::storage("cannot create state root: " + error.message()));
@@ -190,14 +201,16 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
             return lighter::outcome_error(
                 Error::storage("state path is a symlink, junction, or reparse point: " + directory.generic_string()));
     }
+    auto initialization_lease = detail::acquire_catalog_initialization_lease(state_root);
+    if (!initialization_lease) return lighter::outcome_error(std::move(initialization_lease).error());
     auto maintenance_lease = detail::acquire_catalog_lease(state_root, false);
     if (!maintenance_lease) return lighter::outcome_error(std::move(maintenance_lease).error());
     auto state = std::make_shared<State>();
     state->maintenance_lease = *std::move(maintenance_lease);
     state->path = state_root / "catalog.sqlite3";
-    state->created = !std::filesystem::exists(state->path, error);
+    const auto catalog_exists = std::filesystem::exists(state->path, error);
     if (error) return lighter::outcome_error(Error::storage("cannot inspect session catalog: " + error.message()));
-    if (!state->created) {
+    if (catalog_exists) {
         auto reparse = detail::is_reparse_point(state->path);
         if (!reparse) return lighter::outcome_error(std::move(reparse).error());
         if (*reparse) return lighter::outcome_error(Error::storage("session catalog is a symlink, junction, or reparse point"));
@@ -209,10 +222,16 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
     if (sqlite3_libversion_number() < 3051003 || sqlite3_libversion_number() >= 4000000) {
         return lighter::outcome_error(Error::storage("SQLite 3.51.3 or newer (and older than 4.0) is required"));
     }
-    if (auto configured = execute(state->database, "PRAGMA synchronous=FULL; PRAGMA busy_timeout=250;"); !configured) {
+    if (sqlite3_busy_timeout(state->database, 1000) != SQLITE_OK) {
+        return lighter::outcome_error(sqlite_error(state->database, "cannot configure catalog busy timeout"));
+    }
+    if (auto configured = execute(state->database, "PRAGMA synchronous=FULL;"); !configured) {
         return lighter::outcome_error(std::move(configured).error());
     }
-    if (auto initialized = initialize(state->database); !initialized) return lighter::outcome_error(std::move(initialized).error());
+    auto initialized = initialize(state->database);
+    if (!initialized) return lighter::outcome_error(std::move(initialized).error());
+    state->created = *initialized;
+    if (state->created) state->initialization_lease = *std::move(initialization_lease);
     auto wal = prepare(state->database, "PRAGMA journal_mode=WAL");
     if (!wal) return lighter::outcome_error(std::move(wal).error());
     if (sqlite3_step(wal->value) != SQLITE_ROW || text(wal->value, 0) != "wal") {
@@ -258,6 +277,7 @@ Result<SessionCatalog> SessionCatalog::repair_corrupt(const std::filesystem::pat
 
 const std::filesystem::path &SessionCatalog::path() const noexcept { return state->path; }
 bool SessionCatalog::was_created() const noexcept { return state->created; }
+void SessionCatalog::finish_initialization() const { state->initialization_lease.reset(); }
 
 Result<SessionId> SessionCatalog::resolve_prefix(std::string_view value) const {
     std::string prefix;

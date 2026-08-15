@@ -9,12 +9,18 @@
 #include "repository_state.h"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <mutex>
 #include <random>
+#include <set>
 #include <system_error>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -396,6 +402,53 @@ Result<CatalogProjection> read_projection(sqlite3 *database, SessionId expected)
     };
 }
 
+Result<CatalogProjection> read_published_projection(const StatePaths &paths, SessionId id) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(paths.session_directory(id), error)) {
+        if (error) return lighter::outcome_error(Error::storage("cannot inspect session directory: " + error.message()));
+        return lighter::outcome_error(Error::storage("session was not found"));
+    }
+    if (!std::filesystem::is_regular_file(paths.session_database(id), error)) {
+        if (error) return lighter::outcome_error(Error::storage("cannot inspect session database: " + error.message()));
+        return lighter::outcome_error(Error::storage("published session database is absent"));
+    }
+    for (const auto &path : {paths.session_directory(id), paths.session_database(id)}) {
+        auto reparse = detail::is_reparse_point(path);
+        if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+        if (*reparse) return lighter::outcome_error(Error::storage("session authority is a symlink, junction, or reparse point"));
+    }
+    sqlite3 *database = nullptr;
+    const auto encoded = path_utf8(paths.session_database(id));
+    const auto code = sqlite3_open_v2(encoded.c_str(), &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nullptr);
+    if (code != SQLITE_OK) {
+        const auto error_result = sqlite_error(database, "cannot open session database projection", code);
+        if (database) sqlite3_close(database);
+        return lighter::outcome_error(error_result);
+    }
+    if (auto configured = execute(database, "PRAGMA query_only=ON; PRAGMA busy_timeout=250;"); !configured) {
+        sqlite3_close(database);
+        return lighter::outcome_error(std::move(configured).error());
+    }
+    if (auto valid = validate_session_schema(database, false); !valid) {
+        sqlite3_close(database);
+        return lighter::outcome_error(std::move(valid).error());
+    }
+    auto projection = read_projection(database, id);
+    sqlite3_close(database);
+    return projection;
+}
+
+Result<void> refresh_projection(const StatePaths &paths, const SessionCatalog &catalog, SessionId id) {
+    auto projection = read_published_projection(paths, id);
+    if (!projection) return lighter::outcome_error(std::move(projection).error());
+    if (auto projected = catalog.upsert(*projection); !projected) return projected;
+    std::error_code error;
+    const auto marker_exists = std::filesystem::exists(paths.pending_marker(id), error);
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect pending catalog marker: " + error.message()));
+    if (!marker_exists) return {};
+    return remove_marker_if_satisfied(paths, id, projection->observed_revision);
+}
+
 void bind_singleton(sqlite3_stmt *statement, const SessionDelta &delta, SessionId id, u64 revision) {
     const auto &metadata = delta.metadata;
     sqlite3_bind_int(statement, 1, 1);
@@ -490,15 +543,6 @@ Result<void> create_state_directory(const std::filesystem::path &path) {
     return {};
 }
 
-bool has_related_staging(const StatePaths &paths, SessionId id) {
-    std::error_code error;
-    const auto prefix = to_string(id) + ".";
-    for (std::filesystem::directory_iterator iterator(paths.staging(), error), end; !error && iterator != end; iterator.increment(error)) {
-        if (iterator->path().filename().string().starts_with(prefix)) return true;
-    }
-    return static_cast<bool>(error);
-}
-
 Result<SessionId> canonical_path_id(const std::filesystem::path &path) {
     const auto name = path.filename().string();
     auto id = parse_session_id(name);
@@ -506,11 +550,54 @@ Result<SessionId> canonical_path_id(const std::filesystem::path &path) {
     return *id;
 }
 
+Result<SessionId> staging_path_id(const std::filesystem::path &path) {
+    const auto name = path.filename().string();
+    const auto separator = name.find('.');
+    if (separator == std::string::npos || separator + 1 == name.size())
+        return lighter::outcome_error(Error::storage("staging entry name is invalid"));
+    auto id = parse_session_id(std::string_view(name).substr(0, separator));
+    if (!id || to_string(*id) != std::string_view(name).substr(0, separator) ||
+        !std::ranges::all_of(std::string_view(name).substr(separator + 1),
+                             [](char character) { return std::isxdigit(static_cast<unsigned char>(character)); })) {
+        return lighter::outcome_error(Error::storage("staging entry name is invalid"));
+    }
+    return *id;
+}
+
+Result<void> remove_staging_tree(const std::filesystem::path &path) {
+    auto reparse = detail::is_reparse_point(path);
+    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+    if (*reparse) return lighter::outcome_error(Error::storage("staging entry is a symlink, junction, or reparse point"));
+    std::error_code error;
+    if (!std::filesystem::is_directory(path, error)) {
+        if (error) return lighter::outcome_error(Error::storage("cannot inspect staging entry: " + error.message()));
+        return lighter::outcome_error(Error::storage("staging entry is not a directory"));
+    }
+    for (std::filesystem::recursive_directory_iterator iterator(path, error), end; !error && iterator != end; iterator.increment(error)) {
+        auto child_reparse = detail::is_reparse_point(iterator->path());
+        if (!child_reparse) return lighter::outcome_error(std::move(child_reparse).error());
+        if (*child_reparse) return lighter::outcome_error(Error::storage("staging tree contains a reparse point"));
+    }
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect staging tree: " + error.message()));
+    std::filesystem::remove_all(path, error);
+    if (error) return lighter::outcome_error(Error::storage("cannot remove abandoned staging directory: " + error.message()));
+    return {};
+}
+
 } // namespace
+
+struct CatalogInvalidationOwner {
+    explicit CatalogInvalidationOwner(SessionLease lease) : lease(std::move(lease)) {}
+
+    SessionLease lease;
+    std::mutex mutex;
+    mutable std::mutex status_mutex;
+    CatalogRefreshStatus status;
+};
 
 struct SessionWriter::State {
     State(std::shared_ptr<SessionRepository::State> repository, SessionLease lease, SessionId id)
-        : repository(std::move(repository)), lease(std::move(lease)), id(id) {}
+        : repository(std::move(repository)), invalidation(std::make_shared<CatalogInvalidationOwner>(std::move(lease))), id(id) {}
     ~State() {
         if (database) sqlite3_close(database);
         if (!published && !staging_directory.empty()) {
@@ -519,16 +606,26 @@ struct SessionWriter::State {
         }
     }
     std::shared_ptr<SessionRepository::State> repository;
-    SessionLease lease;
+    std::shared_ptr<CatalogInvalidationOwner> invalidation;
     SessionId id;
     sqlite3 *database = nullptr;
     std::filesystem::path staging_directory;
     DurableHead head;
+    std::vector<EncodedEntry> staged_entries;
     bool published = false;
     bool staged = false;
     std::mutex mutex;
-    std::mutex invalidation_mutex;
 };
+
+namespace {
+
+void set_catalog_status(CatalogInvalidationOwner &owner, std::optional<std::string> degradation) {
+    std::scoped_lock lock(owner.status_mutex);
+    owner.status.degraded = degradation.has_value();
+    owner.status.detail = degradation.value_or("");
+}
+
+} // namespace
 
 SessionWriter::~SessionWriter() = default;
 SessionWriter::SessionWriter(SessionWriter &&) noexcept = default;
@@ -586,7 +683,28 @@ VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?2
     insert->value = nullptr;
     if (sqlite3_close(database) != SQLITE_OK) return lighter::outcome_error(Error::storage("cannot close staged session database"));
     state.head = head_from_delta(prepared.delta, 1);
+    state.staged_entries = prepared.entries;
     state.staged = true;
+    return {};
+}
+
+bool same_entry(const EncodedEntry &left, const EncodedEntry &right) {
+    return left.id == right.id && left.parent_id == right.parent_id && left.created_at_ms == right.created_at_ms &&
+           left.payload.kind == right.payload.kind && left.payload.version == right.payload.version &&
+           left.payload.json == right.payload.json && left.payload.task_id == right.payload.task_id &&
+           left.payload.provider_call_id == right.payload.provider_call_id;
+}
+
+Result<void> validate_staged_final(const SessionWriter::State &state, const SessionDelta &delta) {
+    auto prepared = prepare_delta(delta, {});
+    if (!prepared) return lighter::outcome_error(std::move(prepared).error());
+    if (prepared->entries.size() != state.staged_entries.size() ||
+        !std::ranges::equal(prepared->entries, state.staged_entries, same_entry)) {
+        return lighter::outcome_error(Error::storage("staged publication snapshot changed its authoritative semantic prefix"));
+    }
+    if (delta.metadata.created_at_ms != state.head.created_at_ms || delta.metadata.workspace != state.head.workspace) {
+        return lighter::outcome_error(Error::storage("staged publication snapshot changed immutable session metadata"));
+    }
     return {};
 }
 
@@ -624,8 +742,7 @@ struct PublishedAuthority {
 };
 
 Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const SessionDelta &delta) {
-    if (delta.entry_count != state.head.entry_count)
-        return lighter::outcome_error(Error::storage("staged publication snapshot changed semantic entries"));
+    if (auto valid = validate_staged_final(state, delta); !valid) return lighter::outcome_error(std::move(valid).error());
     if (auto updated = update_staged_singleton(state, delta); !updated) return lighter::outcome_error(std::move(updated).error());
     const StatePaths paths{state.repository->root};
     std::optional<std::string> degradation;
@@ -637,6 +754,7 @@ Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const Ses
     state.staging_directory.clear();
     state.published = true;
     state.staged = false;
+    state.staged_entries.clear();
     auto opened = open_database(paths.session_database(state.id), false, true);
     if (!opened) return lighter::outcome_error(std::move(opened).error());
     state.database = *opened;
@@ -647,15 +765,84 @@ Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const Ses
 
 SessionCommitResult project_publication(SessionWriter::State &state, PublishedAuthority published) {
     const StatePaths paths{state.repository->root};
-    if (auto projected = state.repository->catalog.upsert(published.projection); !projected) {
+    if (auto projected = refresh_projection(paths, state.repository->catalog, state.id); !projected) {
         published.degradation = projected.error().message();
-    } else if (auto removed = remove_marker_if_satisfied(paths, state.id, published.projection.observed_revision); !removed) {
-        published.degradation = removed.error().message();
     }
+    set_catalog_status(*state.invalidation, published.degradation);
     return {.catalog_degradation = std::move(published.degradation)};
 }
 
 } // namespace
+
+struct CatalogIndexer {
+    struct Request {
+        SessionId id;
+        std::weak_ptr<CatalogInvalidationOwner> owner;
+        usize failures = 0;
+    };
+
+    CatalogIndexer(std::filesystem::path root, SessionCatalog catalog)
+        : paths{std::move(root)}, catalog(std::move(catalog)), worker([this](std::stop_token stop) { run(stop); }) {}
+
+    ~CatalogIndexer() {
+        worker.request_stop();
+        changed.notify_all();
+    }
+
+    void enqueue(SessionId id, const std::shared_ptr<CatalogInvalidationOwner> &owner) {
+        {
+            std::scoped_lock lock(mutex);
+            if (!queued.insert(id).second) return;
+            requests.push_back({.id = id, .owner = owner});
+        }
+        changed.notify_all();
+    }
+
+    Result<void> refresh_live(SessionId id, CatalogInvalidationOwner &owner) {
+        std::unique_lock lock(owner.mutex);
+        auto refreshed = refresh_projection(paths, catalog, id);
+        set_catalog_status(owner, refreshed ? std::nullopt : std::optional{refreshed.error().message()});
+        return refreshed;
+    }
+
+private:
+    Result<void> refresh(const Request &request) {
+        if (auto owner = request.owner.lock()) return refresh_live(request.id, *owner);
+        auto lease = acquire_session_lease(paths.root, request.id);
+        if (!lease) return lighter::outcome_error(std::move(lease).error());
+        return refresh_projection(paths, catalog, request.id);
+    }
+
+    void run(std::stop_token stop) {
+        using namespace std::chrono_literals;
+        while (!stop.stop_requested()) {
+            Request request;
+            {
+                std::unique_lock lock(mutex);
+                changed.wait(lock, stop, [this] { return !requests.empty(); });
+                if (stop.stop_requested()) return;
+                request = std::move(requests.front());
+                requests.pop_front();
+                queued.erase(request.id);
+            }
+            if (auto refreshed = refresh(request); refreshed) continue;
+            ++request.failures;
+            const auto delay = request.failures == 1 ? 100ms : request.failures == 2 ? 300ms : request.failures == 3 ? 1s : 5s;
+            std::unique_lock lock(mutex);
+            changed.wait_for(lock, stop, delay, [this] { return !requests.empty(); });
+            if (stop.stop_requested()) return;
+            if (queued.insert(request.id).second) requests.push_back(std::move(request));
+        }
+    }
+
+    StatePaths paths;
+    SessionCatalog catalog;
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    std::deque<Request> requests;
+    std::set<SessionId> queued;
+    std::jthread worker;
+};
 
 Result<Session> SessionWriter::load() {
     std::scoped_lock lock(state->mutex);
@@ -766,7 +953,7 @@ Result<CatalogProjection> SessionWriter::projection() const {
 }
 
 Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
-    std::unique_lock invalidation_lock(state->invalidation_mutex);
+    std::unique_lock invalidation_lock(state->invalidation->mutex);
     DurableHead head;
     bool staged = false;
     {
@@ -775,15 +962,13 @@ Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
         staged = state->staged;
     }
     if (staged) {
-        if (delta.entry_count != head.entry_count || delta.next_entry_id != head.entry_count + 1 ||
-            delta.metadata.created_at_ms != head.created_at_ms || delta.metadata.workspace != head.workspace) {
-            return lighter::outcome_error(Error::storage("staged publication snapshot changed its authoritative prefix"));
-        }
         std::unique_lock lock(state->mutex);
         auto published = publish_staged(*state, delta);
         if (!published) return lighter::outcome_error(std::move(published).error());
         lock.unlock();
-        return project_publication(*state, *std::move(published));
+        auto result = project_publication(*state, *std::move(published));
+        if (result.catalog_degradation) state->repository->indexer->enqueue(state->id, state->invalidation);
+        return result;
     }
     auto prepared = prepare_delta(delta, head);
     if (!prepared) return lighter::outcome_error(std::move(prepared).error());
@@ -794,10 +979,13 @@ Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
         auto published = publish_staged(*state, delta);
         if (!published) return lighter::outcome_error(std::move(published).error());
         lock.unlock();
-        return project_publication(*state, *std::move(published));
+        auto result = project_publication(*state, *std::move(published));
+        if (result.catalog_degradation) state->repository->indexer->enqueue(state->id, state->invalidation);
+        return result;
     }
     if (head.revision != state->head.revision) return lighter::outcome_error(Error::storage("session writer received concurrent commits"));
     const auto target_revision = state->head.revision + 1;
+    const bool title_changed = delta.metadata.title != state->head.title;
     const bool catalog_visible = delta.metadata.updated_at_ms != state->head.updated_at_ms || delta.metadata.title != state->head.title ||
                                  delta.metadata.preview != state->head.preview;
     const StatePaths paths{state->repository->root};
@@ -863,15 +1051,29 @@ WHERE singleton=1 AND revision=?1
     state->head = head_from_delta(delta, target_revision);
     lock.unlock();
     if (catalog_visible || projection_pending) {
-        auto projection = read_projection(state->database, state->id);
-        if (!projection)
-            degradation = projection.error().message();
-        else if (auto projected = state->repository->catalog.upsert(*projection); !projected)
-            degradation = projected.error().message();
-        else if (auto removed = remove_marker_if_satisfied(paths, state->id, projection->observed_revision); !removed)
-            degradation = removed.error().message();
+        if (title_changed) {
+            if (auto projected = refresh_projection(paths, state->repository->catalog, state->id); !projected) {
+                degradation = projected.error().message();
+                state->repository->indexer->enqueue(state->id, state->invalidation);
+            }
+            set_catalog_status(*state->invalidation, degradation);
+        } else {
+            if (degradation) set_catalog_status(*state->invalidation, degradation);
+            state->repository->indexer->enqueue(state->id, state->invalidation);
+        }
     }
     return SessionCommitResult{.catalog_degradation = std::move(degradation)};
+}
+
+Result<void> SessionWriter::refresh_catalog() {
+    auto refreshed = state->repository->indexer->refresh_live(state->id, *state->invalidation);
+    if (!refreshed) state->repository->indexer->enqueue(state->id, state->invalidation);
+    return refreshed;
+}
+
+CatalogRefreshStatus SessionWriter::catalog_status() const {
+    std::scoped_lock lock(state->invalidation->status_mutex);
+    return state->invalidation->status;
 }
 
 SessionDelta make_delta(const Session &session, std::span<const SessionEntry> entries) {
@@ -885,6 +1087,38 @@ SessionDelta make_delta(const Session &session, std::span<const SessionEntry> en
             .metadata = session.metadata};
 }
 
+namespace {
+
+Result<CatalogReconciliation> cleanup_abandoned_staging(const StatePaths &paths) {
+    CatalogReconciliation result;
+    std::error_code iteration_error;
+    for (std::filesystem::directory_iterator iterator(paths.staging(), iteration_error), end; !iteration_error && iterator != end;
+         iterator.increment(iteration_error)) {
+        auto id = staging_path_id(iterator->path());
+        if (!id) {
+            result.warnings.push_back(id.error().message() + ": " + iterator->path().filename().string());
+            continue;
+        }
+        auto lease = acquire_session_lease(paths.root, *id);
+        if (!lease) {
+            if (lease.error().detail.contains("in use by another"))
+                ++result.busy;
+            else
+                result.warnings.push_back("cannot lease staging session " + to_string(*id) + ": " + lease.error().message());
+            continue;
+        }
+        if (auto removed = remove_staging_tree(iterator->path()); !removed)
+            result.warnings.push_back("cannot clean staging session " + to_string(*id) + ": " + removed.error().message());
+        else
+            ++result.repaired;
+    }
+    if (iteration_error)
+        return lighter::outcome_error(Error::storage("cannot enumerate session staging directory: " + iteration_error.message()));
+    return result;
+}
+
+} // namespace
+
 Result<SessionRepository> SessionRepository::open(std::filesystem::path state_root, SessionCatalog catalog) {
     const StatePaths paths{state_root};
     if (auto created = create_state_directory(paths.root); !created) return lighter::outcome_error(std::move(created).error());
@@ -893,8 +1127,14 @@ Result<SessionRepository> SessionRepository::open(std::filesystem::path state_ro
     }
     auto repository_state = std::make_shared<State>(std::move(state_root), std::move(catalog));
     SessionRepository repository(std::move(repository_state));
+    repository.state->indexer = std::make_shared<CatalogIndexer>(repository.state->root, repository.state->catalog);
+    auto staging = cleanup_abandoned_staging(paths);
+    if (!staging) return lighter::outcome_error(std::move(staging).error());
+    repository.state->warnings.insert(repository.state->warnings.end(), std::make_move_iterator(staging->warnings.begin()),
+                                      std::make_move_iterator(staging->warnings.end()));
     if (repository.state->catalog.was_created()) {
         auto rebuilt = repository.rebuild_catalog();
+        repository.state->catalog.finish_initialization();
         if (!rebuilt) return lighter::outcome_error(std::move(rebuilt).error());
         repository.state->warnings.insert(repository.state->warnings.end(), std::make_move_iterator(rebuilt->warnings.begin()),
                                           std::make_move_iterator(rebuilt->warnings.end()));
@@ -994,29 +1234,32 @@ Result<CatalogReconciliation> SessionRepository::reconcile_pending() const {
             result.warnings.push_back("catalog marker " + to_string(*id) + ": " + target.error().message());
             continue;
         }
-        auto writer = acquire(*id);
-        if (!writer) {
-            if (writer.error().detail.contains("in use by another")) {
+        auto lease = acquire_session_lease(state->root, *id);
+        if (!lease) {
+            if (lease.error().detail.contains("in use by another"))
                 ++result.busy;
-                continue;
-            }
-            std::error_code absent_error;
-            const auto absent = !std::filesystem::exists(paths.session_database(*id), absent_error);
-            if (absent && !absent_error && !has_related_staging(paths, *id)) {
-                if (auto removed_row = state->catalog.remove(*id); !removed_row) {
-                    result.warnings.push_back(removed_row.error().message());
-                    continue;
-                }
-                if (auto removed = detail::durable_remove_file(iterator->path()); !removed)
-                    result.warnings.push_back(removed.error().message());
-                else
-                    ++result.repaired;
-                continue;
-            }
-            result.warnings.push_back("cannot reconcile session " + to_string(*id) + ": " + writer.error().message());
+            else
+                result.warnings.push_back("cannot lease pending session " + to_string(*id) + ": " + lease.error().message());
             continue;
         }
-        auto projection = writer->projection();
+        std::error_code absent_error;
+        const auto absent = !std::filesystem::exists(paths.session_database(*id), absent_error);
+        if (absent_error) {
+            result.warnings.push_back("cannot inspect pending session " + to_string(*id) + ": " + absent_error.message());
+            continue;
+        }
+        if (absent) {
+            if (auto removed_row = state->catalog.remove(*id); !removed_row) {
+                result.warnings.push_back(removed_row.error().message());
+                continue;
+            }
+            if (auto removed = detail::durable_remove_file(iterator->path()); !removed)
+                result.warnings.push_back(removed.error().message());
+            else
+                ++result.repaired;
+            continue;
+        }
+        auto projection = read_published_projection(paths, *id);
         if (!projection) {
             result.warnings.push_back("cannot read authoritative singleton for " + to_string(*id) + ": " + projection.error().message());
             continue;
@@ -1054,15 +1297,7 @@ Result<CatalogReconciliation> SessionRepository::rebuild_catalog() const {
             result.warnings.push_back("invalid published session directory: " + iterator->path().filename().string());
             continue;
         }
-        auto writer = acquire(*id);
-        if (!writer) {
-            if (writer.error().detail.contains("in use by another"))
-                ++result.busy;
-            else
-                result.warnings.push_back("cannot inspect published session " + to_string(*id) + ": " + writer.error().message());
-            continue;
-        }
-        auto projection = writer->projection();
+        auto projection = read_published_projection(paths, *id);
         if (!projection) {
             result.warnings.push_back("cannot read published session singleton " + to_string(*id) + ": " + projection.error().message());
             continue;

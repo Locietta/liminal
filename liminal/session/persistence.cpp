@@ -28,14 +28,16 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create(SessionWriter writer)
     const auto id = writer.session_id();
     auto owned_writer = std::make_shared<SessionWriter>(std::move(writer));
     Commit commit = [owned_writer](const SessionDelta &delta) { return owned_writer->commit(delta); };
-    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::ACTIVE));
+    CatalogStatus status = [owned_writer] { return owned_writer->catalog_status(); };
+    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::ACTIVE, std::move(status)));
 }
 
 std::shared_ptr<PersistenceQueue> PersistenceQueue::create_unpublished(SessionWriter writer) {
     const auto id = writer.session_id();
     auto owned_writer = std::make_shared<SessionWriter>(std::move(writer));
     Commit commit = [owned_writer](const SessionDelta &delta) { return owned_writer->commit(delta); };
-    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::UNPUBLISHED));
+    CatalogStatus status = [owned_writer] { return owned_writer->catalog_status(); };
+    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::UNPUBLISHED, std::move(status)));
 }
 
 std::shared_ptr<PersistenceQueue> PersistenceQueue::create_for_test(SessionId id, TestCommit commit) {
@@ -105,8 +107,9 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create_resolving(SessionId i
     return queue;
 }
 
-PersistenceQueue::PersistenceQueue(SessionId id, Commit commit, PublicationState publication_state)
-    : id(id), commit(std::move(commit)), publication_state(publication_state), worker([this](std::stop_token stop) { run(stop); }) {}
+PersistenceQueue::PersistenceQueue(SessionId id, Commit commit, PublicationState publication_state, CatalogStatus catalog_status)
+    : id(id), commit(std::move(commit)), read_catalog_status(std::move(catalog_status)), publication_state(publication_state),
+      worker([this](std::stop_token stop) { run(stop); }) {}
 
 PersistenceQueue::~PersistenceQueue() {
     worker.request_stop();
@@ -127,8 +130,17 @@ void PersistenceQueue::enqueue(SessionDelta delta) {
 SessionId PersistenceQueue::session_id() const noexcept { return id; }
 
 PersistenceStatus PersistenceQueue::status() const {
-    std::scoped_lock lock(mutex);
-    return current_status;
+    PersistenceStatus result;
+    {
+        std::scoped_lock lock(mutex);
+        result = current_status;
+    }
+    if (read_catalog_status) {
+        const auto catalog = read_catalog_status();
+        result.catalog_degraded = catalog.degraded;
+        result.catalog_detail = catalog.detail;
+    }
+    return result;
 }
 
 Result<void> PersistenceQueue::publish_initial(const SessionDelta &delta) {

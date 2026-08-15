@@ -45,6 +45,21 @@ Result<CatalogLease> acquire_catalog_lease(const std::filesystem::path &state_ro
     return CatalogLease(std::move(state));
 }
 
+Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &state_root) {
+    const auto path = state_root / "locks" / "catalog-initialize.lock";
+    const auto file = open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR);
+    if (file < 0)
+        return lighter::outcome_error(Error::storage("cannot open catalog initialization lock: " + std::string(std::strerror(errno))));
+    if (flock(file, LOCK_EX) != 0) {
+        const auto code = errno;
+        close(file);
+        return lighter::outcome_error(Error::storage("cannot acquire catalog initialization lock: " + std::string(std::strerror(code))));
+    }
+    auto state = std::make_shared<CatalogLease::State>();
+    state->file = file;
+    return CatalogLease(std::move(state));
+}
+
 } // namespace liminal::session::detail
 
 #endif

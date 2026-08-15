@@ -28,6 +28,11 @@ struct SessionCommitResult {
     std::optional<std::string> catalog_degradation;
 };
 
+struct CatalogRefreshStatus {
+    bool degraded = false;
+    std::string detail;
+};
+
 struct SessionWriter {
     struct State;
 
@@ -40,6 +45,8 @@ struct SessionWriter {
     SessionId session_id() const noexcept;
     Result<Session> load();
     Result<SessionCommitResult> commit(const SessionDelta &delta);
+    Result<void> refresh_catalog();
+    CatalogRefreshStatus catalog_status() const;
 
 private:
     friend struct SessionRepository;

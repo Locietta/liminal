@@ -60,6 +60,7 @@ struct SessionCatalog {
 
 private:
     friend struct SessionRepository;
+    void finish_initialization() const;
     explicit SessionCatalog(std::shared_ptr<State> state) : state(std::move(state)) {}
     std::shared_ptr<State> state;
 };

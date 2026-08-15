@@ -16,7 +16,7 @@ Each published session owns one authoritative SQLite database under its determin
 
 A small global SQLite catalog is a disposable discovery projection. It contains only session ID, observed authoritative revision, workspace key, conversation recency, title, and bounded initial-prompt preview. Exact full-ID acquisition derives the session path directly and does not depend on this catalog.
 
-The live session changes immediately, while semantic persistence follows through an ordered per-session queue. Storage failure must not block model calls or tools after their effects may already have occurred. The UI exposes an unsaved tail, and a later successful retry persists the complete ordered prefix. Catalog refresh failure is reported separately and cannot turn a successful authoritative commit into semantic persistence failure.
+The live session changes immediately, while semantic persistence follows through an ordered per-session queue. Storage failure must not block model calls or tools after their effects may already have occurred. The UI exposes an unsaved tail, and a later successful retry persists the complete ordered prefix. A separate catalog indexer coalesces projection requests and retries them independently; catalog contention never delays semantic queue completion. Catalog refresh failure is reported separately and cannot turn a successful authoritative commit into semantic persistence failure.
 
 Only one process may actively own a session. The active writer retains an operating-system lease and its durable revision, and persistence work remains bound to that session identity. Public interfaces stay platform-neutral even though lease, durable marker, and publication implementations differ between Windows and POSIX systems.
 
@@ -66,7 +66,7 @@ Every published session participates in ordinary workspace discovery. Conversati
 
 Before publication, rename, or durable user-task admission, Liminal durably replaces `catalog-pending/<session-id>` with the target authoritative revision. After the session commit, the projection reads the latest singleton row, performs a revision-guarded catalog upsert, and removes the marker only if it still names no later revision.
 
-Normal startup inspects only pending markers and tries each session lease without waiting. Busy sessions retain their markers. Missing-catalog rebuild and explicit repair may scan published session directories, but read only singleton rows and never decode history payloads. A corrupt catalog is not silently replaced while another process may hold it open.
+Normal startup inspects pending markers and the bounded staging directory. It tries each relevant session lease without waiting, preserves work owned by another process, and removes abandoned staging before clearing its orphan marker. Missing-catalog rebuild and explicit repair may scan published session directories, but use validated read-only connections to read singleton rows alongside live WAL writers and never decode history payloads. Catalog schema initialization is serialized across processes, and a corrupt catalog is not silently replaced while another process may hold it open.
 
 ## Evolution constraints
 

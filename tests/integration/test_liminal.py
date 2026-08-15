@@ -570,6 +570,39 @@ def test_session_continue_direct_resume_and_locking(openai_mock, tmp_path):
     assert str(REPO_ROOT).replace("\\", "/") in cross_workspace.stdout
     assert str(other_workspace).replace("\\", "/") in cross_workspace.stdout
 
+    fake_workspace_key = other_workspace.resolve().as_posix()
+    if os.name == "nt":
+        fake_workspace_key = fake_workspace_key.upper()
+    with sqlite3.connect(tmp_path / "catalog.sqlite3") as database:
+        original_workspace_key = database.execute(
+            "SELECT workspace_key FROM sessions WHERE lower(hex(id))=?",
+            (session_hex,),
+        ).fetchone()[0]
+        database.execute(
+            "UPDATE sessions SET workspace_key=? WHERE lower(hex(id))=?",
+            (fake_workspace_key, session_hex),
+        )
+    stale_continue = subprocess.run(
+        [str(BINARY), "continue"],
+        input="/quit\n",
+        env=env,
+        cwd=other_workspace,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=TIMEOUT,
+        check=False,
+    )
+    assert stale_continue.returncode == 1
+    assert "immutable workspace" in stale_continue.stderr
+    with sqlite3.connect(tmp_path / "catalog.sqlite3") as database:
+        repaired_workspace_key = database.execute(
+            "SELECT workspace_key FROM sessions WHERE lower(hex(id))=?",
+            (session_hex,),
+        ).fetchone()[0]
+    assert repaired_workspace_key == original_workspace_key
+
     holder_binary = tmp_path / BINARY.name
     shutil.copy2(BINARY, holder_binary)
     holder = subprocess.Popen(

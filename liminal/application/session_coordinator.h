@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <liminal/model/catalog.h>
@@ -110,6 +111,7 @@ struct SessionCoordinator {
 
     Result<session::SessionPage> page(const session::SessionPageQuery &query) const;
     Result<AcquiredSession> acquire(session::SessionId id) const;
+    Result<AcquiredSession> acquire_in_workspace(session::SessionId id, std::string_view workspace_key) const;
     Result<PreparedSession> resolve_model(AcquiredSession acquired) const;
     Result<PreparedSession> prepare(session::SessionId id) const;
     Result<ForkPlan> prepare_fork(const session::Session &source, session::ConversationCheckpointId checkpoint) const;

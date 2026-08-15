@@ -17,10 +17,12 @@ struct CatalogLease {
 
 private:
     friend Result<CatalogLease> acquire_catalog_lease(const std::filesystem::path &, bool);
+    friend Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &);
     explicit CatalogLease(std::shared_ptr<State> state) : state(std::move(state)) {}
     std::shared_ptr<State> state;
 };
 
 Result<CatalogLease> acquire_catalog_lease(const std::filesystem::path &state_root, bool exclusive);
+Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &state_root);
 
 } // namespace liminal::session::detail

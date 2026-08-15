@@ -100,6 +100,10 @@ PreparedSession SessionSwitch::take_target() && {
 
 Result<AcquiredSession> SessionCoordinator::acquire(session::SessionId id) const { return acquire_with_workspace(id, std::nullopt); }
 
+Result<AcquiredSession> SessionCoordinator::acquire_in_workspace(session::SessionId id, std::string_view workspace_key) const {
+    return acquire_with_workspace(id, std::string(workspace_key));
+}
+
 Result<AcquiredSession> SessionCoordinator::acquire_with_workspace(session::SessionId id,
                                                                    const std::optional<std::string> &workspace_key) const {
     auto writer = repository.acquire(id);
@@ -107,6 +111,7 @@ Result<AcquiredSession> SessionCoordinator::acquire_with_workspace(session::Sess
     auto loaded = writer->load();
     if (!loaded) return lighter::outcome_error(std::move(loaded).error());
     if (workspace_key && (!loaded->metadata.workspace || loaded->metadata.workspace->key != *workspace_key)) {
+        static_cast<void>(writer->refresh_catalog());
         return lighter::outcome_error(Error::storage("selected catalog row does not match the session's immutable workspace"));
     }
 
@@ -152,8 +157,7 @@ Result<PreparedSession> SessionCoordinator::prepare_catalog_hint(session::Sessio
     if (!*hint) return lighter::outcome_error(Error::storage("selected session is no longer present in the catalog"));
     auto acquired = acquire_with_workspace(id, (*hint)->workspace_key);
     if (!acquired) {
-        if (acquired.error().detail == "session was not found" || acquired.error().detail == "published session database is absent" ||
-            acquired.error().detail == "selected catalog row does not match the session's immutable workspace") {
+        if (acquired.error().detail == "session was not found" || acquired.error().detail == "published session database is absent") {
             static_cast<void>(catalog.remove(id));
         }
         return lighter::outcome_error(std::move(acquired).error());

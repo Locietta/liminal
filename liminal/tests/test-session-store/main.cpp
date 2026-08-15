@@ -1,16 +1,21 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <barrier>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <latch>
 #include <optional>
 #include <set>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -24,11 +29,18 @@
 
 #include <sqlite3.h>
 
+#include <glaze/json.hpp>
+
 #include <liminal/application/session_coordinator.h>
 #include <liminal/session/catalog.h>
+#include <liminal/session/lease.h>
 #include <liminal/session/paths.h>
+#include <liminal/session/persistence.h>
+#include <liminal/session/recovery.h>
 #include <liminal/session/repository.h>
 #include <liminal/session/store.h>
+#include <liminal/tools/tools.h>
+#include <liminal/tui/hydration.h>
 
 namespace {
 
@@ -76,6 +88,22 @@ session::Session make_session(std::string task, i64 admission_time = 1'000'000) 
     value.metadata.working_directory = "C:/workspace";
     value.start_task(std::move(task), std::max(admission_time, value.metadata.created_at_ms));
     return value;
+}
+
+session::ConversationCheckpointId checkpoint_id(session::EntryId entry) { return {entry}; }
+
+session::SessionId deterministic_id(u64 value) {
+    session::SessionId id;
+    for (usize index = 0; index < sizeof(value); ++index) {
+        id.bytes[id.bytes.size() - 1 - index] = static_cast<u8>(value >> (index * 8));
+    }
+    return id;
+}
+
+provider::ToolCall tool_call(std::string id) {
+    glz::generic input;
+    require(!glz::read_json(input, R"({"path":"README.md"})"), "failed to create tool input fixture");
+    return {.id = std::move(id), .name = "read_file", .input = std::move(input)};
 }
 
 struct Published {
@@ -128,6 +156,35 @@ i64 scalar_i64(const std::filesystem::path &path, const char *sql) {
     sqlite3_finalize(statement);
     sqlite3_close(database);
     return result;
+}
+
+void insert_catalog_rows(const std::filesystem::path &path, u64 first, u64 count, std::string_view workspace, i64 first_timestamp,
+                         i64 timestamp_step = 1) {
+    auto *database = open_sqlite(path);
+    execute(database, "BEGIN IMMEDIATE", "failed to begin catalog fixture");
+    sqlite3_stmt *insert = nullptr;
+    constexpr auto sql = R"sql(
+INSERT INTO sessions(id,observed_revision,workspace_key,updated_at_ms,title,preview)
+VALUES(?1,1,?2,?3,?4,?5)
+)sql";
+    require(sqlite3_prepare_v2(database, sql, -1, &insert, nullptr) == SQLITE_OK, "failed to prepare catalog fixture insert");
+    for (u64 offset = 0; offset < count; ++offset) {
+        const auto id = deterministic_id(first + offset);
+        const auto updated = first_timestamp + static_cast<i64>(offset) * timestamp_step;
+        const auto title = "Session " + std::to_string(first + offset);
+        const auto preview = "Preview " + std::to_string(first + offset);
+        sqlite3_reset(insert);
+        sqlite3_clear_bindings(insert);
+        sqlite3_bind_blob(insert, 1, id.bytes.data(), static_cast<int>(id.bytes.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(insert, 2, workspace.data(), static_cast<int>(workspace.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(insert, 3, updated);
+        sqlite3_bind_text(insert, 4, title.data(), static_cast<int>(title.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(insert, 5, preview.data(), static_cast<int>(preview.size()), SQLITE_TRANSIENT);
+        require(sqlite3_step(insert) == SQLITE_DONE, "failed to insert catalog fixture row");
+    }
+    sqlite3_finalize(insert);
+    execute(database, "COMMIT", "failed to commit catalog fixture");
+    sqlite3_close(database);
 }
 
 void write_marker(const std::filesystem::path &root, session::SessionId id, u64 revision) {
@@ -344,16 +401,21 @@ void test_catalog_failure_cannot_rollback_session_and_pending_recovers() {
         published->value.start_task("durable despite catalog failure", expected_recency);
         auto committed =
             published->writer.commit(session::make_delta(published->value, std::span(published->value.entries).subspan(durable_count)));
-        require(committed && committed->catalog_degradation, "catalog lock was not reported as non-fatal projection degradation");
+        require(committed && !committed->catalog_degradation,
+                "catalog projection remained synchronously coupled to authoritative semantic persistence");
         const session::StatePaths paths{temporary.root};
         require(scalar_i64(paths.session_database(id), "SELECT revision FROM session") == 2 &&
                     scalar_i64(paths.session_database(id), "SELECT updated_at_ms FROM session") == expected_recency &&
                     std::filesystem::exists(paths.pending_marker(id)),
                 "catalog failure rolled back or lost the authoritative mutation marker");
+        auto failed_refresh = published->writer.refresh_catalog();
+        require(!failed_refresh && published->writer.catalog_status().degraded,
+                "catalog projection failure was not exposed independently from semantic persistence");
         execute(catalog_blocker, "ROLLBACK", "failed to unlock catalog");
         sqlite3_close(catalog_blocker);
         published->value.set_model_preference("provider", "model", std::nullopt);
         auto retried = published->writer.commit(session::make_delta(published->value, {}));
+        require(published->writer.refresh_catalog().has_value(), "independent catalog projection retry failed");
         auto projection = storage->catalog.find(id);
         require(retried && !retried->catalog_degradation && projection && *projection && (*projection)->observed_revision == 3 &&
                     (*projection)->summary.updated_at_ms == expected_recency && !std::filesystem::exists(paths.pending_marker(id)),
@@ -475,6 +537,57 @@ void test_missing_catalog_rebuild_reads_only_singletons() {
     require(writer.has_value() && !writer->load(), "full session load unexpectedly accepted the corrupt payload");
 }
 
+void test_missing_catalog_rebuild_includes_leased_sessions() {
+    TemporaryState temporary;
+    session::SessionId id;
+    {
+        auto storage = open_storage(temporary.root);
+        auto published = storage ? publish(storage->repository, make_session("leased rebuild")) :
+                                   Result<Published>{lighter::outcome_error(storage.error())};
+        require(published.has_value(), "failed to publish leased rebuild fixture");
+        id = published->value.id;
+    }
+    auto lease = session::acquire_session_lease(temporary.root, id);
+    require(lease.has_value(), "failed to hold rebuild fixture lease");
+    const session::StatePaths paths{temporary.root};
+    std::error_code error;
+    std::filesystem::remove(paths.catalog(), error);
+    require(!error, "failed to remove catalog for leased rebuild");
+    std::filesystem::remove(paths.catalog().string() + "-wal", error);
+    error.clear();
+    std::filesystem::remove(paths.catalog().string() + "-shm", error);
+    error.clear();
+    auto rebuilt = open_storage(temporary.root);
+    require(rebuilt.has_value(), "missing-catalog rebuild failed while a session was leased");
+    auto page = rebuilt->catalog.page({.workspace_key = "workspace"});
+    require(page && page->sessions.size() == 1 && page->sessions.front().id == id,
+            "missing-catalog rebuild omitted an exclusively owned session");
+}
+
+void test_concurrent_catalog_initialization_is_serialized() {
+    TemporaryState temporary;
+    constexpr usize opener_count = 8;
+    std::barrier start(static_cast<std::ptrdiff_t>(opener_count));
+    std::array<std::atomic<bool>, opener_count> opened{};
+    std::array<std::string, opener_count> errors;
+    std::vector<std::jthread> threads;
+    threads.reserve(opener_count);
+    for (usize index = 0; index < opener_count; ++index) {
+        threads.emplace_back([&, index] {
+            start.arrive_and_wait();
+            auto catalog = session::SessionCatalog::open(temporary.root);
+            opened[index] = catalog.has_value();
+            if (!catalog) errors[index] = catalog.error().message();
+        });
+    }
+    threads.clear();
+    for (usize index = 0; index < opener_count; ++index) {
+        if (!opened[index]) fail("concurrent first catalog opener failed: " + errors[index]);
+    }
+    auto catalog = session::SessionCatalog::open(temporary.root);
+    require(catalog.has_value(), "concurrently initialized catalog could not be reopened");
+}
+
 void test_corrupt_catalog_repair_requires_exclusive_maintenance() {
     TemporaryState temporary;
     session::SessionId id;
@@ -532,6 +645,59 @@ void test_staging_cancellation_and_complete_publication() {
             "complete staged image did not publish and reopen in verified WAL mode");
 }
 
+void test_abandoned_staging_and_marker_are_reconciled() {
+    TemporaryState temporary;
+    {
+        auto storage = open_storage(temporary.root);
+        require(storage.has_value(), "failed to initialize abandoned staging storage");
+    }
+    const session::StatePaths paths{temporary.root};
+    const auto id = session::generate_session_id();
+    const auto staging = paths.staging() / (session::to_string(id) + ".deadbeef");
+    std::error_code error;
+    std::filesystem::create_directory(staging, error);
+    require(!error, "failed to create abandoned staging fixture");
+    std::ofstream database(staging / "session.sqlite3", std::ios::binary);
+    database << "closed staging image";
+    database.close();
+    write_marker(temporary.root, id, 1);
+    auto reopened = open_storage(temporary.root);
+    require(reopened.has_value() && !std::filesystem::exists(staging) && !std::filesystem::exists(paths.pending_marker(id)),
+            "startup did not clean lease-free abandoned staging and its orphan marker");
+}
+
+void test_staged_final_snapshot_is_fully_validated() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open staged validation storage");
+    const auto rejected = [&](auto mutate, std::string_view message) {
+        auto value = make_session("staged validation");
+        const auto id = value.id;
+        auto staged = storage->repository.stage(id, session::make_delta(value, value.entries));
+        require(staged.has_value(), "failed to stage validation fixture");
+        auto final = session::make_delta(value, value.entries);
+        mutate(final);
+        require(!staged->commit(final) && !std::filesystem::exists(session::StatePaths{temporary.root}.session_directory(id)), message);
+    };
+    rejected([](session::SessionDelta &delta) { delta.metadata.updated_at_ms = delta.metadata.created_at_ms - 1; },
+             "staged publication accepted regressed timestamps");
+    rejected([](session::SessionDelta &delta) { delta.next_task_id = 0; }, "staged publication accepted regressed counters");
+    rejected([](session::SessionDelta &delta) { delta.active_leaf = session::EntryId{delta.entry_count + 1}; },
+             "staged publication accepted an invalid active leaf");
+    rejected([](session::SessionDelta &delta) { delta.metadata.title = std::string(1, static_cast<char>(0x80)); },
+             "staged publication accepted malformed title UTF-8");
+    rejected(
+        [](session::SessionDelta &delta) {
+            delta.metadata.model_preference = session::SessionModelPreference{.provider = "", .model = "model"};
+        },
+        "staged publication accepted invalid model metadata");
+    rejected(
+        [](session::SessionDelta &delta) {
+            delta.metadata.forked_from = session::ForkOrigin{.session = session::generate_session_id(), .entry = {0}};
+        },
+        "staged publication accepted invalid fork metadata");
+}
+
 void test_recency_rename_fork_and_discovery() {
     TemporaryState temporary;
     auto storage = open_storage(temporary.root);
@@ -566,6 +732,255 @@ void test_recency_rename_fork_and_discovery() {
     static_cast<void>(task);
 }
 
+void test_restart_branching_preserves_history_and_cursor() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open restart-branching storage");
+    auto value = make_session("branch root");
+    const auto root = value.append(session::TaskFinished{.id = {1}});
+    const auto old_task = value.start_task("old descendant", value.metadata.updated_at_ms + 1);
+    const auto original_leaf = value.append(session::TaskFinished{.id = old_task});
+    auto published = publish(storage->repository, std::move(value));
+    require(published.has_value(), "failed to seed restart-branching history");
+    require(published->value.checkout(checkpoint_id(root)).has_value(), "failed to select restart branch root");
+    require(published->writer.commit(session::make_delta(published->value, {})).has_value(), "failed to persist active cursor");
+    auto cursor_restart = published->writer.load();
+    require(cursor_restart && cursor_restart->active_leaf == root, "active cursor did not survive restart");
+    const auto first_new_entry = published->value.entries.size();
+    const auto alternate = published->value.start_task("alternate", published->value.metadata.updated_at_ms + 1);
+    published->value.append(session::TaskFinished{.id = alternate});
+    require(published->writer.commit(session::make_delta(published->value, std::span(published->value.entries).subspan(first_new_entry)))
+                .has_value(),
+            "failed to persist alternate restart branch");
+    auto restarted = published->writer.load();
+    require(restarted && restarted->find(original_leaf) && restarted->entries[first_new_entry].parent_id == root,
+            "restart branching rewrote the preserved descendant or lost the selected parent");
+}
+
+void test_catalog_keyset_paging_and_index_plan() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open catalog paging storage");
+    insert_catalog_rows(storage->catalog.path(), 1, 2, "workspace-a", 100, 100);
+    insert_catalog_rows(storage->catalog.path(), 3, 2, "workspace-a", 300, 0);
+    insert_catalog_rows(storage->catalog.path(), 100, 1, "workspace-b", 1'000);
+    auto first = storage->catalog.page({.workspace_key = "workspace-a", .limit = 2});
+    require(first && first->sessions.size() == 2 && first->sessions[0].id == deterministic_id(4) &&
+                first->sessions[1].id == deterministic_id(3) && first->continuation,
+            "first keyset page did not use stable newest-first ID tie-breaking");
+    auto second = storage->catalog.page({.workspace_key = "workspace-a", .after = first->continuation, .limit = 2});
+    require(second && second->sessions.size() == 2 && second->sessions[0].id == deterministic_id(2) &&
+                second->sessions[1].id == deterministic_id(1) && !second->continuation,
+            "continued keyset page skipped or duplicated catalog rows");
+    auto other = storage->catalog.page({.workspace_key = "workspace-b", .limit = 2});
+    require(other && other->sessions.size() == 1 && other->sessions.front().id == deterministic_id(100),
+            "catalog keyset paging crossed workspace boundaries");
+
+    auto *database = open_sqlite(storage->catalog.path());
+    sqlite3_stmt *plan = nullptr;
+    constexpr auto sql = R"sql(
+EXPLAIN QUERY PLAN SELECT id,updated_at_ms,title,preview FROM sessions
+WHERE workspace_key=?1 AND (updated_at_ms,id)<(?2,?3)
+ORDER BY updated_at_ms DESC,id DESC LIMIT ?4
+)sql";
+    require(sqlite3_prepare_v2(database, sql, -1, &plan, nullptr) == SQLITE_OK, "failed to prepare catalog query plan");
+    sqlite3_bind_text(plan, 1, "workspace-a", -1, SQLITE_STATIC);
+    sqlite3_bind_int64(plan, 2, 300);
+    const auto cursor_id = deterministic_id(3);
+    sqlite3_bind_blob(plan, 3, cursor_id.bytes.data(), static_cast<int>(cursor_id.bytes.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int(plan, 4, 3);
+    std::string details;
+    while (sqlite3_step(plan) == SQLITE_ROW) {
+        details += reinterpret_cast<const char *>(sqlite3_column_text(plan, 3));
+        details += '\n';
+    }
+    sqlite3_finalize(plan);
+    sqlite3_close(database);
+    require(details.contains("sessions_workspace_recent") && !details.contains("USE TEMP B-TREE"),
+            "catalog paging did not use the workspace/recency keyset index directly");
+}
+
+void test_recovery_and_transcript_hydration_survive_restart() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open recovery storage");
+    auto value = make_session("run tools");
+    const auto task = session::TaskId{1};
+    const auto call = value.next_provider_call();
+    value.append(session::OutputItemCompleted{
+        .task_id = task,
+        .provider_call_id = call,
+        .item = provider::AssistantMessageItem{.id = {.value = "commentary"},
+                                               .parts = {{.text = "checking"}},
+                                               .phase = provider::MessagePhase::COMMENTARY},
+    });
+    value.append(session::OutputItemCompleted{
+        .task_id = task,
+        .provider_call_id = call,
+        .item = provider::ToolCallItem{.id = {.value = "tool"}, .call = tool_call("durable-call")},
+    });
+    auto published = publish(storage->repository, std::move(value));
+    require(published.has_value(), "failed to persist interrupted recovery prefix");
+    auto restarted = published->writer.load();
+    require(restarted.has_value(), "failed to reload interrupted recovery prefix");
+    const auto durable_size = restarted->entries.size();
+    auto recovery = session::recover_interrupted(*restarted);
+    require(recovery.unknown_tool_outcomes == 1, "recovery did not synthesize the unmatched durable tool outcome");
+    auto suffix = std::span(restarted->entries).subspan(durable_size);
+    require(published->writer.commit(session::make_delta(*restarted, suffix)).has_value(), "failed to persist recovery suffix");
+    auto recovered = published->writer.load();
+    require(recovered && std::get<session::TaskFinished>(recovered->entries.back().payload).outcome == session::TaskOutcome::INTERRUPTED,
+            "interrupted recovery suffix did not survive restart");
+    ToolSet tools(temporary.root);
+    auto blocks = tui::project_transcript(*recovered, tools);
+    require(blocks.size() >= 5 && blocks.front().kind == tui::BlockKind::USER &&
+                std::ranges::any_of(blocks, [](const tui::Block &block) { return block.kind == tui::BlockKind::TOOL; }) &&
+                blocks.back().text.contains("interrupted"),
+            "transcript hydration did not reconstruct recovered user, tool, and interruption blocks");
+}
+
+void test_persistence_queue_ordering_retry_and_flush_barriers() {
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        usize attempts = 0;
+        bool release_failure = false;
+        bool release_success = false;
+        std::vector<session::SessionDelta> received;
+    } gate;
+    session::Session value;
+    auto queue = session::PersistenceQueue::create_for_test(value.id, [&gate](const session::SessionDelta &delta) -> Result<void> {
+        std::unique_lock lock(gate.mutex);
+        ++gate.attempts;
+        gate.received.push_back(delta);
+        gate.changed.notify_all();
+        if (gate.attempts == 1) {
+            gate.changed.wait(lock, [&gate] { return gate.release_failure; });
+            return lighter::outcome_error(Error::storage("injected save failure"));
+        }
+        gate.changed.wait(lock, [&gate] { return gate.release_success; });
+        return {};
+    });
+    require(value.attach_persistence(queue).has_value(), "failed to attach ordered persistence queue");
+    const auto task = value.start_task("queue test");
+    {
+        std::unique_lock lock(gate.mutex);
+        gate.changed.wait(lock, [&gate] { return gate.attempts == 1; });
+    }
+    value.append(session::TaskFinished{.id = task});
+    {
+        std::scoped_lock lock(gate.mutex);
+        gate.release_failure = true;
+    }
+    gate.changed.notify_all();
+    {
+        std::unique_lock lock(gate.mutex);
+        gate.changed.wait(lock, [&gate] { return gate.attempts == 2; });
+        require(queue->status().degraded && queue->status().pending_mutations == 2,
+                "failed persistence did not retain its complete ordered tail");
+        gate.release_success = true;
+    }
+    gate.changed.notify_all();
+    require(queue->flush().has_value(), "ordered persistence retry did not flush its complete prefix");
+    std::scoped_lock lock(gate.mutex);
+    require(gate.received.back().entries.size() == 2 && gate.received.back().entries[1].parent_id == gate.received.back().entries[0].id,
+            "ordered persistence retry changed semantic order or parent links");
+}
+
+void test_flush_waits_for_complete_pending_prefix() {
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        usize attempts = 0;
+        bool release_first = false;
+        bool release_second = false;
+        bool flush_returned = false;
+        bool flush_succeeded = false;
+    } gate;
+    session::Session value;
+    auto queue = session::PersistenceQueue::create_for_test(value.id, [&gate](const session::SessionDelta &) -> Result<void> {
+        std::unique_lock lock(gate.mutex);
+        ++gate.attempts;
+        const auto attempt = gate.attempts;
+        gate.changed.notify_all();
+        gate.changed.wait(lock, [&gate, attempt] { return attempt == 1 ? gate.release_first : gate.release_second; });
+        return {};
+    });
+    require(value.attach_persistence(queue).has_value(), "failed to attach flush-barrier queue");
+    const auto task = value.start_task("first mutation");
+    {
+        std::unique_lock lock(gate.mutex);
+        gate.changed.wait(lock, [&gate] { return gate.attempts == 1; });
+    }
+    value.append(session::TaskFinished{.id = task});
+    std::jthread flusher([&] {
+        const auto flushed = queue->flush();
+        std::scoped_lock lock(gate.mutex);
+        gate.flush_returned = true;
+        gate.flush_succeeded = flushed.has_value();
+        gate.changed.notify_all();
+    });
+    {
+        std::scoped_lock lock(gate.mutex);
+        gate.release_first = true;
+    }
+    gate.changed.notify_all();
+    {
+        std::unique_lock lock(gate.mutex);
+        gate.changed.wait(lock, [&gate] { return gate.attempts == 2; });
+        require(!gate.flush_returned, "flush returned after only part of its pending prefix committed");
+        gate.release_second = true;
+    }
+    gate.changed.notify_all();
+    {
+        std::unique_lock lock(gate.mutex);
+        gate.changed.wait(lock, [&gate] { return gate.flush_returned; });
+        require(gate.flush_succeeded, "flush failed after its complete pending prefix committed");
+    }
+}
+
+void test_initial_publication_serializes_enqueued_mutations() {
+    struct Gate {
+        std::latch initial_entered{1};
+        std::latch release_initial{1};
+        std::atomic<usize> attempts = 0;
+        std::atomic<usize> active = 0;
+        std::atomic<usize> maximum_active = 0;
+        std::mutex mutex;
+        std::vector<session::SessionDelta> received;
+    } gate;
+    session::Session value;
+    const auto initial = session::make_delta(value, value.entries);
+    auto queue =
+        session::PersistenceQueue::create_unpublished_for_test(value.id, [&gate](const session::SessionDelta &delta) -> Result<void> {
+            const auto attempt = gate.attempts.fetch_add(1) + 1;
+            const auto active = gate.active.fetch_add(1) + 1;
+            auto maximum = gate.maximum_active.load();
+            while (maximum < active && !gate.maximum_active.compare_exchange_weak(maximum, active)) {}
+            {
+                std::scoped_lock lock(gate.mutex);
+                gate.received.push_back(delta);
+            }
+            if (attempt == 1) {
+                gate.initial_entered.count_down();
+                gate.release_initial.wait();
+            }
+            gate.active.fetch_sub(1);
+            return {};
+        });
+    require(value.attach_persistence(queue).has_value(), "failed to attach unpublished persistence queue");
+    std::atomic<bool> published = false;
+    std::jthread publisher([&] { published = queue->publish_initial(initial).has_value(); });
+    gate.initial_entered.wait();
+    value.start_task("queued during publication");
+    require(queue->status().pending_mutations == 1, "publication lost a concurrently enqueued mutation");
+    gate.release_initial.count_down();
+    publisher.join();
+    require(published && queue->flush().has_value() && gate.attempts == 2 && gate.maximum_active == 1,
+            "initial publication overlapped or reordered its queued semantic suffix");
+    require(!queue->publish_initial(initial), "initial publication queue accepted a second publication");
+}
+
 void test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session() {
     TemporaryState temporary;
     auto storage = open_storage(temporary.root);
@@ -596,6 +1011,63 @@ void test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session() {
     auto switching = coordinator.begin_switch(live.id, missing);
     require(!switching && live.id == live_id && live.entries.size() == live_entries,
             "failed catalog-hint acquisition mutated the currently active session");
+
+    session::SessionId authority_id;
+    {
+        auto authoritative = publish(storage->repository, make_session("workspace authority"));
+        require(authoritative.has_value(), "failed to publish workspace-authority fixture");
+        authority_id = authoritative->value.id;
+        auto stale = storage->catalog.find(authority_id);
+        require(stale && *stale, "workspace-authority catalog row is absent");
+        auto stale_projection = **stale;
+        stale_projection.workspace_key = "stale-workspace";
+        require(storage->catalog.upsert(stale_projection).has_value(), "failed to install stale workspace hint");
+    }
+    auto mismatched = coordinator.begin_switch(live.id, authority_id);
+    auto repaired = storage->catalog.find(authority_id);
+    require(!mismatched && live.id == live_id && repaired && *repaired && (*repaired)->workspace_key == "workspace",
+            "workspace mismatch changed the live session or deleted rather than repaired its valid catalog projection");
+    auto continued = coordinator.acquire_in_workspace(authority_id, "stale-workspace");
+    require(!continued, "workspace-scoped acquisition trusted stale catalog authority");
+}
+
+void test_prepared_switch_keeps_live_state_atomic() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open atomic-switch storage");
+    session::SessionId target_id;
+    {
+        auto target = publish(storage->repository, make_session("switch target"));
+        require(target.has_value(), "failed to publish atomic-switch target");
+        target_id = target->value.id;
+    }
+    auto live = make_session("live state");
+    const auto live_id = live.id;
+    const auto live_entries = live.entries.size();
+    application::SessionPreparationServices services(
+        [](const session::Session &value) -> Result<std::vector<tui::Block>> {
+            return std::vector<tui::Block>{{.kind = tui::BlockKind::NOTICE,
+                                            .state = tui::BlockState::COMPLETED,
+                                            .text = "projected " + std::to_string(value.entries.size())}};
+        },
+        [](const std::optional<session::SessionModelPreference> &) -> Result<application::SessionModelResolution> {
+            return application::SessionModelResolution{
+                .model = {.entry = {.provider = "test", .id = "test", .name = "Test"}},
+            };
+        });
+    application::SessionCoordinator coordinator(storage->repository, storage->catalog, std::move(services));
+    auto switching = coordinator.begin_switch(live.id, target_id);
+    require(switching && switching->state() == application::SessionSwitchState::PREPARED && live.id == live_id &&
+                live.entries.size() == live_entries,
+            "preparing a valid switch partially changed the live session");
+    switching->flush_current(nullptr);
+    require(switching->state() == application::SessionSwitchState::READY && live.id == live_id,
+            "switch readiness changed live state before explicit consumption");
+    auto &state = *switching;
+    auto prepared = std::move(state).take_target();
+    require(state.state() == application::SessionSwitchState::CONSUMED && prepared.session.id == target_id &&
+                prepared.transcript.size() == 1 && live.id == live_id,
+            "prepared switch did not yield one complete target while preserving the old live value");
 }
 
 void test_removed_archive_surface_and_state_root_override() {
@@ -628,10 +1100,21 @@ int main(int argc, char **argv) {
     test_normal_startup_does_not_scan_sessions();
     test_invalid_pending_marker_is_reported_without_scanning_sessions();
     test_missing_catalog_rebuild_reads_only_singletons();
+    test_missing_catalog_rebuild_includes_leased_sessions();
+    test_concurrent_catalog_initialization_is_serialized();
     test_corrupt_catalog_repair_requires_exclusive_maintenance();
     test_staging_cancellation_and_complete_publication();
+    test_abandoned_staging_and_marker_are_reconciled();
+    test_staged_final_snapshot_is_fully_validated();
     test_recency_rename_fork_and_discovery();
+    test_restart_branching_preserves_history_and_cursor();
+    test_catalog_keyset_paging_and_index_plan();
+    test_recovery_and_transcript_hydration_survive_restart();
+    test_persistence_queue_ordering_retry_and_flush_barriers();
+    test_flush_waits_for_complete_pending_prefix();
+    test_initial_publication_serializes_enqueued_mutations();
     test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session();
+    test_prepared_switch_keeps_live_state_atomic();
     test_removed_archive_surface_and_state_root_override();
     return 0;
 }
