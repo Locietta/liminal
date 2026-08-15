@@ -12,6 +12,10 @@
 
 namespace liminal::session {
 
+namespace testing {
+struct StorageHookAccess;
+} // namespace testing
+
 struct CatalogReconciliation {
     usize repaired = 0;
     usize busy = 0;
@@ -28,11 +32,13 @@ struct SessionRepository {
     Result<SessionWriter> create(SessionId id) const;
     Result<SessionWriter> stage(SessionId id, const SessionDelta &initial) const;
     Result<SessionWriter> acquire(SessionId id) const;
+    Result<bool> remove_catalog_hint_if_authority_absent(SessionId id) const;
     Result<SessionId> resolve_exact(std::string_view text) const;
     Result<CatalogReconciliation> reconcile_pending() const;
     Result<CatalogReconciliation> rebuild_catalog() const;
 
 private:
+    friend struct testing::StorageHookAccess;
     explicit SessionRepository(std::shared_ptr<State> state) : state(std::move(state)) {}
     std::shared_ptr<State> state;
 };

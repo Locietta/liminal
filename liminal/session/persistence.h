@@ -13,6 +13,10 @@
 
 namespace liminal::session {
 
+namespace testing {
+struct PersistenceQueueAccess;
+} // namespace testing
+
 struct PersistenceStatus {
     bool degraded = false;
     bool catalog_degraded = false;
@@ -47,6 +51,7 @@ struct PersistenceQueue {
 
 private:
     friend struct Session;
+    friend struct testing::PersistenceQueueAccess;
 
     enum struct PublicationState {
         UNPUBLISHED,

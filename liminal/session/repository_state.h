@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <liminal/session/catalog.h>
+#include <liminal/session/store_test.h>
 
 namespace liminal::session {
 
@@ -17,6 +18,7 @@ struct SessionRepository::State {
     std::filesystem::path root;
     SessionCatalog catalog;
     std::vector<std::string> warnings;
+    testing::StorageHook storage_hook;
     std::shared_ptr<CatalogIndexer> indexer;
 };
 

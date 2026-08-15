@@ -71,7 +71,9 @@ struct TemporaryState {
 };
 
 struct StorageHookReset {
-    ~StorageHookReset() { session::testing::set_storage_hook({}); }
+    explicit StorageHookReset(session::SessionRepository &repository) : repository(repository) {}
+    ~StorageHookReset() { session::testing::set_storage_hook(repository, {}); }
+    session::SessionRepository &repository;
 };
 
 struct Storage {
@@ -454,8 +456,8 @@ void test_blocked_catalog_projection_does_not_block_semantic_commit() {
         bool refresh_completed = false;
         bool second_commit_durable = false;
     } handshake;
-    StorageHookReset reset;
-    session::testing::set_storage_hook([&](session::testing::StorageEvent event) {
+    StorageHookReset reset(storage->repository);
+    session::testing::set_storage_hook(storage->repository, [&](session::testing::StorageEvent event) {
         std::unique_lock lock(handshake.mutex);
         if (event == session::testing::StorageEvent::CATALOG_INDEXER_BEFORE_REFRESH) {
             handshake.refresh_blocked = true;
@@ -697,6 +699,14 @@ void test_concurrent_catalog_initialization_is_serialized() {
             "concurrently initialized catalog did not finish its serialized rebuild");
 }
 
+void test_empty_catalog_creation_crash_is_recovered_exclusively() {
+    TemporaryState temporary;
+    std::ofstream(session::StatePaths{temporary.root}.catalog(), std::ios::binary).close();
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value() && !std::filesystem::exists(session::StatePaths{temporary.root}.catalog_rebuild_marker()),
+            "empty catalog left before its rebuild marker was not safely initialized");
+}
+
 void test_corrupt_catalog_repair_requires_exclusive_maintenance() {
     TemporaryState temporary;
     session::SessionId id;
@@ -725,6 +735,25 @@ void test_corrupt_catalog_repair_requires_exclusive_maintenance() {
     auto page = repaired_catalog->page({.workspace_key = "workspace"});
     require(page && page->sessions.size() == 1 && page->sessions.front().id == id,
             "corrupt-catalog repair did not rebuild published session discovery");
+}
+
+void test_missing_catalog_recreation_requires_exclusive_maintenance() {
+#ifndef _WIN32
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open missing-catalog ownership fixture");
+    const session::StatePaths paths{temporary.root};
+    std::error_code error;
+    for (const auto &path : {paths.catalog(), std::filesystem::path(paths.catalog().string() + "-wal"),
+                             std::filesystem::path(paths.catalog().string() + "-shm")}) {
+        std::filesystem::remove(path, error);
+        error.clear();
+    }
+    require(!std::filesystem::exists(paths.catalog()), "failed to unlink the live POSIX catalog fixture");
+    auto replacement = session::SessionCatalog::open(temporary.root);
+    require(!replacement && replacement.error().detail.contains("every Liminal process") && !std::filesystem::exists(paths.catalog()),
+            "missing catalog was recreated while another process-equivalent owner retained an open handle");
+#endif
 }
 
 void test_staging_cancellation_and_complete_publication() {
@@ -1028,30 +1057,30 @@ void test_persistence_queue_ordering_retry_and_flush_barriers() {
 void test_reopening_queue_tracks_asynchronous_catalog_recovery() {
     TemporaryState temporary;
     const session::StatePaths paths{temporary.root};
+    struct Attempts {
+        std::mutex mutex;
+        std::condition_variable changed;
+        usize completed = 0;
+    } attempts;
     session::Session value;
     value.metadata.workspace = session::SessionWorkspace{.root = "C:/workspace", .key = "workspace"};
     value.metadata.working_directory = "C:/workspace";
-    auto queue = session::PersistenceQueue::create_reopening(temporary.root, value.id, "initial storage failure");
+    auto queue = session::testing::create_reopening_queue(temporary.root, value.id, "initial storage failure",
+                                                          [&](session::testing::StorageEvent event) {
+                                                              if (event != session::testing::StorageEvent::CATALOG_INDEXER_AFTER_REFRESH)
+                                                                  return;
+                                                              {
+                                                                  std::scoped_lock lock(attempts.mutex);
+                                                                  ++attempts.completed;
+                                                              }
+                                                              attempts.changed.notify_all();
+                                                          });
     require(value.attach_persistence(queue).has_value(), "failed to attach reopening persistence queue");
     value.start_task("recover storage", std::max<i64>(1'000'000, value.metadata.created_at_ms));
     require(queue->flush().has_value(), "reopening queue did not recover semantic persistence");
 
     auto *catalog_blocker = open_sqlite(paths.catalog());
     execute(catalog_blocker, "PRAGMA busy_timeout=0; BEGIN IMMEDIATE", "failed to block recovery catalog");
-    struct Attempts {
-        std::mutex mutex;
-        std::condition_variable changed;
-        usize completed = 0;
-    } attempts;
-    StorageHookReset reset;
-    session::testing::set_storage_hook([&](session::testing::StorageEvent event) {
-        if (event != session::testing::StorageEvent::CATALOG_INDEXER_AFTER_REFRESH) return;
-        {
-            std::scoped_lock lock(attempts.mutex);
-            ++attempts.completed;
-        }
-        attempts.changed.notify_all();
-    });
 
     value.set_title("catalog failure after recovery");
     require(queue->flush().has_value(), "catalog failure was promoted to reopening semantic persistence failure");
@@ -1283,6 +1312,28 @@ void test_removed_archive_surface_and_state_root_override() {
 #endif
 }
 
+void test_stale_catalog_hint_removal_requires_session_lease() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open stale-hint lease fixture");
+    const auto id = deterministic_id(0x5151);
+    require(
+        storage->catalog
+            .upsert({.summary = {.id = id, .updated_at_ms = 1, .preview = "stale"}, .observed_revision = 1, .workspace_key = "workspace"})
+            .has_value(),
+        "failed to install stale catalog hint");
+    {
+        auto lease = session::acquire_session_lease(temporary.root, id);
+        require(lease.has_value(), "failed to hold stale-hint session lease");
+        auto refused = storage->repository.remove_catalog_hint_if_authority_absent(id);
+        auto retained = storage->catalog.find(id);
+        require(!refused && retained && *retained, "stale catalog hint was deleted without owning its session lease");
+    }
+    auto removed = storage->repository.remove_catalog_hint_if_authority_absent(id);
+    auto absent = storage->catalog.find(id);
+    require(removed && *removed && absent && !*absent, "lease-scoped stale catalog hint removal did not complete");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1301,7 +1352,9 @@ int main(int argc, char **argv) {
     test_missing_catalog_rebuild_includes_leased_sessions();
     test_incomplete_catalog_rebuild_is_resumed_after_crash();
     test_concurrent_catalog_initialization_is_serialized();
+    test_empty_catalog_creation_crash_is_recovered_exclusively();
     test_corrupt_catalog_repair_requires_exclusive_maintenance();
+    test_missing_catalog_recreation_requires_exclusive_maintenance();
     test_staging_cancellation_and_complete_publication();
     test_abandoned_staging_and_marker_are_reconciled();
     test_staged_final_snapshot_is_fully_validated();
@@ -1315,6 +1368,7 @@ int main(int argc, char **argv) {
     test_initial_publication_serializes_enqueued_mutations();
     test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session();
     test_prepared_switch_keeps_live_state_atomic();
+    test_stale_catalog_hint_removal_requires_session_lease();
     test_removed_archive_surface_and_state_root_override();
     return 0;
 }

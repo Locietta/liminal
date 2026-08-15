@@ -161,7 +161,9 @@ Result<AcquiredSession> SessionCoordinator::acquire_catalog_hint(session::Sessio
     auto acquired = acquire_with_workspace(id, (*hint)->workspace_key);
     if (!acquired) {
         if (acquired.error().code == ErrorCode::NOT_FOUND) {
-            if (auto removed = catalog.remove(id); !removed) return lighter::outcome_error(std::move(removed).error());
+            auto removed = repository.remove_catalog_hint_if_authority_absent(id);
+            if (!removed) return lighter::outcome_error(std::move(removed).error());
+            if (!*removed) return acquire_with_workspace(id, (*hint)->workspace_key);
         }
         return lighter::outcome_error(std::move(acquired).error());
     }

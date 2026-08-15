@@ -12,6 +12,8 @@
 
 namespace liminal::session {
 
+struct SessionRepository;
+
 struct SessionSummary {
     SessionId id;
     i64 updated_at_ms = 0;
@@ -58,7 +60,10 @@ struct SessionCatalog {
     Result<void> remove(SessionId id) const;
 
 private:
+    friend struct SessionRepository;
     explicit SessionCatalog(std::shared_ptr<State> state) : state(std::move(state)) {}
+    bool owns_rebuild_exclusivity() const noexcept;
+    Result<void> complete_rebuild() const;
     std::shared_ptr<State> state;
 };
 

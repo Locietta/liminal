@@ -91,9 +91,14 @@ std::optional<std::string> optional_text(sqlite3_stmt *statement, int column) {
 
 std::string text(sqlite3_stmt *statement, int column) { return optional_text(statement, column).value_or(""); }
 
-Result<void> initialize(sqlite3 *database, const std::filesystem::path &rebuild_marker) {
+enum struct CatalogInitialization {
+    READY,
+    NEEDS_CREATION,
+};
+
+Result<CatalogInitialization> initialize(sqlite3 *database, const std::filesystem::path &rebuild_marker, bool allow_creation) {
     if (auto begun = execute(database, "BEGIN IMMEDIATE"); !begun) return lighter::outcome_error(std::move(begun).error());
-    const auto fail = [database](Error error) -> Result<void> {
+    const auto fail = [database](Error error) -> Result<CatalogInitialization> {
         static_cast<void>(execute(database, "ROLLBACK"));
         return lighter::outcome_error(std::move(error));
     };
@@ -109,7 +114,7 @@ Result<void> initialize(sqlite3 *database, const std::filesystem::path &rebuild_
     const auto schema_version = sqlite3_column_int(version->value, 0);
     if (application_id == k_catalog_application_id && schema_version == k_catalog_schema_version) {
         if (auto committed = execute(database, "COMMIT"); !committed) return lighter::outcome_error(std::move(committed).error());
-        return {};
+        return CatalogInitialization::READY;
     }
     if (application_id != 0 || schema_version != 0) {
         return fail(Error::storage("session catalog has a foreign or unsupported schema"));
@@ -119,6 +124,10 @@ Result<void> initialize(sqlite3 *database, const std::filesystem::path &rebuild_
     if (sqlite3_step(objects->value) != SQLITE_ROW) return fail(sqlite_error(database, "cannot inspect catalog schema"));
     if (sqlite3_column_int64(objects->value, 0) != 0) {
         return fail(Error::storage("unidentified non-empty SQLite database cannot be used as the session catalog"));
+    }
+    if (!allow_creation) {
+        if (auto rolled_back = execute(database, "ROLLBACK"); !rolled_back) return lighter::outcome_error(std::move(rolled_back).error());
+        return CatalogInitialization::NEEDS_CREATION;
     }
     if (auto marked = detail::durable_replace_file(rebuild_marker, "1\n"); !marked) {
         return fail(Error::storage("cannot mark catalog rebuild incomplete: " + marked.error().message()));
@@ -138,7 +147,7 @@ PRAGMA user_version = 1;
 )sql");
     if (!created) return fail(std::move(created).error());
     if (auto committed = execute(database, "COMMIT"); !committed) return lighter::outcome_error(std::move(committed).error());
-    return {};
+    return CatalogInitialization::READY;
 }
 
 u8 hexadecimal_nibble(char character) noexcept {
@@ -175,9 +184,12 @@ struct SessionCatalog::State {
     ~State() {
         if (database) sqlite3_close(database);
     }
+    std::filesystem::path root;
     std::filesystem::path path;
     sqlite3 *database = nullptr;
+    std::optional<detail::CatalogLease> initialization_lease;
     std::optional<detail::CatalogLease> maintenance_lease;
+    bool rebuild_exclusive = false;
     mutable std::mutex mutex;
 };
 
@@ -205,10 +217,8 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
     }
     auto initialization_lease = detail::acquire_catalog_initialization_lease(state_root);
     if (!initialization_lease) return lighter::outcome_error(std::move(initialization_lease).error());
-    auto maintenance_lease = detail::acquire_catalog_lease(state_root, false);
-    if (!maintenance_lease) return lighter::outcome_error(std::move(maintenance_lease).error());
     auto state = std::make_shared<State>();
-    state->maintenance_lease = *std::move(maintenance_lease);
+    state->root = state_root;
     state->path = state_root / "catalog.sqlite3";
     const auto catalog_exists = std::filesystem::exists(state->path, error);
     if (error) return lighter::outcome_error(Error::storage("cannot inspect session catalog: " + error.message()));
@@ -217,21 +227,48 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
         if (!reparse) return lighter::outcome_error(std::move(reparse).error());
         if (*reparse) return lighter::outcome_error(Error::storage("session catalog is a symlink, junction, or reparse point"));
     }
-    const auto encoded = path_utf8(state->path);
-    const auto code =
-        sqlite3_open_v2(encoded.c_str(), &state->database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
-    if (code != SQLITE_OK) return lighter::outcome_error(sqlite_error(state->database, "cannot open session catalog", code));
-    if (sqlite3_libversion_number() < 3051003 || sqlite3_libversion_number() >= 4000000) {
-        return lighter::outcome_error(Error::storage("SQLite 3.51.3 or newer (and older than 4.0) is required"));
-    }
-    if (sqlite3_busy_timeout(state->database, 1000) != SQLITE_OK) {
-        return lighter::outcome_error(sqlite_error(state->database, "cannot configure catalog busy timeout"));
-    }
-    if (auto configured = execute(state->database, "PRAGMA synchronous=FULL;"); !configured) {
-        return lighter::outcome_error(std::move(configured).error());
-    }
-    auto initialized = initialize(state->database, StatePaths{state_root}.catalog_rebuild_marker());
+    const auto rebuild_marker = StatePaths{state_root}.catalog_rebuild_marker();
+    const auto rebuild_pending = std::filesystem::exists(rebuild_marker, error);
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect catalog rebuild marker: " + error.message()));
+    auto needs_rebuild = !catalog_exists || rebuild_pending;
+    auto maintenance_lease = detail::acquire_catalog_lease(state_root, needs_rebuild);
+    if (!maintenance_lease) return lighter::outcome_error(std::move(maintenance_lease).error());
+    state->maintenance_lease = *std::move(maintenance_lease);
+    state->rebuild_exclusive = needs_rebuild;
+    if (needs_rebuild) state->initialization_lease = *std::move(initialization_lease);
+    const auto open_database = [&]() -> Result<void> {
+        const auto encoded = path_utf8(state->path);
+        const auto code =
+            sqlite3_open_v2(encoded.c_str(), &state->database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
+        if (code != SQLITE_OK) return lighter::outcome_error(sqlite_error(state->database, "cannot open session catalog", code));
+        if (sqlite3_libversion_number() < 3051003 || sqlite3_libversion_number() >= 4000000) {
+            return lighter::outcome_error(Error::storage("SQLite 3.51.3 or newer (and older than 4.0) is required"));
+        }
+        if (sqlite3_busy_timeout(state->database, 1000) != SQLITE_OK) {
+            return lighter::outcome_error(sqlite_error(state->database, "cannot configure catalog busy timeout"));
+        }
+        if (auto configured = execute(state->database, "PRAGMA synchronous=FULL;"); !configured) {
+            return lighter::outcome_error(std::move(configured).error());
+        }
+        return {};
+    };
+    if (auto opened = open_database(); !opened) return lighter::outcome_error(std::move(opened).error());
+    auto initialized = initialize(state->database, rebuild_marker, needs_rebuild);
     if (!initialized) return lighter::outcome_error(std::move(initialized).error());
+    if (*initialized == CatalogInitialization::NEEDS_CREATION) {
+        if (sqlite3_close(state->database) != SQLITE_OK)
+            return lighter::outcome_error(Error::storage("cannot close unidentified session catalog"));
+        state->database = nullptr;
+        state->maintenance_lease.reset();
+        auto exclusive = detail::acquire_catalog_lease(state_root, true);
+        if (!exclusive) return lighter::outcome_error(std::move(exclusive).error());
+        state->maintenance_lease = *std::move(exclusive);
+        state->rebuild_exclusive = true;
+        state->initialization_lease = *std::move(initialization_lease);
+        if (auto opened = open_database(); !opened) return lighter::outcome_error(std::move(opened).error());
+        initialized = initialize(state->database, rebuild_marker, true);
+        if (!initialized) return lighter::outcome_error(std::move(initialized).error());
+    }
     auto wal = prepare(state->database, "PRAGMA journal_mode=WAL");
     if (!wal) return lighter::outcome_error(std::move(wal).error());
     if (sqlite3_step(wal->value) != SQLITE_ROW || text(wal->value, 0) != "wal") {
@@ -241,19 +278,22 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
 }
 
 Result<SessionCatalog> SessionCatalog::repair_corrupt(const std::filesystem::path &state_root) {
-    const auto catalog = state_root / "catalog.sqlite3";
-    std::error_code error;
-    if (std::filesystem::exists(catalog, error)) {
-        auto reparse = detail::is_reparse_point(catalog);
-        if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-        if (*reparse) return lighter::outcome_error(Error::storage("refusing to replace a catalog symlink, junction, or reparse point"));
-    }
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect corrupt catalog: " + error.message()));
-    if (!std::filesystem::is_regular_file(catalog, error)) {
+    const auto replaced = [&]() -> Result<void> {
+        auto initialization = detail::acquire_catalog_initialization_lease(state_root);
+        if (!initialization) return lighter::outcome_error(std::move(initialization).error());
+        const auto catalog = state_root / "catalog.sqlite3";
+        std::error_code error;
+        if (std::filesystem::exists(catalog, error)) {
+            auto reparse = detail::is_reparse_point(catalog);
+            if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+            if (*reparse)
+                return lighter::outcome_error(Error::storage("refusing to replace a catalog symlink, junction, or reparse point"));
+        }
         if (error) return lighter::outcome_error(Error::storage("cannot inspect corrupt catalog: " + error.message()));
-        return lighter::outcome_error(Error::storage("cannot repair an absent session catalog"));
-    }
-    {
+        if (!std::filesystem::is_regular_file(catalog, error)) {
+            if (error) return lighter::outcome_error(Error::storage("cannot inspect corrupt catalog: " + error.message()));
+            return lighter::outcome_error(Error::storage("cannot repair an absent session catalog"));
+        }
         auto maintenance = detail::acquire_catalog_lease(state_root, true);
         if (!maintenance) return lighter::outcome_error(std::move(maintenance).error());
         const auto suffix = ".corrupt." + to_string(generate_session_id());
@@ -268,13 +308,32 @@ Result<SessionCatalog> SessionCatalog::repair_corrupt(const std::filesystem::pat
             std::filesystem::rename(source, source.string() + suffix, error);
             if (error) return lighter::outcome_error(Error::storage("cannot preserve corrupt catalog sidecar: " + error.message()));
         }
-    }
+        return {};
+    }();
+    if (!replaced) return lighter::outcome_error(std::move(replaced).error());
     auto replacement = open(state_root);
     if (!replacement) return lighter::outcome_error(std::move(replacement).error());
     return *std::move(replacement);
 }
 
 const std::filesystem::path &SessionCatalog::path() const noexcept { return state->path; }
+
+bool SessionCatalog::owns_rebuild_exclusivity() const noexcept {
+    return state->rebuild_exclusive && state->initialization_lease.has_value() && state->maintenance_lease.has_value();
+}
+
+Result<void> SessionCatalog::complete_rebuild() const {
+    if (!owns_rebuild_exclusivity()) {
+        return lighter::outcome_error(Error::storage("catalog rebuild completion does not own exclusive maintenance"));
+    }
+    state->maintenance_lease.reset();
+    auto shared = detail::acquire_catalog_lease(state->root, false);
+    if (!shared) return lighter::outcome_error(std::move(shared).error());
+    state->maintenance_lease = *std::move(shared);
+    state->rebuild_exclusive = false;
+    state->initialization_lease.reset();
+    return {};
+}
 
 Result<SessionId> SessionCatalog::resolve_prefix(std::string_view value) const {
     std::string prefix;
