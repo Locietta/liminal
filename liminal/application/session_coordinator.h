@@ -112,6 +112,8 @@ struct SessionCoordinator {
     Result<session::SessionPage> page(const session::SessionPageQuery &query) const;
     Result<AcquiredSession> acquire(session::SessionId id) const;
     Result<AcquiredSession> acquire_in_workspace(session::SessionId id, std::string_view workspace_key) const;
+    Result<AcquiredSession> acquire_catalog_hint(session::SessionId id) const;
+    Result<AcquiredSession> acquire_latest(std::string_view workspace_key) const;
     Result<PreparedSession> resolve_model(AcquiredSession acquired) const;
     Result<PreparedSession> prepare(session::SessionId id) const;
     Result<ForkPlan> prepare_fork(const session::Session &source, session::ConversationCheckpointId checkpoint) const;

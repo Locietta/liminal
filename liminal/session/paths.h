@@ -18,6 +18,7 @@ struct StatePaths {
     std::filesystem::path root;
 
     std::filesystem::path catalog() const;
+    std::filesystem::path catalog_rebuild_marker() const;
     std::filesystem::path sessions() const;
     std::filesystem::path staging() const;
     std::filesystem::path catalog_pending() const;

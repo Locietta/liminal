@@ -140,7 +140,9 @@ struct Error {
     static Error command(std::string detail) { return {.kind = ErrorKind::COMMAND, .detail = std::move(detail)}; }
 
     static Error tool(std::string detail) { return {.kind = ErrorKind::TOOL, .detail = std::move(detail)}; }
-    static Error storage(std::string detail) { return {.kind = ErrorKind::STORAGE, .detail = std::move(detail)}; }
+    static Error storage(std::string detail, ErrorCode code = ErrorCode::NONE) {
+        return {.kind = ErrorKind::STORAGE, .code = code, .detail = std::move(detail)};
+    }
 };
 
 template <typename T>

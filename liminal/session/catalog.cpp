@@ -2,6 +2,7 @@
 
 #include "catalog_lease.h"
 #include "durable_fs.h"
+#include "paths.h"
 
 #include <algorithm>
 #include <array>
@@ -90,9 +91,9 @@ std::optional<std::string> optional_text(sqlite3_stmt *statement, int column) {
 
 std::string text(sqlite3_stmt *statement, int column) { return optional_text(statement, column).value_or(""); }
 
-Result<bool> initialize(sqlite3 *database) {
+Result<void> initialize(sqlite3 *database, const std::filesystem::path &rebuild_marker) {
     if (auto begun = execute(database, "BEGIN IMMEDIATE"); !begun) return lighter::outcome_error(std::move(begun).error());
-    const auto fail = [database](Error error) -> Result<bool> {
+    const auto fail = [database](Error error) -> Result<void> {
         static_cast<void>(execute(database, "ROLLBACK"));
         return lighter::outcome_error(std::move(error));
     };
@@ -108,7 +109,7 @@ Result<bool> initialize(sqlite3 *database) {
     const auto schema_version = sqlite3_column_int(version->value, 0);
     if (application_id == k_catalog_application_id && schema_version == k_catalog_schema_version) {
         if (auto committed = execute(database, "COMMIT"); !committed) return lighter::outcome_error(std::move(committed).error());
-        return false;
+        return {};
     }
     if (application_id != 0 || schema_version != 0) {
         return fail(Error::storage("session catalog has a foreign or unsupported schema"));
@@ -118,6 +119,9 @@ Result<bool> initialize(sqlite3 *database) {
     if (sqlite3_step(objects->value) != SQLITE_ROW) return fail(sqlite_error(database, "cannot inspect catalog schema"));
     if (sqlite3_column_int64(objects->value, 0) != 0) {
         return fail(Error::storage("unidentified non-empty SQLite database cannot be used as the session catalog"));
+    }
+    if (auto marked = detail::durable_replace_file(rebuild_marker, "1\n"); !marked) {
+        return fail(Error::storage("cannot mark catalog rebuild incomplete: " + marked.error().message()));
     }
     auto created = execute(database, R"sql(
 CREATE TABLE sessions (
@@ -134,7 +138,7 @@ PRAGMA user_version = 1;
 )sql");
     if (!created) return fail(std::move(created).error());
     if (auto committed = execute(database, "COMMIT"); !committed) return lighter::outcome_error(std::move(committed).error());
-    return true;
+    return {};
 }
 
 u8 hexadecimal_nibble(char character) noexcept {
@@ -173,9 +177,7 @@ struct SessionCatalog::State {
     }
     std::filesystem::path path;
     sqlite3 *database = nullptr;
-    bool created = false;
     std::optional<detail::CatalogLease> maintenance_lease;
-    std::optional<detail::CatalogLease> initialization_lease;
     mutable std::mutex mutex;
 };
 
@@ -228,10 +230,8 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
     if (auto configured = execute(state->database, "PRAGMA synchronous=FULL;"); !configured) {
         return lighter::outcome_error(std::move(configured).error());
     }
-    auto initialized = initialize(state->database);
+    auto initialized = initialize(state->database, StatePaths{state_root}.catalog_rebuild_marker());
     if (!initialized) return lighter::outcome_error(std::move(initialized).error());
-    state->created = *initialized;
-    if (state->created) state->initialization_lease = *std::move(initialization_lease);
     auto wal = prepare(state->database, "PRAGMA journal_mode=WAL");
     if (!wal) return lighter::outcome_error(std::move(wal).error());
     if (sqlite3_step(wal->value) != SQLITE_ROW || text(wal->value, 0) != "wal") {
@@ -271,13 +271,10 @@ Result<SessionCatalog> SessionCatalog::repair_corrupt(const std::filesystem::pat
     }
     auto replacement = open(state_root);
     if (!replacement) return lighter::outcome_error(std::move(replacement).error());
-    replacement->state->created = true;
     return *std::move(replacement);
 }
 
 const std::filesystem::path &SessionCatalog::path() const noexcept { return state->path; }
-bool SessionCatalog::was_created() const noexcept { return state->created; }
-void SessionCatalog::finish_initialization() const { state->initialization_lease.reset(); }
 
 Result<SessionId> SessionCatalog::resolve_prefix(std::string_view value) const {
     std::string prefix;

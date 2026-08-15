@@ -111,7 +111,10 @@ Result<AcquiredSession> SessionCoordinator::acquire_with_workspace(session::Sess
     auto loaded = writer->load();
     if (!loaded) return lighter::outcome_error(std::move(loaded).error());
     if (workspace_key && (!loaded->metadata.workspace || loaded->metadata.workspace->key != *workspace_key)) {
-        static_cast<void>(writer->refresh_catalog());
+        if (auto refreshed = writer->refresh_catalog(); !refreshed) {
+            return lighter::outcome_error(
+                Error::storage("selected catalog row has a stale workspace and could not be repaired: " + refreshed.error().message()));
+        }
         return lighter::outcome_error(Error::storage("selected catalog row does not match the session's immutable workspace"));
     }
 
@@ -151,17 +154,33 @@ Result<PreparedSession> SessionCoordinator::prepare(session::SessionId id) const
     return resolve_model(*std::move(acquired));
 }
 
-Result<PreparedSession> SessionCoordinator::prepare_catalog_hint(session::SessionId id) const {
+Result<AcquiredSession> SessionCoordinator::acquire_catalog_hint(session::SessionId id) const {
     auto hint = catalog.find(id);
     if (!hint) return lighter::outcome_error(std::move(hint).error());
-    if (!*hint) return lighter::outcome_error(Error::storage("selected session is no longer present in the catalog"));
+    if (!*hint) return lighter::outcome_error(Error::storage("selected session is no longer present in the catalog", ErrorCode::NOT_FOUND));
     auto acquired = acquire_with_workspace(id, (*hint)->workspace_key);
     if (!acquired) {
-        if (acquired.error().detail == "session was not found" || acquired.error().detail == "published session database is absent") {
-            static_cast<void>(catalog.remove(id));
+        if (acquired.error().code == ErrorCode::NOT_FOUND) {
+            if (auto removed = catalog.remove(id); !removed) return lighter::outcome_error(std::move(removed).error());
         }
         return lighter::outcome_error(std::move(acquired).error());
     }
+    return acquired;
+}
+
+Result<AcquiredSession> SessionCoordinator::acquire_latest(std::string_view workspace_key) const {
+    while (true) {
+        auto latest = catalog.latest(workspace_key);
+        if (!latest) return lighter::outcome_error(std::move(latest).error());
+        auto acquired = acquire_catalog_hint(latest->id);
+        if (acquired) return acquired;
+        if (acquired.error().code != ErrorCode::NOT_FOUND) return lighter::outcome_error(std::move(acquired).error());
+    }
+}
+
+Result<PreparedSession> SessionCoordinator::prepare_catalog_hint(session::SessionId id) const {
+    auto acquired = acquire_catalog_hint(id);
+    if (!acquired) return lighter::outcome_error(std::move(acquired).error());
     return resolve_model(*std::move(acquired));
 }
 

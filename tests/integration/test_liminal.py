@@ -527,10 +527,15 @@ def test_session_continue_direct_resume_and_locking(openai_mock, tmp_path):
     import sqlite3
 
     with sqlite3.connect(tmp_path / "catalog.sqlite3") as database:
-        session_hex = database.execute(
-            "SELECT lower(hex(id)) FROM sessions"
-        ).fetchone()[0]
+        session_hex, workspace_key = database.execute(
+            "SELECT lower(hex(id)), workspace_key FROM sessions"
+        ).fetchone()
         session_id = str(uuid.UUID(hex=session_hex))
+        missing_id = uuid.uuid4()
+        database.execute(
+            "INSERT INTO sessions(id,observed_revision,workspace_key,updated_at_ms,title,preview) VALUES(?,1,?,?,'missing','missing')",
+            (missing_id.bytes, workspace_key, 9_000_000_000_000),
+        )
 
     continued = subprocess.run(
         [str(BINARY), "continue"],
@@ -550,6 +555,13 @@ def test_session_continue_direct_resume_and_locking(openai_mock, tmp_path):
     assert (
         continued.stdout.count("The working directory is the liminal repository.") >= 2
     )
+    with sqlite3.connect(tmp_path / "catalog.sqlite3") as database:
+        assert (
+            database.execute(
+                "SELECT count(*) FROM sessions WHERE id=?", (missing_id.bytes,)
+            ).fetchone()[0]
+            == 0
+        )
 
     other_workspace = tmp_path / "other-workspace"
     other_workspace.mkdir()

@@ -85,28 +85,13 @@ Result<AcquiredStartupSession> acquire_startup_session(const StartupOptions &opt
     if (!repository) return lighter::outcome_error(std::move(repository).error());
     application::SessionCoordinator coordinator(*repository, *catalog, preparation_services(models, tools, configured_model_selector()));
 
-    session::SessionId selected_id;
-    std::optional<std::string> expected_workspace;
-    if (options.kind == StartupKind::RESUME) {
+    auto acquired = [&]() -> Result<application::AcquiredSession> {
+        if (options.kind != StartupKind::RESUME) return coordinator.acquire_latest(workspace.key);
         const auto exact = options.session.size() == 36;
         auto resolved = exact ? repository->resolve_exact(options.session) : catalog->resolve_prefix(options.session);
         if (!resolved) return lighter::outcome_error(std::move(resolved).error());
-        selected_id = *resolved;
-        if (!exact) {
-            auto hint = catalog->find(selected_id);
-            if (!hint) return lighter::outcome_error(std::move(hint).error());
-            if (!*hint) return lighter::outcome_error(Error::storage("selected session is no longer present in the catalog"));
-            expected_workspace = (*hint)->workspace_key;
-        }
-    } else {
-        auto latest = catalog->latest(workspace.key);
-        if (!latest) return lighter::outcome_error(std::move(latest).error());
-        selected_id = latest->id;
-        expected_workspace = workspace.key;
-    }
-
-    auto acquired =
-        expected_workspace ? coordinator.acquire_in_workspace(selected_id, *expected_workspace) : coordinator.acquire(selected_id);
+        return exact ? coordinator.acquire(*resolved) : coordinator.acquire_catalog_hint(*resolved);
+    }();
     if (!acquired) return lighter::outcome_error(std::move(acquired).error());
     for (const auto &warning : repository->warnings()) acquired->notices.push_back("[session catalog warning: " + warning + "]\n");
     return AcquiredStartupSession{.coordinator = std::move(coordinator), .acquired = *std::move(acquired)};

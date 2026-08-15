@@ -22,6 +22,47 @@ using namespace std::chrono_literals;
 constexpr std::array k_retry_delays{100ms, 300ms, 1000ms};
 constexpr auto k_background_retry_delay = 5s;
 
+struct LazyWriterState {
+    std::mutex mutex;
+    std::shared_ptr<SessionWriter> writer;
+};
+
+struct LazyWriterCallbacks {
+    PersistenceQueue::Commit commit;
+    PersistenceQueue::CatalogStatus status;
+};
+
+using OpenWriter = std::copyable_function<Result<SessionWriter>() const>;
+
+LazyWriterCallbacks lazy_writer_callbacks(OpenWriter open_writer) {
+    auto state = std::make_shared<LazyWriterState>();
+    PersistenceQueue::Commit commit = [state,
+                                       open_writer = std::move(open_writer)](const SessionDelta &delta) -> Result<SessionCommitResult> {
+        std::shared_ptr<SessionWriter> writer;
+        {
+            std::scoped_lock lock(state->mutex);
+            writer = state->writer;
+        }
+        if (!writer) {
+            auto opened = open_writer();
+            if (!opened) return lighter::outcome_error(std::move(opened).error());
+            writer = std::make_shared<SessionWriter>(*std::move(opened));
+            std::scoped_lock lock(state->mutex);
+            state->writer = writer;
+        }
+        return writer->commit(delta);
+    };
+    PersistenceQueue::CatalogStatus status = [state] {
+        std::shared_ptr<SessionWriter> writer;
+        {
+            std::scoped_lock lock(state->mutex);
+            writer = state->writer;
+        }
+        return writer ? writer->catalog_status() : CatalogRefreshStatus{};
+    };
+    return {.commit = std::move(commit), .status = std::move(status)};
+}
+
 } // namespace
 
 std::shared_ptr<PersistenceQueue> PersistenceQueue::create(SessionWriter writer) {
@@ -59,50 +100,31 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create_unpublished_for_test(
 }
 
 std::shared_ptr<PersistenceQueue> PersistenceQueue::create_reopening(std::filesystem::path state_root, SessionId id, std::string detail) {
-    struct ReopeningStore {
-        std::filesystem::path path;
-        SessionId id;
-        std::optional<SessionWriter> writer;
-    };
-    auto reopening = std::make_shared<ReopeningStore>(ReopeningStore{.path = std::move(state_root), .id = id});
-    Commit commit = [reopening](const SessionDelta &delta) -> Result<SessionCommitResult> {
-        if (!reopening->writer) {
-            auto catalog = SessionCatalog::open(reopening->path);
-            if (!catalog) return lighter::outcome_error(std::move(catalog).error());
-            auto repository = SessionRepository::open(reopening->path, *std::move(catalog));
-            if (!repository) return lighter::outcome_error(std::move(repository).error());
-            auto writer = repository->create(reopening->id);
-            if (!writer) return lighter::outcome_error(std::move(writer).error());
-            reopening->writer = *std::move(writer);
-        }
-        return reopening->writer->commit(delta);
-    };
-    auto queue = std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::ACTIVE));
+    auto callbacks = lazy_writer_callbacks([state_root = std::move(state_root), id]() -> Result<SessionWriter> {
+        auto catalog = SessionCatalog::open(state_root);
+        if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+        auto repository = SessionRepository::open(state_root, *std::move(catalog));
+        if (!repository) return lighter::outcome_error(std::move(repository).error());
+        return repository->create(id);
+    });
+    auto queue = std::shared_ptr<PersistenceQueue>(
+        new PersistenceQueue(id, std::move(callbacks.commit), PublicationState::ACTIVE, std::move(callbacks.status)));
     queue->mark_degraded(std::move(detail));
     return queue;
 }
 
 std::shared_ptr<PersistenceQueue> PersistenceQueue::create_resolving(SessionId id, std::string detail) {
-    struct ResolvingStore {
-        SessionId id;
-        std::optional<SessionWriter> writer;
-    };
-    auto resolving = std::make_shared<ResolvingStore>(ResolvingStore{.id = id});
-    Commit commit = [resolving](const SessionDelta &delta) -> Result<SessionCommitResult> {
-        if (!resolving->writer) {
-            auto path = state_root_path();
-            if (!path) return lighter::outcome_error(std::move(path).error());
-            auto catalog = SessionCatalog::open(*path);
-            if (!catalog) return lighter::outcome_error(std::move(catalog).error());
-            auto repository = SessionRepository::open(*path, *std::move(catalog));
-            if (!repository) return lighter::outcome_error(std::move(repository).error());
-            auto writer = repository->create(resolving->id);
-            if (!writer) return lighter::outcome_error(std::move(writer).error());
-            resolving->writer = *std::move(writer);
-        }
-        return resolving->writer->commit(delta);
-    };
-    auto queue = std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::ACTIVE));
+    auto callbacks = lazy_writer_callbacks([id]() -> Result<SessionWriter> {
+        auto path = state_root_path();
+        if (!path) return lighter::outcome_error(std::move(path).error());
+        auto catalog = SessionCatalog::open(*path);
+        if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+        auto repository = SessionRepository::open(*path, *std::move(catalog));
+        if (!repository) return lighter::outcome_error(std::move(repository).error());
+        return repository->create(id);
+    });
+    auto queue = std::shared_ptr<PersistenceQueue>(
+        new PersistenceQueue(id, std::move(callbacks.commit), PublicationState::ACTIVE, std::move(callbacks.status)));
     queue->mark_degraded(std::move(detail));
     return queue;
 }

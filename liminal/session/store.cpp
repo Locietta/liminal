@@ -1,6 +1,8 @@
 #include "store.h"
+#include "store_test.h"
 
 #include "catalog.h"
+#include "catalog_lease.h"
 #include "codec.h"
 #include "durable_fs.h"
 #include "lease.h"
@@ -36,6 +38,17 @@ namespace {
 constexpr int k_session_application_id = 0x4c494d53;
 constexpr int k_session_schema_version = 1;
 constexpr usize k_marker_maximum_size = 64;
+std::mutex storage_test_hook_mutex;
+testing::StorageHook storage_test_hook;
+
+void notify_storage_test_hook(testing::StorageEvent event) {
+    testing::StorageHook hook;
+    {
+        std::scoped_lock lock(storage_test_hook_mutex);
+        hook = storage_test_hook;
+    }
+    if (hook) hook(event);
+}
 
 std::string path_utf8(const std::filesystem::path &path) {
     const auto value = path.generic_u8string();
@@ -249,6 +262,7 @@ struct DurableHead {
     i64 created_at_ms = 0;
     i64 updated_at_ms = 0;
     std::optional<SessionWorkspace> workspace;
+    std::optional<ForkOrigin> forked_from;
     std::optional<std::string> title;
     std::string preview;
 };
@@ -265,6 +279,9 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
     }
     if (head.exists && delta.metadata.workspace != head.workspace) {
         return lighter::outcome_error(Error::storage("session delta changes immutable workspace association"));
+    }
+    if (head.exists && delta.metadata.forked_from != head.forked_from) {
+        return lighter::outcome_error(Error::storage("session delta changes immutable fork provenance"));
     }
     if (delta.metadata.preview.size() > 240 || !lighter::encoding::utf8::is_valid(delta.metadata.preview)) {
         return lighter::outcome_error(Error::storage("session delta has an invalid preview"));
@@ -438,15 +455,25 @@ Result<CatalogProjection> read_published_projection(const StatePaths &paths, Ses
     return projection;
 }
 
-Result<void> refresh_projection(const StatePaths &paths, const SessionCatalog &catalog, SessionId id) {
+Result<CatalogProjection> upsert_projection(const StatePaths &paths, const SessionCatalog &catalog, SessionId id) {
     auto projection = read_published_projection(paths, id);
     if (!projection) return lighter::outcome_error(std::move(projection).error());
-    if (auto projected = catalog.upsert(*projection); !projected) return projected;
+    if (auto projected = catalog.upsert(*projection); !projected) return lighter::outcome_error(std::move(projected).error());
+    return projection;
+}
+
+Result<void> settle_projection_marker(const StatePaths &paths, SessionId id, u64 observed_revision) {
     std::error_code error;
     const auto marker_exists = std::filesystem::exists(paths.pending_marker(id), error);
     if (error) return lighter::outcome_error(Error::storage("cannot inspect pending catalog marker: " + error.message()));
     if (!marker_exists) return {};
-    return remove_marker_if_satisfied(paths, id, projection->observed_revision);
+    return remove_marker_if_satisfied(paths, id, observed_revision);
+}
+
+Result<void> refresh_projection(const StatePaths &paths, const SessionCatalog &catalog, SessionId id) {
+    auto projection = upsert_projection(paths, catalog, id);
+    if (!projection) return lighter::outcome_error(std::move(projection).error());
+    return settle_projection_marker(paths, id, projection->observed_revision);
 }
 
 void bind_singleton(sqlite3_stmt *statement, const SessionDelta &delta, SessionId id, u64 revision) {
@@ -514,6 +541,7 @@ DurableHead head_from_delta(const SessionDelta &delta, u64 revision) {
             .created_at_ms = delta.metadata.created_at_ms,
             .updated_at_ms = delta.metadata.updated_at_ms,
             .workspace = delta.metadata.workspace,
+            .forked_from = delta.metadata.forked_from,
             .title = delta.metadata.title,
             .preview = delta.metadata.preview};
 }
@@ -611,7 +639,7 @@ struct SessionWriter::State {
     sqlite3 *database = nullptr;
     std::filesystem::path staging_directory;
     DurableHead head;
-    std::vector<EncodedEntry> staged_entries;
+    std::optional<PreparedDelta> staged_initial;
     bool published = false;
     bool staged = false;
     std::mutex mutex;
@@ -683,7 +711,7 @@ VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?2
     insert->value = nullptr;
     if (sqlite3_close(database) != SQLITE_OK) return lighter::outcome_error(Error::storage("cannot close staged session database"));
     state.head = head_from_delta(prepared.delta, 1);
-    state.staged_entries = prepared.entries;
+    state.staged_initial = prepared;
     state.staged = true;
     return {};
 }
@@ -698,12 +726,20 @@ bool same_entry(const EncodedEntry &left, const EncodedEntry &right) {
 Result<void> validate_staged_final(const SessionWriter::State &state, const SessionDelta &delta) {
     auto prepared = prepare_delta(delta, {});
     if (!prepared) return lighter::outcome_error(std::move(prepared).error());
-    if (prepared->entries.size() != state.staged_entries.size() ||
-        !std::ranges::equal(prepared->entries, state.staged_entries, same_entry)) {
+    if (!state.staged_initial) return lighter::outcome_error(Error::storage("staged publication has no retained baseline"));
+    const auto &initial = state.staged_initial->delta;
+    if (prepared->entries.size() != state.staged_initial->entries.size() ||
+        !std::ranges::equal(prepared->entries, state.staged_initial->entries, same_entry)) {
         return lighter::outcome_error(Error::storage("staged publication snapshot changed its authoritative semantic prefix"));
     }
-    if (delta.metadata.created_at_ms != state.head.created_at_ms || delta.metadata.workspace != state.head.workspace) {
+    if (delta.metadata.created_at_ms != initial.metadata.created_at_ms || delta.metadata.workspace != initial.metadata.workspace ||
+        delta.metadata.forked_from != initial.metadata.forked_from) {
         return lighter::outcome_error(Error::storage("staged publication snapshot changed immutable session metadata"));
+    }
+    if (delta.metadata.updated_at_ms < initial.metadata.updated_at_ms || delta.next_entry_id < initial.next_entry_id ||
+        delta.next_task_id < initial.next_task_id || delta.next_provider_call_id < initial.next_provider_call_id ||
+        delta.entry_count < initial.entry_count || delta.tokens_used < initial.tokens_used) {
+        return lighter::outcome_error(Error::storage("staged publication snapshot regresses its retained baseline"));
     }
     return {};
 }
@@ -746,7 +782,10 @@ Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const Ses
     if (auto updated = update_staged_singleton(state, delta); !updated) return lighter::outcome_error(std::move(updated).error());
     const StatePaths paths{state.repository->root};
     std::optional<std::string> degradation;
-    if (auto marker = write_marker(paths, state.id, 1); !marker) degradation = marker.error().message();
+    {
+        std::scoped_lock marker_lock(state.invalidation->mutex);
+        if (auto marker = write_marker(paths, state.id, 1); !marker) degradation = marker.error().message();
+    }
     if (auto published = detail::publish_directory_without_replacement(state.staging_directory, paths.session_directory(state.id));
         !published) {
         return lighter::outcome_error(std::move(published).error());
@@ -754,7 +793,7 @@ Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const Ses
     state.staging_directory.clear();
     state.published = true;
     state.staged = false;
-    state.staged_entries.clear();
+    state.staged_initial.reset();
     auto opened = open_database(paths.session_database(state.id), false, true);
     if (!opened) return lighter::outcome_error(std::move(opened).error());
     state.database = *opened;
@@ -765,8 +804,13 @@ Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const Ses
 
 SessionCommitResult project_publication(SessionWriter::State &state, PublishedAuthority published) {
     const StatePaths paths{state.repository->root};
-    if (auto projected = refresh_projection(paths, state.repository->catalog, state.id); !projected) {
-        published.degradation = projected.error().message();
+    auto projection = upsert_projection(paths, state.repository->catalog, state.id);
+    if (!projection) {
+        published.degradation = projection.error().message();
+    } else {
+        std::scoped_lock marker_lock(state.invalidation->mutex);
+        if (auto settled = settle_projection_marker(paths, state.id, projection->observed_revision); !settled)
+            published.degradation = settled.error().message();
     }
     set_catalog_status(*state.invalidation, published.degradation);
     return {.catalog_degradation = std::move(published.degradation)};
@@ -799,18 +843,32 @@ struct CatalogIndexer {
     }
 
     Result<void> refresh_live(SessionId id, CatalogInvalidationOwner &owner) {
-        std::unique_lock lock(owner.mutex);
-        auto refreshed = refresh_projection(paths, catalog, id);
-        set_catalog_status(owner, refreshed ? std::nullopt : std::optional{refreshed.error().message()});
-        return refreshed;
+        auto projection = upsert_projection(paths, catalog, id);
+        if (!projection) {
+            set_catalog_status(owner, projection.error().message());
+            return lighter::outcome_error(std::move(projection).error());
+        }
+        Result<void> settled;
+        {
+            std::scoped_lock marker_lock(owner.mutex);
+            settled = settle_projection_marker(paths, id, projection->observed_revision);
+        }
+        set_catalog_status(owner, settled ? std::nullopt : std::optional{settled.error().message()});
+        return settled;
     }
 
 private:
     Result<void> refresh(const Request &request) {
-        if (auto owner = request.owner.lock()) return refresh_live(request.id, *owner);
-        auto lease = acquire_session_lease(paths.root, request.id);
-        if (!lease) return lighter::outcome_error(std::move(lease).error());
-        return refresh_projection(paths, catalog, request.id);
+        notify_storage_test_hook(testing::StorageEvent::CATALOG_INDEXER_BEFORE_REFRESH);
+        Result<void> result;
+        if (auto owner = request.owner.lock()) {
+            result = refresh_live(request.id, *owner);
+        } else {
+            auto lease = acquire_session_lease(paths.root, request.id);
+            result = lease ? refresh_projection(paths, catalog, request.id) : lighter::outcome_error(std::move(lease).error());
+        }
+        notify_storage_test_hook(testing::StorageEvent::CATALOG_INDEXER_AFTER_REFRESH);
+        return result;
     }
 
     void run(std::stop_token stop) {
@@ -953,7 +1011,6 @@ Result<CatalogProjection> SessionWriter::projection() const {
 }
 
 Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
-    std::unique_lock invalidation_lock(state->invalidation->mutex);
     DurableHead head;
     bool staged = false;
     {
@@ -990,11 +1047,15 @@ Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
                                  delta.metadata.preview != state->head.preview;
     const StatePaths paths{state->repository->root};
     std::optional<std::string> degradation;
-    std::error_code marker_error;
-    const bool projection_pending = std::filesystem::exists(paths.pending_marker(state->id), marker_error);
-    if (marker_error && !degradation) degradation = "cannot inspect pending catalog marker: " + marker_error.message();
-    if (catalog_visible || projection_pending) {
-        if (auto marker = write_marker(paths, state->id, target_revision); !marker) degradation = marker.error().message();
+    bool projection_pending = false;
+    {
+        std::scoped_lock marker_lock(state->invalidation->mutex);
+        std::error_code marker_error;
+        projection_pending = std::filesystem::exists(paths.pending_marker(state->id), marker_error);
+        if (marker_error && !degradation) degradation = "cannot inspect pending catalog marker: " + marker_error.message();
+        if (catalog_visible || projection_pending) {
+            if (auto marker = write_marker(paths, state->id, target_revision); !marker) degradation = marker.error().message();
+        }
     }
     if (auto begun = execute(state->database, "BEGIN IMMEDIATE"); !begun) return lighter::outcome_error(std::move(begun).error());
     auto revision = prepare(state->database, "SELECT revision FROM session WHERE singleton=1");
@@ -1049,14 +1110,14 @@ WHERE singleton=1 AND revision=?1
         return lighter::outcome_error(std::move(committed).error());
     }
     state->head = head_from_delta(delta, target_revision);
+    notify_storage_test_hook(testing::StorageEvent::AUTHORITATIVE_COMMIT_COMPLETED);
     lock.unlock();
     if (catalog_visible || projection_pending) {
         if (title_changed) {
-            if (auto projected = refresh_projection(paths, state->repository->catalog, state->id); !projected) {
+            if (auto projected = state->repository->indexer->refresh_live(state->id, *state->invalidation); !projected) {
                 degradation = projected.error().message();
                 state->repository->indexer->enqueue(state->id, state->invalidation);
             }
-            set_catalog_status(*state->invalidation, degradation);
         } else {
             if (degradation) set_catalog_status(*state->invalidation, degradation);
             state->repository->indexer->enqueue(state->id, state->invalidation);
@@ -1074,6 +1135,11 @@ Result<void> SessionWriter::refresh_catalog() {
 CatalogRefreshStatus SessionWriter::catalog_status() const {
     std::scoped_lock lock(state->invalidation->status_mutex);
     return state->invalidation->status;
+}
+
+void testing::set_storage_hook(StorageHook hook) {
+    std::scoped_lock lock(storage_test_hook_mutex);
+    storage_test_hook = std::move(hook);
 }
 
 SessionDelta make_delta(const Session &session, std::span<const SessionEntry> entries) {
@@ -1117,6 +1183,25 @@ Result<CatalogReconciliation> cleanup_abandoned_staging(const StatePaths &paths)
     return result;
 }
 
+Result<bool> catalog_rebuild_pending(const StatePaths &paths) {
+    const auto marker = paths.catalog_rebuild_marker();
+    std::error_code error;
+    const auto exists = std::filesystem::exists(marker, error);
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect catalog rebuild marker: " + error.message()));
+    if (!exists) return false;
+    auto reparse = detail::is_reparse_point(marker);
+    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+    if (*reparse) return lighter::outcome_error(Error::storage("catalog rebuild marker is a symlink, junction, or reparse point"));
+    if (!std::filesystem::is_regular_file(marker, error)) {
+        if (error) return lighter::outcome_error(Error::storage("cannot inspect catalog rebuild marker: " + error.message()));
+        return lighter::outcome_error(Error::storage("catalog rebuild marker is not a regular file"));
+    }
+    std::ifstream input(marker, std::ios::binary);
+    std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    if (!input || contents != "1\n") return lighter::outcome_error(Error::storage("catalog rebuild marker has invalid format"));
+    return true;
+}
+
 } // namespace
 
 Result<SessionRepository> SessionRepository::open(std::filesystem::path state_root, SessionCatalog catalog) {
@@ -1132,12 +1217,19 @@ Result<SessionRepository> SessionRepository::open(std::filesystem::path state_ro
     if (!staging) return lighter::outcome_error(std::move(staging).error());
     repository.state->warnings.insert(repository.state->warnings.end(), std::make_move_iterator(staging->warnings.begin()),
                                       std::make_move_iterator(staging->warnings.end()));
-    if (repository.state->catalog.was_created()) {
-        auto rebuilt = repository.rebuild_catalog();
-        repository.state->catalog.finish_initialization();
-        if (!rebuilt) return lighter::outcome_error(std::move(rebuilt).error());
-        repository.state->warnings.insert(repository.state->warnings.end(), std::make_move_iterator(rebuilt->warnings.begin()),
-                                          std::make_move_iterator(rebuilt->warnings.end()));
+    {
+        auto initialization = detail::acquire_catalog_initialization_lease(paths.root);
+        if (!initialization) return lighter::outcome_error(std::move(initialization).error());
+        auto rebuild_pending = catalog_rebuild_pending(paths);
+        if (!rebuild_pending) return lighter::outcome_error(std::move(rebuild_pending).error());
+        if (*rebuild_pending) {
+            auto rebuilt = repository.rebuild_catalog();
+            if (!rebuilt) return lighter::outcome_error(std::move(rebuilt).error());
+            if (auto completed = detail::durable_remove_file(paths.catalog_rebuild_marker()); !completed)
+                return lighter::outcome_error(Error::storage("cannot complete catalog rebuild: " + completed.error().message()));
+            repository.state->warnings.insert(repository.state->warnings.end(), std::make_move_iterator(rebuilt->warnings.begin()),
+                                              std::make_move_iterator(rebuilt->warnings.end()));
+        }
     }
     auto reconciled = repository.reconcile_pending();
     if (!reconciled) return lighter::outcome_error(std::move(reconciled).error());
@@ -1172,16 +1264,22 @@ Result<SessionWriter> SessionRepository::acquire(SessionId id) const {
     auto lease = acquire_session_lease(state->root, id);
     if (!lease) return lighter::outcome_error(std::move(lease).error());
     std::error_code error;
+    const auto directory_exists = std::filesystem::exists(paths.session_directory(id), error);
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect session directory: " + error.message()));
+    if (!directory_exists) return lighter::outcome_error(Error::storage("session was not found", ErrorCode::NOT_FOUND));
     if (!std::filesystem::is_directory(paths.session_directory(id), error)) {
         if (error) return lighter::outcome_error(Error::storage("cannot inspect session directory: " + error.message()));
-        return lighter::outcome_error(Error::storage("session was not found"));
+        return lighter::outcome_error(Error::storage("session authority is not a directory"));
     }
     auto reparse = detail::is_reparse_point(paths.session_directory(id));
     if (!reparse) return lighter::outcome_error(std::move(reparse).error());
     if (*reparse) return lighter::outcome_error(Error::storage("session directory is a symlink, junction, or reparse point"));
+    const auto database_exists = std::filesystem::exists(paths.session_database(id), error);
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect session database: " + error.message()));
+    if (!database_exists) return lighter::outcome_error(Error::storage("published session database is absent", ErrorCode::NOT_FOUND));
     if (!std::filesystem::is_regular_file(paths.session_database(id), error)) {
         if (error) return lighter::outcome_error(Error::storage("cannot inspect session database: " + error.message()));
-        return lighter::outcome_error(Error::storage("published session database is absent"));
+        return lighter::outcome_error(Error::storage("published session database is not a regular file"));
     }
     reparse = detail::is_reparse_point(paths.session_database(id));
     if (!reparse) return lighter::outcome_error(std::move(reparse).error());

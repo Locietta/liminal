@@ -49,7 +49,6 @@ struct SessionCatalog {
     static Result<SessionCatalog> repair_corrupt(const std::filesystem::path &state_root);
 
     const std::filesystem::path &path() const noexcept;
-    bool was_created() const noexcept;
     Result<SessionId> resolve_prefix(std::string_view text) const;
     Result<SessionSummary> latest(std::string_view workspace_key) const;
     Result<SessionPage> page(const SessionPageQuery &query) const pre(query.limit > 0);
@@ -59,8 +58,6 @@ struct SessionCatalog {
     Result<void> remove(SessionId id) const;
 
 private:
-    friend struct SessionRepository;
-    void finish_initialization() const;
     explicit SessionCatalog(std::shared_ptr<State> state) : state(std::move(state)) {}
     std::shared_ptr<State> state;
 };

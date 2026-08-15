@@ -39,6 +39,7 @@
 #include <liminal/session/recovery.h>
 #include <liminal/session/repository.h>
 #include <liminal/session/store.h>
+#include <liminal/session/store_test.h>
 #include <liminal/tools/tools.h>
 #include <liminal/tui/hydration.h>
 
@@ -67,6 +68,10 @@ struct TemporaryState {
         std::filesystem::remove_all(root, error);
     }
     std::filesystem::path root;
+};
+
+struct StorageHookReset {
+    ~StorageHookReset() { session::testing::set_storage_hook({}); }
 };
 
 struct Storage {
@@ -434,6 +439,71 @@ void test_catalog_failure_cannot_rollback_session_and_pending_recovers() {
             "crash after catalog upsert and before marker removal was not idempotently recoverable");
 }
 
+void test_blocked_catalog_projection_does_not_block_semantic_commit() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open projection-isolation storage");
+    auto published = publish(storage->repository, make_session("projection isolation"));
+    require(published.has_value(), "failed to publish projection-isolation fixture");
+
+    struct Handshake {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool refresh_blocked = false;
+        bool release_refresh = false;
+        bool refresh_completed = false;
+        bool second_commit_durable = false;
+    } handshake;
+    StorageHookReset reset;
+    session::testing::set_storage_hook([&](session::testing::StorageEvent event) {
+        std::unique_lock lock(handshake.mutex);
+        if (event == session::testing::StorageEvent::CATALOG_INDEXER_BEFORE_REFRESH) {
+            handshake.refresh_blocked = true;
+            handshake.changed.notify_all();
+            handshake.changed.wait(lock, [&] { return handshake.release_refresh; });
+        } else if (event == session::testing::StorageEvent::AUTHORITATIVE_COMMIT_COMPLETED && handshake.refresh_blocked) {
+            handshake.second_commit_durable = true;
+            handshake.changed.notify_all();
+        } else if (event == session::testing::StorageEvent::CATALOG_INDEXER_AFTER_REFRESH) {
+            handshake.refresh_completed = true;
+            handshake.changed.notify_all();
+        }
+    });
+
+    auto &value = published->value;
+    const auto first_tail = value.entries.size();
+    value.start_task("first catalog-visible mutation", value.metadata.updated_at_ms + 10);
+    require(published->writer.commit(session::make_delta(value, std::span(value.entries).subspan(first_tail))).has_value(),
+            "failed to commit the projection-triggering mutation");
+    {
+        std::unique_lock lock(handshake.mutex);
+        handshake.changed.wait(lock, [&] { return handshake.refresh_blocked; });
+    }
+
+    value.set_model_preference("provider", "model", std::nullopt);
+    std::optional<Result<session::SessionCommitResult>> second_result;
+    std::jthread second([&] { second_result = published->writer.commit(session::make_delta(value, {})); });
+    {
+        using namespace std::chrono_literals;
+        std::unique_lock lock(handshake.mutex);
+        require(handshake.changed.wait_for(lock, 5s, [&] { return handshake.second_commit_durable; }),
+                "blocked catalog projection retained the session invalidation mutex across catalog I/O");
+    }
+    require(scalar_i64(session::StatePaths{temporary.root}.session_database(value.id), "SELECT revision FROM session") == 3,
+            "second semantic commit was not durable while catalog projection was blocked");
+    {
+        std::scoped_lock lock(handshake.mutex);
+        handshake.release_refresh = true;
+    }
+    handshake.changed.notify_all();
+    second.join();
+    require(second_result && *second_result, "second semantic commit failed after isolated catalog projection resumed");
+    {
+        std::unique_lock lock(handshake.mutex);
+        handshake.changed.wait(lock, [&] { return handshake.refresh_completed; });
+    }
+}
+
 void test_revision_guard_and_precommit_marker() {
     TemporaryState temporary;
     session::SessionId id;
@@ -564,6 +634,44 @@ void test_missing_catalog_rebuild_includes_leased_sessions() {
             "missing-catalog rebuild omitted an exclusively owned session");
 }
 
+void test_incomplete_catalog_rebuild_is_resumed_after_crash() {
+    TemporaryState temporary;
+    session::SessionId id;
+    {
+        auto storage = open_storage(temporary.root);
+        auto published = storage ? publish(storage->repository, make_session("durable rebuild marker")) :
+                                   Result<Published>{lighter::outcome_error(storage.error())};
+        require(published.has_value(), "failed to publish rebuild-marker fixture");
+        id = published->value.id;
+    }
+    const session::StatePaths paths{temporary.root};
+    std::error_code error;
+    for (const auto &path : {paths.catalog(), std::filesystem::path(paths.catalog().string() + "-wal"),
+                             std::filesystem::path(paths.catalog().string() + "-shm")}) {
+        std::filesystem::remove(path, error);
+        error.clear();
+    }
+
+    {
+        auto interrupted = session::SessionCatalog::open(temporary.root);
+        require(interrupted.has_value() && std::filesystem::is_regular_file(paths.catalog_rebuild_marker()),
+                "new catalog did not durably record its incomplete rebuild before becoming valid");
+        auto *blocker = open_sqlite(paths.catalog());
+        execute(blocker, "PRAGMA busy_timeout=0; BEGIN IMMEDIATE", "failed to block interrupted catalog rebuild");
+        auto failed = session::SessionRepository::open(temporary.root, *interrupted);
+        require(!failed && std::filesystem::is_regular_file(paths.catalog_rebuild_marker()),
+                "failed catalog rebuild cleared its durable incomplete marker");
+        execute(blocker, "ROLLBACK", "failed to release interrupted catalog rebuild");
+        sqlite3_close(blocker);
+    }
+    auto resumed = open_storage(temporary.root);
+    require(resumed.has_value(), "next opener did not resume an interrupted catalog rebuild");
+    auto page = resumed->catalog.page({.workspace_key = "workspace"});
+    require(page && page->sessions.size() == 1 && page->sessions.front().id == id &&
+                !std::filesystem::exists(paths.catalog_rebuild_marker()),
+            "resumed catalog rebuild did not restore discovery before clearing its durable marker");
+}
+
 void test_concurrent_catalog_initialization_is_serialized() {
     TemporaryState temporary;
     constexpr usize opener_count = 8;
@@ -575,17 +683,18 @@ void test_concurrent_catalog_initialization_is_serialized() {
     for (usize index = 0; index < opener_count; ++index) {
         threads.emplace_back([&, index] {
             start.arrive_and_wait();
-            auto catalog = session::SessionCatalog::open(temporary.root);
-            opened[index] = catalog.has_value();
-            if (!catalog) errors[index] = catalog.error().message();
+            auto storage = open_storage(temporary.root);
+            opened[index] = storage.has_value();
+            if (!storage) errors[index] = storage.error().message();
         });
     }
     threads.clear();
     for (usize index = 0; index < opener_count; ++index) {
         if (!opened[index]) fail("concurrent first catalog opener failed: " + errors[index]);
     }
-    auto catalog = session::SessionCatalog::open(temporary.root);
-    require(catalog.has_value(), "concurrently initialized catalog could not be reopened");
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value() && !std::filesystem::exists(session::StatePaths{temporary.root}.catalog_rebuild_marker()),
+            "concurrently initialized catalog did not finish its serialized rebuild");
 }
 
 void test_corrupt_catalog_repair_requires_exclusive_maintenance() {
@@ -696,6 +805,35 @@ void test_staged_final_snapshot_is_fully_validated() {
             delta.metadata.forked_from = session::ForkOrigin{.session = session::generate_session_id(), .entry = {0}};
         },
         "staged publication accepted invalid fork metadata");
+
+    const auto rejected_relative = [&](auto regress, std::string_view message) {
+        auto value = make_session("staged relative validation");
+        auto initial = session::make_delta(value, value.entries);
+        initial.metadata.updated_at_ms += 100;
+        initial.next_task_id += 10;
+        initial.next_provider_call_id += 10;
+        initial.tokens_used += 100;
+        initial.metadata.forked_from = session::ForkOrigin{.session = session::generate_session_id(), .entry = {1}};
+        auto staged = storage->repository.stage(value.id, initial);
+        require(staged.has_value(), "failed to stage relative-validation fixture");
+        auto final = initial;
+        regress(final);
+        require(!staged->commit(final) && !std::filesystem::exists(session::StatePaths{temporary.root}.session_directory(value.id)),
+                message);
+    };
+    rejected_relative([](session::SessionDelta &delta) { --delta.metadata.updated_at_ms; },
+                      "staged publication accepted updated_at regression relative to its staged baseline");
+    rejected_relative([](session::SessionDelta &delta) { --delta.next_task_id; },
+                      "staged publication accepted task-counter regression relative to its staged baseline");
+    rejected_relative([](session::SessionDelta &delta) { --delta.next_provider_call_id; },
+                      "staged publication accepted provider-counter regression relative to its staged baseline");
+    rejected_relative([](session::SessionDelta &delta) { --delta.tokens_used; },
+                      "staged publication accepted token-count regression relative to its staged baseline");
+    rejected_relative(
+        [](session::SessionDelta &delta) {
+            delta.metadata.forked_from = session::ForkOrigin{.session = session::generate_session_id(), .entry = {1}};
+        },
+        "staged publication accepted changed fork provenance relative to its staged baseline");
 }
 
 void test_recency_rename_fork_and_discovery() {
@@ -887,6 +1025,52 @@ void test_persistence_queue_ordering_retry_and_flush_barriers() {
             "ordered persistence retry changed semantic order or parent links");
 }
 
+void test_reopening_queue_tracks_asynchronous_catalog_recovery() {
+    TemporaryState temporary;
+    const session::StatePaths paths{temporary.root};
+    session::Session value;
+    value.metadata.workspace = session::SessionWorkspace{.root = "C:/workspace", .key = "workspace"};
+    value.metadata.working_directory = "C:/workspace";
+    auto queue = session::PersistenceQueue::create_reopening(temporary.root, value.id, "initial storage failure");
+    require(value.attach_persistence(queue).has_value(), "failed to attach reopening persistence queue");
+    value.start_task("recover storage", std::max<i64>(1'000'000, value.metadata.created_at_ms));
+    require(queue->flush().has_value(), "reopening queue did not recover semantic persistence");
+
+    auto *catalog_blocker = open_sqlite(paths.catalog());
+    execute(catalog_blocker, "PRAGMA busy_timeout=0; BEGIN IMMEDIATE", "failed to block recovery catalog");
+    struct Attempts {
+        std::mutex mutex;
+        std::condition_variable changed;
+        usize completed = 0;
+    } attempts;
+    StorageHookReset reset;
+    session::testing::set_storage_hook([&](session::testing::StorageEvent event) {
+        if (event != session::testing::StorageEvent::CATALOG_INDEXER_AFTER_REFRESH) return;
+        {
+            std::scoped_lock lock(attempts.mutex);
+            ++attempts.completed;
+        }
+        attempts.changed.notify_all();
+    });
+
+    value.set_title("catalog failure after recovery");
+    require(queue->flush().has_value(), "catalog failure was promoted to reopening semantic persistence failure");
+    {
+        std::unique_lock lock(attempts.mutex);
+        attempts.changed.wait(lock, [&] { return attempts.completed >= 1; });
+    }
+    require(queue->status().catalog_degraded, "reopening queue did not expose its recovered writer's catalog failure");
+
+    execute(catalog_blocker, "ROLLBACK", "failed to unblock recovery catalog");
+    sqlite3_close(catalog_blocker);
+    {
+        std::unique_lock lock(attempts.mutex);
+        attempts.changed.wait(lock, [&] { return attempts.completed >= 2; });
+    }
+    require(!queue->status().catalog_degraded,
+            "reopening queue retained stale catalog degradation after its recovered writer's asynchronous retry succeeded");
+}
+
 void test_flush_waits_for_complete_pending_prefix() {
     struct Gate {
         std::mutex mutex;
@@ -1029,6 +1213,19 @@ void test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session() {
             "workspace mismatch changed the live session or deleted rather than repaired its valid catalog projection");
     auto continued = coordinator.acquire_in_workspace(authority_id, "stale-workspace");
     require(!continued, "workspace-scoped acquisition trusted stale catalog authority");
+
+    const auto stale_latest = session::generate_session_id();
+    require(storage->catalog
+                .upsert({.summary = {.id = stale_latest, .updated_at_ms = 9'000'000'000'000, .preview = "missing latest"},
+                         .observed_revision = 1,
+                         .workspace_key = "workspace"})
+                .has_value(),
+            "failed to install stale latest-session hint");
+    auto latest = coordinator.acquire_latest("workspace");
+    auto removed = storage->catalog.find(stale_latest);
+    if (!latest) fail("latest-session acquisition failed after stale hint removal: " + latest.error().message());
+    require(latest->session.id == authority_id, "latest-session acquisition did not continue to the next resumable authority");
+    require(removed && !*removed, "latest-session acquisition did not remove its missing catalog hint");
 }
 
 void test_prepared_switch_keeps_live_state_atomic() {
@@ -1096,11 +1293,13 @@ int main(int argc, char **argv) {
     test_cross_process_lease_exclusion(executable);
     test_encoding_failure_precedes_begin();
     test_catalog_failure_cannot_rollback_session_and_pending_recovers();
+    test_blocked_catalog_projection_does_not_block_semantic_commit();
     test_revision_guard_and_precommit_marker();
     test_normal_startup_does_not_scan_sessions();
     test_invalid_pending_marker_is_reported_without_scanning_sessions();
     test_missing_catalog_rebuild_reads_only_singletons();
     test_missing_catalog_rebuild_includes_leased_sessions();
+    test_incomplete_catalog_rebuild_is_resumed_after_crash();
     test_concurrent_catalog_initialization_is_serialized();
     test_corrupt_catalog_repair_requires_exclusive_maintenance();
     test_staging_cancellation_and_complete_publication();
@@ -1111,6 +1310,7 @@ int main(int argc, char **argv) {
     test_catalog_keyset_paging_and_index_plan();
     test_recovery_and_transcript_hydration_survive_restart();
     test_persistence_queue_ordering_retry_and_flush_barriers();
+    test_reopening_queue_tracks_asynchronous_catalog_recovery();
     test_flush_waits_for_complete_pending_prefix();
     test_initial_publication_serializes_enqueued_mutations();
     test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session();
