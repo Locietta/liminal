@@ -432,7 +432,7 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
         return {};
     };
     if (needs_rebuild) {
-        if (auto prepared = prepare_rebuild(repair_pending || (!catalog_exists && !rebuild_pending)); !prepared) {
+        if (auto prepared = prepare_rebuild(repair_pending || !catalog_exists); !prepared) {
             return lighter::outcome_error(std::move(prepared).error());
         }
     }
@@ -508,7 +508,7 @@ Result<SessionCatalog> SessionCatalog::repair_corrupt(const std::filesystem::pat
         }
         auto maintenance = detail::acquire_catalog_lease(state_root, true);
         if (!maintenance) return lighter::outcome_error(std::move(maintenance).error());
-        if (auto prepared = prepare_catalog_rebuild(catalog, repair_marker, rebuild_marker, !rebuild_pending); !prepared) {
+        if (auto prepared = prepare_catalog_rebuild(catalog, repair_marker, rebuild_marker, true); !prepared) {
             return lighter::outcome_error(std::move(prepared).error());
         }
         return {};

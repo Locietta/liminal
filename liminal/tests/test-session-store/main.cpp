@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <latch>
 #include <limits>
 #include <memory>
@@ -148,6 +149,16 @@ void execute(sqlite3 *database, const char *sql, std::string_view message) {
         sqlite3_free(detail);
         fail(std::string(message) + ": " + description);
     }
+}
+
+bool has_quarantined_payload(const std::filesystem::path &root, std::string_view filename_prefix, std::string_view payload) {
+    for (const auto &entry : std::filesystem::directory_iterator(root)) {
+        if (!entry.path().filename().generic_string().starts_with(filename_prefix)) continue;
+        std::ifstream input(entry.path(), std::ios::binary);
+        const std::string contents(std::istreambuf_iterator<char>(input), {});
+        if (input && contents == payload) return true;
+    }
+    return false;
 }
 
 std::string scalar_text(const std::filesystem::path &path, const char *sql) {
@@ -814,6 +825,37 @@ void test_incomplete_catalog_repair_is_resumed_before_replacement() {
             "repair recovery created a replacement before quarantining the complete old catalog family");
 }
 
+void test_missing_rebuild_catalog_quarantines_live_sidecars() {
+    TemporaryState temporary;
+    session::SessionId id;
+    {
+        auto storage = open_storage(temporary.root);
+        auto published = storage ? publish(storage->repository, make_session("missing rebuild catalog sidecar")) :
+                                   Result<Published>{lighter::outcome_error(storage.error())};
+        require(published.has_value(), "failed to publish missing-catalog sidecar fixture");
+        id = published->value.id;
+    }
+
+    const session::StatePaths paths{temporary.root};
+    std::error_code error;
+    for (const auto &suffix : std::array<std::filesystem::path, 4>{"", "-journal", "-wal", "-shm"}) {
+        std::filesystem::remove(session::detail::path_with_suffix(paths.catalog(), suffix), error);
+        require(!error, "failed to remove catalog family before missing-catalog sidecar fixture");
+    }
+    const auto live_wal = session::detail::path_with_suffix(paths.catalog(), std::filesystem::path{"-wal"});
+    constexpr std::string_view orphaned_wal = "orphaned rebuild WAL";
+    std::ofstream(live_wal, std::ios::binary) << orphaned_wal;
+    std::ofstream(paths.catalog_rebuild_marker(), std::ios::binary) << "1\n";
+
+    auto rebuilt = open_storage(temporary.root);
+    require(rebuilt.has_value(), "missing replacement catalog reused an orphaned live sidecar");
+    auto page = rebuilt->catalog.page({.workspace_key = "workspace"});
+    require(page && page->sessions.size() == 1 && page->sessions.front().id == id &&
+                has_quarantined_payload(temporary.root, "catalog.sqlite3-wal.corrupt.", orphaned_wal) &&
+                !std::filesystem::exists(paths.catalog_repair_marker()) && !std::filesystem::exists(paths.catalog_rebuild_marker()),
+            "missing replacement catalog did not quarantine its complete live database family");
+}
+
 void test_failed_rebuild_reuses_replacement_catalog() {
     TemporaryState temporary;
     session::SessionId id;
@@ -862,6 +904,38 @@ void test_failed_rebuild_reuses_replacement_catalog() {
                                   Result<std::optional<session::CatalogProjection>>{lighter::outcome_error(recovered.error())};
     require(recovered && projection && *projection && !std::filesystem::exists(paths.catalog_rebuild_marker()),
             "catalog rebuild did not recover after projection inspection became available");
+}
+
+void test_explicit_repair_replaces_corrupt_rebuild_catalog() {
+    TemporaryState temporary;
+    session::SessionId id;
+    {
+        auto storage = open_storage(temporary.root);
+        auto published = storage ? publish(storage->repository, make_session("corrupt rebuild replacement")) :
+                                   Result<Published>{lighter::outcome_error(storage.error())};
+        require(published.has_value(), "failed to publish corrupt-rebuild replacement fixture");
+        id = published->value.id;
+    }
+
+    const session::StatePaths paths{temporary.root};
+    std::error_code error;
+    for (const auto &suffix : std::array<std::filesystem::path, 4>{"", "-journal", "-wal", "-shm"}) {
+        std::filesystem::remove(session::detail::path_with_suffix(paths.catalog(), suffix), error);
+        require(!error, "failed to remove catalog family before corrupt-rebuild replacement fixture");
+    }
+    constexpr std::string_view corrupt_catalog = "corrupt in-progress replacement";
+    std::ofstream(paths.catalog(), std::ios::binary) << corrupt_catalog;
+    std::ofstream(paths.catalog_rebuild_marker(), std::ios::binary) << "1\n";
+
+    auto repaired = session::SessionRepository::repair_catalog(temporary.root);
+    require(repaired.has_value(), "explicit repair reused a corrupt in-progress replacement catalog");
+    auto catalog = repaired->catalog();
+    auto page =
+        catalog ? catalog->page({.workspace_key = "workspace"}) : Result<session::SessionPage>{lighter::outcome_error(catalog.error())};
+    require(catalog && page && page->sessions.size() == 1 && page->sessions.front().id == id &&
+                has_quarantined_payload(temporary.root, "catalog.sqlite3.corrupt.", corrupt_catalog) &&
+                !std::filesystem::exists(paths.catalog_repair_marker()) && !std::filesystem::exists(paths.catalog_rebuild_marker()),
+            "explicit repair did not quarantine and rebuild a corrupt in-progress replacement catalog");
 }
 
 void test_concurrent_catalog_initialization_is_serialized() {
@@ -1907,7 +1981,9 @@ int main(int argc, char **argv) {
     test_catalog_ingestion_rejects_invalid_singleton_projections();
     test_missing_catalog_rebuild_includes_leased_sessions();
     test_incomplete_catalog_repair_is_resumed_before_replacement();
+    test_missing_rebuild_catalog_quarantines_live_sidecars();
     test_failed_rebuild_reuses_replacement_catalog();
+    test_explicit_repair_replaces_corrupt_rebuild_catalog();
     test_concurrent_catalog_initialization_is_serialized();
     test_catalog_initialization_contention_returns_authority_only();
     test_healthy_catalog_initialization_contention_is_bounded();
