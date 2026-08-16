@@ -21,6 +21,7 @@ Result<void> durable_remove_file(const std::filesystem::path &path);
 Result<void> rename_directory_without_replacement(const std::filesystem::path &source, const std::filesystem::path &target);
 Result<void> flush_published_directory(const std::filesystem::path &target);
 Result<PathType> inspect_path_no_follow(const std::filesystem::path &path);
+std::filesystem::path path_with_suffix(std::filesystem::path path, const std::filesystem::path &suffix);
 Result<void> validate_sqlite_paths_no_follow(const std::filesystem::path &database, bool allow_database_creation);
 
 } // namespace liminal::session::detail

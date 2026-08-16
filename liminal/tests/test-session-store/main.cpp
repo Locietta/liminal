@@ -36,6 +36,7 @@
 #include <liminal/application/session_coordinator.h>
 #include <liminal/session/catalog.h>
 #include <liminal/session/catalog_lease.h>
+#include <liminal/session/durable_fs.h>
 #include <liminal/session/lease.h>
 #include <liminal/session/paths.h>
 #include <liminal/session/persistence.h>
@@ -776,7 +777,7 @@ void test_missing_catalog_rebuild_includes_leased_sessions() {
             "missing-catalog rebuild omitted an exclusively owned session");
 }
 
-void test_incomplete_catalog_rebuild_is_resumed_after_crash() {
+void test_incomplete_catalog_repair_is_resumed_before_replacement() {
     TemporaryState temporary;
     session::SessionId id;
     {
@@ -788,44 +789,33 @@ void test_incomplete_catalog_rebuild_is_resumed_after_crash() {
     }
     const session::StatePaths paths{temporary.root};
     std::error_code error;
-    for (const auto &path : {paths.catalog(), std::filesystem::path(paths.catalog().string() + "-wal"),
-                             std::filesystem::path(paths.catalog().string() + "-shm")}) {
-        std::filesystem::remove(path, error);
-        error.clear();
-    }
+    const auto old_main = session::detail::path_with_suffix(paths.catalog(), std::filesystem::path{".corrupt.fixture"});
+    const auto live_wal = session::detail::path_with_suffix(paths.catalog(), std::filesystem::path{"-wal"});
+    std::filesystem::rename(paths.catalog(), old_main, error);
+    require(!error, "failed to simulate an interrupted catalog main-file quarantine");
+    std::ofstream(live_wal, std::ios::binary) << "orphaned old WAL";
+    require(std::filesystem::is_regular_file(live_wal), "failed to leave an old live-name catalog sidecar");
+    std::ofstream(paths.catalog_rebuild_marker(), std::ios::binary) << "1\n";
+    require(std::filesystem::is_regular_file(paths.catalog_rebuild_marker()), "failed to record interrupted catalog repair fixture");
 
-    {
-        auto *blocker = open_sqlite(paths.catalog());
-        execute(blocker, R"sql(
-CREATE TABLE sessions (
-    id BLOB PRIMARY KEY CHECK(length(id) = 16),
-    observed_revision INTEGER NOT NULL,
-    workspace_key TEXT NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    title TEXT,
-    preview TEXT NOT NULL
-);
-CREATE INDEX sessions_workspace_recent ON sessions(workspace_key, updated_at_ms DESC, id DESC);
-PRAGMA application_id = 1279872323;
-PRAGMA user_version = 1;
-PRAGMA journal_mode = WAL;
-)sql",
-                "failed to create interrupted catalog fixture");
-        std::ofstream(paths.catalog_rebuild_marker(), std::ios::binary) << "1\n";
-        require(std::filesystem::is_regular_file(paths.catalog_rebuild_marker()), "failed to record interrupted catalog rebuild fixture");
-        execute(blocker, "PRAGMA busy_timeout=0; BEGIN IMMEDIATE", "failed to block interrupted catalog rebuild");
-        auto failed = session::SessionRepository::open(temporary.root);
-        require(failed && !failed->catalog() && std::filesystem::is_regular_file(paths.catalog_rebuild_marker()),
-                "failed catalog rebuild did not leave authority available with a degraded catalog");
-        execute(blocker, "ROLLBACK", "failed to release interrupted catalog rebuild");
-        sqlite3_close(blocker);
-    }
     auto resumed = open_storage(temporary.root);
-    require(resumed.has_value(), "next opener did not resume an interrupted catalog rebuild");
+    require(resumed.has_value(), "next opener did not resume interrupted catalog-family quarantine");
     auto page = resumed->catalog.page({.workspace_key = "workspace"});
+    const auto quarantine_prefix =
+        session::detail::path_with_suffix(paths.catalog().filename(), std::filesystem::path{"-wal.corrupt."}).native();
+    bool old_wal_quarantined = false;
+    for (const auto &entry : std::filesystem::directory_iterator(temporary.root)) {
+        if (!entry.path().filename().native().starts_with(quarantine_prefix)) continue;
+        std::ifstream input(entry.path(), std::ios::binary);
+        std::string contents;
+        std::getline(input, contents);
+        old_wal_quarantined = input && contents == "orphaned old WAL";
+        if (old_wal_quarantined) break;
+    }
     require(page && page->sessions.size() == 1 && page->sessions.front().id == id &&
-                !std::filesystem::exists(paths.catalog_rebuild_marker()),
-            "resumed catalog rebuild did not restore discovery before clearing its durable marker");
+                !std::filesystem::exists(paths.catalog_rebuild_marker()) && old_wal_quarantined &&
+                std::filesystem::is_regular_file(old_main),
+            "repair recovery created a replacement before quarantining the complete old catalog family");
 }
 
 void test_concurrent_catalog_initialization_is_serialized() {
@@ -943,6 +933,41 @@ void test_corrupt_catalog_repair_requires_exclusive_maintenance() {
     auto page = repaired_catalog->page({.workspace_key = "workspace"});
     require(page && page->sessions.size() == 1 && page->sessions.front().id == id,
             "corrupt-catalog repair did not rebuild published session discovery");
+}
+
+void test_non_ascii_state_root_catalog_repair() {
+#ifdef _WIN32
+    TemporaryState temporary;
+    const auto state_root = temporary.root / std::filesystem::path{L"状态目录"};
+    session::SessionId id;
+    {
+        auto storage = open_storage(state_root);
+        auto published = storage ? publish(storage->repository, make_session("non-ASCII catalog repair")) :
+                                   Result<Published>{lighter::outcome_error(storage.error())};
+        require(published.has_value(), "failed to publish non-ASCII state-root fixture");
+        id = published->value.id;
+    }
+    const session::StatePaths paths{state_root};
+    std::error_code error;
+    for (const auto &path :
+         std::array{paths.catalog(), session::detail::path_with_suffix(paths.catalog(), std::filesystem::path{"-journal"}),
+                    session::detail::path_with_suffix(paths.catalog(), std::filesystem::path{"-wal"}),
+                    session::detail::path_with_suffix(paths.catalog(), std::filesystem::path{"-shm"})}) {
+        std::filesystem::remove(path, error);
+        error.clear();
+    }
+    std::ofstream corrupt(paths.catalog(), std::ios::binary);
+    corrupt << "foreign corrupt bytes";
+    corrupt.close();
+    auto degraded = session::SessionRepository::open(state_root);
+    require(degraded && !degraded->catalog(), "non-ASCII corrupt catalog was silently adopted");
+    auto repaired = session::SessionRepository::repair_catalog(state_root);
+    auto catalog = repaired ? repaired->catalog() : Result<session::SessionCatalog>{lighter::outcome_error(repaired.error())};
+    auto page =
+        catalog ? catalog->page({.workspace_key = "workspace"}) : Result<session::SessionPage>{lighter::outcome_error(catalog.error())};
+    require(repaired && catalog && page && page->sessions.size() == 1 && page->sessions.front().id == id,
+            "native catalog-family suffix handling failed under a non-ASCII Windows state root");
+#endif
 }
 
 void test_missing_catalog_recreation_requires_exclusive_maintenance() {
@@ -1835,13 +1860,14 @@ int main(int argc, char **argv) {
     test_missing_catalog_rebuild_reads_only_singletons();
     test_catalog_ingestion_rejects_invalid_singleton_projections();
     test_missing_catalog_rebuild_includes_leased_sessions();
-    test_incomplete_catalog_rebuild_is_resumed_after_crash();
+    test_incomplete_catalog_repair_is_resumed_before_replacement();
     test_concurrent_catalog_initialization_is_serialized();
     test_catalog_initialization_contention_returns_authority_only();
     test_healthy_catalog_initialization_contention_is_bounded();
     test_rebuild_inspection_failure_preserves_existing_catalog();
     test_empty_catalog_creation_crash_is_recovered_exclusively();
     test_corrupt_catalog_repair_requires_exclusive_maintenance();
+    test_non_ascii_state_root_catalog_repair();
     test_missing_catalog_recreation_requires_exclusive_maintenance();
     test_staging_cancellation_and_complete_publication();
     test_publication_retries_across_rename_and_reopen_boundaries();

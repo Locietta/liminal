@@ -6,9 +6,12 @@
 #include "paths.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <system_error>
 #include <utility>
@@ -155,7 +158,60 @@ Result<void> prepare_catalog_directories(const std::filesystem::path &state_root
     return {};
 }
 
-Result<CatalogInitialization> initialize(sqlite3 *database, const std::filesystem::path &rebuild_marker, bool allow_creation) {
+Result<void> validate_rebuild_marker(const std::filesystem::path &marker) {
+    auto type = detail::inspect_path_no_follow(marker);
+    if (!type) return lighter::outcome_error(std::move(type).error());
+    if (*type == detail::PathType::REPARSE_POINT) {
+        return lighter::outcome_error(
+            Error::storage("catalog rebuild marker is a symlink, junction, or reparse point", ErrorCode::INVALID_DATA));
+    }
+    if (*type != detail::PathType::REGULAR_FILE) {
+        return lighter::outcome_error(Error::storage("catalog rebuild marker is not a regular file", ErrorCode::INVALID_DATA));
+    }
+    std::ifstream input(marker, std::ios::binary);
+    const std::string contents(std::istreambuf_iterator<char>(input), {});
+    if (!input || contents != "1\n") {
+        return lighter::outcome_error(Error::storage("catalog rebuild marker has invalid format", ErrorCode::INVALID_DATA));
+    }
+    return {};
+}
+
+Result<void> ensure_rebuild_marker(const std::filesystem::path &marker) {
+    auto type = detail::inspect_path_no_follow(marker);
+    if (!type) return lighter::outcome_error(std::move(type).error());
+    if (*type == detail::PathType::ABSENT) {
+        auto marked = detail::durable_replace_file(marker, "1\n");
+        if (!marked) {
+            return lighter::outcome_error(Error::storage("cannot mark catalog rebuild incomplete: " + marked.error().message()));
+        }
+        return {};
+    }
+    return validate_rebuild_marker(marker);
+}
+
+Result<void> quarantine_catalog_family(const std::filesystem::path &catalog) {
+    const auto quarantine_suffix = std::filesystem::path{".corrupt." + to_string(generate_session_id())};
+    const auto family = std::array{detail::path_with_suffix(catalog, std::filesystem::path{"-journal"}),
+                                   detail::path_with_suffix(catalog, std::filesystem::path{"-wal"}),
+                                   detail::path_with_suffix(catalog, std::filesystem::path{"-shm"}), catalog};
+    for (const auto &source : family) {
+        auto type = detail::inspect_path_no_follow(source);
+        if (!type) return lighter::outcome_error(std::move(type).error());
+        if (*type == detail::PathType::ABSENT) continue;
+        if (*type != detail::PathType::REGULAR_FILE) {
+            return lighter::outcome_error(
+                Error::storage("refusing to quarantine an invalid catalog database-family path", ErrorCode::INVALID_DATA));
+        }
+        std::error_code error;
+        std::filesystem::rename(source, detail::path_with_suffix(source, quarantine_suffix), error);
+        if (error) {
+            return lighter::outcome_error(Error::storage("cannot quarantine catalog database family: " + error.message()));
+        }
+    }
+    return {};
+}
+
+Result<CatalogInitialization> initialize(sqlite3 *database, bool allow_creation) {
     if (auto begun = execute(database, "BEGIN IMMEDIATE"); !begun) return lighter::outcome_error(std::move(begun).error());
     const auto fail = [database](Error error) -> Result<CatalogInitialization> {
         static_cast<void>(execute(database, "ROLLBACK"));
@@ -187,9 +243,6 @@ Result<CatalogInitialization> initialize(sqlite3 *database, const std::filesyste
     if (!allow_creation) {
         if (auto rolled_back = execute(database, "ROLLBACK"); !rolled_back) return lighter::outcome_error(std::move(rolled_back).error());
         return CatalogInitialization::NEEDS_CREATION;
-    }
-    if (auto marked = detail::durable_replace_file(rebuild_marker, "1\n"); !marked) {
-        return fail(Error::storage("cannot mark catalog rebuild incomplete: " + marked.error().message()));
     }
     auto created = execute(database, R"sql(
 CREATE TABLE sessions (
@@ -297,6 +350,19 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
     state->maintenance_lease = *std::move(maintenance_lease);
     state->rebuild_exclusive = needs_rebuild;
     if (needs_rebuild) state->initialization_lease = *std::move(initialization_lease);
+    const auto reset_catalog_family = [&]() -> Result<void> {
+        if (auto marked = ensure_rebuild_marker(rebuild_marker); !marked) {
+            return lighter::outcome_error(std::move(marked).error());
+        }
+        if (auto quarantined = quarantine_catalog_family(catalog_path); !quarantined) {
+            return lighter::outcome_error(std::move(quarantined).error());
+        }
+        needs_rebuild = true;
+        return {};
+    };
+    if (needs_rebuild) {
+        if (auto reset = reset_catalog_family(); !reset) return lighter::outcome_error(std::move(reset).error());
+    }
     const auto open_database = [&]() -> Result<void> {
         if (auto valid = detail::validate_sqlite_paths_no_follow(state->path, needs_rebuild); !valid) {
             return lighter::outcome_error(std::move(valid).error());
@@ -318,7 +384,7 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
         return {};
     };
     if (auto opened = open_database(); !opened) return lighter::outcome_error(std::move(opened).error());
-    auto initialized = initialize(state->database, rebuild_marker, needs_rebuild);
+    auto initialized = initialize(state->database, needs_rebuild);
     if (!initialized) return lighter::outcome_error(std::move(initialized).error());
     if (*initialized == CatalogInitialization::NEEDS_CREATION) {
         if (sqlite3_close(state->database) != SQLITE_OK)
@@ -330,8 +396,9 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
         state->maintenance_lease = *std::move(exclusive);
         state->rebuild_exclusive = true;
         state->initialization_lease = *std::move(initialization_lease);
+        if (auto reset = reset_catalog_family(); !reset) return lighter::outcome_error(std::move(reset).error());
         if (auto opened = open_database(); !opened) return lighter::outcome_error(std::move(opened).error());
-        initialized = initialize(state->database, rebuild_marker, true);
+        initialized = initialize(state->database, true);
         if (!initialized) return lighter::outcome_error(std::move(initialized).error());
     }
     auto wal = prepare(state->database, "PRAGMA journal_mode=WAL");
@@ -351,32 +418,25 @@ Result<SessionCatalog> SessionCatalog::repair_corrupt(const std::filesystem::pat
         auto initialization = detail::acquire_catalog_initialization_lease(state_root);
         if (!initialization) return lighter::outcome_error(std::move(initialization).error());
         const auto catalog = state_root / "catalog.sqlite3";
-        if (auto valid = detail::validate_sqlite_paths_no_follow(catalog, false); !valid) {
+        const auto rebuild_marker = StatePaths{state_root}.catalog_rebuild_marker();
+        auto marker_type = detail::inspect_path_no_follow(rebuild_marker);
+        if (!marker_type) return lighter::outcome_error(std::move(marker_type).error());
+        const auto repair_pending = *marker_type == detail::PathType::REGULAR_FILE;
+        if (*marker_type != detail::PathType::ABSENT) {
+            if (auto valid = validate_rebuild_marker(rebuild_marker); !valid) {
+                return lighter::outcome_error(std::move(valid).error());
+            }
+        }
+        if (auto valid = detail::validate_sqlite_paths_no_follow(catalog, repair_pending); !valid) {
             return lighter::outcome_error(std::move(valid).error());
         }
-        auto catalog_type = detail::inspect_path_no_follow(catalog);
-        if (!catalog_type) return lighter::outcome_error(std::move(catalog_type).error());
-        if (*catalog_type == detail::PathType::REPARSE_POINT)
-            return lighter::outcome_error(Error::storage("refusing to replace a catalog symlink, junction, or reparse point"));
-        if (*catalog_type == detail::PathType::ABSENT)
-            return lighter::outcome_error(Error::storage("cannot repair an absent session catalog"));
-        if (*catalog_type != detail::PathType::REGULAR_FILE)
-            return lighter::outcome_error(Error::storage("cannot repair a catalog that is not a regular file"));
         auto maintenance = detail::acquire_catalog_lease(state_root, true);
         if (!maintenance) return lighter::outcome_error(std::move(maintenance).error());
-        const auto suffix = ".corrupt." + to_string(generate_session_id());
-        std::error_code error;
-        std::filesystem::rename(catalog, catalog.string() + suffix, error);
-        if (error) return lighter::outcome_error(Error::storage("cannot preserve corrupt catalog for replacement: " + error.message()));
-        for (const auto sidecar : {std::string("-journal"), std::string("-wal"), std::string("-shm")}) {
-            const auto source = std::filesystem::path(catalog.string() + sidecar);
-            auto source_type = detail::inspect_path_no_follow(source);
-            if (!source_type) return lighter::outcome_error(std::move(source_type).error());
-            if (*source_type == detail::PathType::ABSENT) continue;
-            if (*source_type != detail::PathType::REGULAR_FILE)
-                return lighter::outcome_error(Error::storage("refusing to preserve an invalid catalog sidecar path"));
-            std::filesystem::rename(source, source.string() + suffix, error);
-            if (error) return lighter::outcome_error(Error::storage("cannot preserve corrupt catalog sidecar: " + error.message()));
+        if (auto marked = detail::durable_replace_file(rebuild_marker, "1\n"); !marked) {
+            return lighter::outcome_error(Error::storage("cannot mark catalog repair incomplete: " + marked.error().message()));
+        }
+        if (auto quarantined = quarantine_catalog_family(catalog); !quarantined) {
+            return lighter::outcome_error(std::move(quarantined).error());
         }
         return {};
     }();

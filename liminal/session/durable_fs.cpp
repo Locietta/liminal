@@ -34,12 +34,17 @@ Result<void> validate_sqlite_paths_no_follow(const std::filesystem::path &databa
     if (auto valid = validate_regular_path(database, "SQLite database", allow_database_creation); !valid) {
         return lighter::outcome_error(std::move(valid).error());
     }
-    for (const auto suffix : std::array{std::string_view{"-journal"}, std::string_view{"-wal"}, std::string_view{"-shm"}}) {
-        if (auto valid = validate_regular_path(database.string() + std::string(suffix), "SQLite auxiliary file", true); !valid) {
+    for (const auto &suffix : std::array{std::filesystem::path{"-journal"}, std::filesystem::path{"-wal"}, std::filesystem::path{"-shm"}}) {
+        if (auto valid = validate_regular_path(path_with_suffix(database, suffix), "SQLite auxiliary file", true); !valid) {
             return lighter::outcome_error(std::move(valid).error());
         }
     }
     return {};
+}
+
+std::filesystem::path path_with_suffix(std::filesystem::path path, const std::filesystem::path &suffix) {
+    path += suffix;
+    return path;
 }
 
 } // namespace liminal::session::detail
