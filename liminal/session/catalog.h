@@ -54,7 +54,6 @@ struct SessionCatalog {
     Result<SessionSummary> latest(std::string_view workspace_key) const;
     Result<SessionPage> page(const SessionPageQuery &query) const pre(query.limit > 0);
     Result<std::optional<CatalogProjection>> find(SessionId id) const;
-    Result<std::vector<SessionId>> ids() const;
     Result<void> upsert(const CatalogProjection &projection) const;
     Result<void> remove(SessionId id) const;
 

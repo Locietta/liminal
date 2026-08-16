@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <utility>
@@ -18,12 +19,12 @@ struct CatalogLease {
 
 private:
     friend Result<CatalogLease> acquire_catalog_lease(const std::filesystem::path &, bool);
-    friend Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &);
+    friend Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &, std::chrono::milliseconds);
     explicit CatalogLease(std::shared_ptr<State> state) : state(std::move(state)) {}
     std::shared_ptr<State> state;
 };
 
 Result<CatalogLease> acquire_catalog_lease(const std::filesystem::path &state_root, bool exclusive);
-Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &state_root);
+Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &state_root, std::chrono::milliseconds timeout = {});
 
 } // namespace liminal::session::detail

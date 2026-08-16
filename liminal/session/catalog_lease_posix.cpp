@@ -8,7 +8,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 #include <lighter/async/vocab/outcome.h>
 
@@ -45,18 +48,26 @@ Result<CatalogLease> acquire_catalog_lease(const std::filesystem::path &state_ro
     return CatalogLease(std::move(state));
 }
 
-Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &state_root) {
+Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &state_root, std::chrono::milliseconds timeout) {
+    using namespace std::chrono_literals;
     const auto path = state_root / "locks" / "catalog-initialize.lock";
     const auto file = open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR);
     if (file < 0)
         return lighter::outcome_error(Error::storage("cannot open catalog initialization lock: " + std::string(std::strerror(errno))));
-    if (flock(file, LOCK_EX | LOCK_NB) != 0) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (flock(file, LOCK_EX | LOCK_NB) != 0) {
         const auto code = errno;
-        close(file);
-        if (code == EWOULDBLOCK || code == EAGAIN) {
+        if (code != EWOULDBLOCK && code != EAGAIN) {
+            close(file);
+            return lighter::outcome_error(
+                Error::storage("cannot acquire catalog initialization lock: " + std::string(std::strerror(code))));
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            close(file);
             return lighter::outcome_error(Error::storage("session catalog initialization is already in progress"));
         }
-        return lighter::outcome_error(Error::storage("cannot acquire catalog initialization lock: " + std::string(std::strerror(code))));
+        std::this_thread::sleep_for(std::min(10ms, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
     }
     auto state = std::make_shared<CatalogLease::State>();
     state->file = file;

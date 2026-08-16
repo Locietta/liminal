@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include <lighter/async/vocab/outcome.h>
@@ -93,10 +94,18 @@ Result<void> rename_directory_without_replacement(const std::filesystem::path &s
 
 Result<void> flush_published_directory(const std::filesystem::path &target) { return flush_directory(target.parent_path()); }
 
-Result<bool> is_reparse_point(const std::filesystem::path &path) {
+Result<PathType> inspect_path_no_follow(const std::filesystem::path &path) {
     struct stat info{};
-    if (lstat(path.c_str(), &info) != 0) return lighter::outcome_error(posix_error("cannot inspect state path"));
-    return S_ISLNK(info.st_mode);
+    if (lstat(path.c_str(), &info) != 0) {
+        if (errno == ENOENT || errno == ENOTDIR) return PathType::ABSENT;
+        auto error = posix_error("cannot inspect state path");
+        error.code = ErrorCode::IO;
+        return lighter::outcome_error(std::move(error));
+    }
+    if (S_ISLNK(info.st_mode)) return PathType::REPARSE_POINT;
+    if (S_ISREG(info.st_mode)) return PathType::REGULAR_FILE;
+    if (S_ISDIR(info.st_mode)) return PathType::DIRECTORY;
+    return PathType::OTHER;
 }
 
 } // namespace liminal::session::detail

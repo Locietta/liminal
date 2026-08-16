@@ -124,7 +124,7 @@ std::string text(sqlite3_stmt *statement, int column) { return optional_text(sta
 
 Result<SessionId> column_id(sqlite3_stmt *statement, int column) {
     if (sqlite3_column_type(statement, column) != SQLITE_BLOB || sqlite3_column_bytes(statement, column) != 16) {
-        return lighter::outcome_error(Error::storage("session database contains an invalid identity"));
+        return lighter::outcome_error(Error::storage("session database contains an invalid identity", ErrorCode::INVALID_DATA));
     }
     SessionId id;
     std::memcpy(id.bytes.data(), sqlite3_column_blob(statement, column), id.bytes.size());
@@ -147,8 +147,8 @@ Result<void> validate_session_schema(sqlite3 *database, bool create) {
     if (application_id == k_session_application_id && schema_version == k_session_schema_version) return {};
     if (!create) {
         if (application_id != k_session_application_id)
-            return lighter::outcome_error(Error::storage("session database belongs to another application"));
-        return lighter::outcome_error(Error::storage("session database has an unsupported schema version"));
+            return lighter::outcome_error(Error::storage("session database belongs to another application", ErrorCode::INVALID_DATA));
+        return lighter::outcome_error(Error::storage("session database has an unsupported schema version", ErrorCode::INVALID_DATA));
     }
     if (application_id != 0 || schema_version != 0) return lighter::outcome_error(Error::storage("staging database has a foreign schema"));
     auto objects = prepare(database, "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'");
@@ -380,9 +380,12 @@ Result<PreparedDelta> prepare_delta(const SessionDelta &delta, const DurableHead
 std::string marker_contents(u64 revision) { return "1 " + std::to_string(revision) + "\n"; }
 
 Result<u64> read_marker(const std::filesystem::path &path) {
-    auto reparse = detail::is_reparse_point(path);
-    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-    if (*reparse) return lighter::outcome_error(Error::storage("catalog marker is a symlink, junction, or reparse point"));
+    auto type = detail::inspect_path_no_follow(path);
+    if (!type) return lighter::outcome_error(std::move(type).error());
+    if (*type == detail::PathType::REPARSE_POINT)
+        return lighter::outcome_error(Error::storage("catalog marker is a symlink, junction, or reparse point", ErrorCode::INVALID_DATA));
+    if (*type != detail::PathType::REGULAR_FILE)
+        return lighter::outcome_error(Error::storage("catalog marker is not a regular file", ErrorCode::INVALID_DATA));
     std::error_code error;
     const auto size = std::filesystem::file_size(path, error);
     if (error) return lighter::outcome_error(Error::storage("cannot inspect catalog marker: " + error.message()));
@@ -412,9 +415,11 @@ Result<void> write_marker(const StatePaths &paths, SessionId id, u64 revision) {
     std::filesystem::create_directories(paths.catalog_pending(), error);
     if (error) return lighter::outcome_error(Error::storage("cannot create catalog-pending directory: " + error.message()));
     const auto path = paths.pending_marker(id);
-    const auto exists = std::filesystem::exists(path, error);
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect catalog marker: " + error.message()));
-    if (exists) {
+    auto type = detail::inspect_path_no_follow(path);
+    if (!type) return lighter::outcome_error(std::move(type).error());
+    if (*type != detail::PathType::ABSENT && *type != detail::PathType::REGULAR_FILE)
+        return lighter::outcome_error(Error::storage("catalog marker has an invalid filesystem type", ErrorCode::INVALID_DATA));
+    if (*type == detail::PathType::REGULAR_FILE) {
         auto current = read_marker(path);
         if (!current) return lighter::outcome_error(std::move(current).error());
         if (*current >= revision) return {};
@@ -436,11 +441,12 @@ FROM session WHERE singleton=1
 )sql");
     if (!query) return lighter::outcome_error(std::move(query).error());
     const auto row = sqlite3_step(query->value);
-    if (row == SQLITE_DONE) return lighter::outcome_error(Error::storage("session database has no singleton row"));
+    if (row == SQLITE_DONE) return lighter::outcome_error(Error::storage("session database has no singleton row", ErrorCode::INVALID_DATA));
     if (row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(database, "cannot read session singleton", row));
     auto id = column_id(query->value, 0);
     if (!id) return lighter::outcome_error(std::move(id).error());
-    if (*id != expected) return lighter::outcome_error(Error::storage("session database identity does not match its directory"));
+    if (*id != expected)
+        return lighter::outcome_error(Error::storage("session database identity does not match its directory", ErrorCode::INVALID_DATA));
     const auto created_at_ms = sqlite3_column_int64(query->value, 2);
     const auto workspace_root = text(query->value, 4);
     CatalogProjection projection{
@@ -459,27 +465,23 @@ FROM session WHERE singleton=1
 Result<void> validate_published_authority(const StatePaths &paths, SessionId id) {
     const auto directory = paths.session_directory(id);
     const auto database = paths.session_database(id);
-    std::error_code error;
-    const auto directory_exists = std::filesystem::exists(directory, error);
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect session directory: " + error.message()));
-    if (!directory_exists) return lighter::outcome_error(Error::storage("session was not found", ErrorCode::NOT_FOUND));
-    auto reparse = detail::is_reparse_point(directory);
-    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-    if (*reparse) return lighter::outcome_error(Error::storage("session directory is a symlink, junction, or reparse point"));
-    if (!std::filesystem::is_directory(directory, error)) {
-        if (error) return lighter::outcome_error(Error::storage("cannot inspect session directory: " + error.message()));
-        return lighter::outcome_error(Error::storage("session authority is not a directory"));
-    }
-    const auto database_exists = std::filesystem::exists(database, error);
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect session database: " + error.message()));
-    if (!database_exists) return lighter::outcome_error(Error::storage("published session database is absent", ErrorCode::NOT_FOUND));
-    reparse = detail::is_reparse_point(database);
-    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-    if (*reparse) return lighter::outcome_error(Error::storage("session database is a symlink, junction, or reparse point"));
-    if (!std::filesystem::is_regular_file(database, error)) {
-        if (error) return lighter::outcome_error(Error::storage("cannot inspect session database: " + error.message()));
-        return lighter::outcome_error(Error::storage("published session database is not a regular file"));
-    }
+    auto directory_type = detail::inspect_path_no_follow(directory);
+    if (!directory_type) return lighter::outcome_error(std::move(directory_type).error());
+    if (*directory_type == detail::PathType::ABSENT)
+        return lighter::outcome_error(Error::storage("session was not found", ErrorCode::NOT_FOUND));
+    if (*directory_type == detail::PathType::REPARSE_POINT)
+        return lighter::outcome_error(
+            Error::storage("session directory is a symlink, junction, or reparse point", ErrorCode::INVALID_DATA));
+    if (*directory_type != detail::PathType::DIRECTORY)
+        return lighter::outcome_error(Error::storage("session authority is not a directory", ErrorCode::INVALID_DATA));
+    auto database_type = detail::inspect_path_no_follow(database);
+    if (!database_type) return lighter::outcome_error(std::move(database_type).error());
+    if (*database_type == detail::PathType::ABSENT)
+        return lighter::outcome_error(Error::storage("published session database is absent", ErrorCode::NOT_FOUND));
+    if (*database_type == detail::PathType::REPARSE_POINT)
+        return lighter::outcome_error(Error::storage("session database is a symlink, junction, or reparse point", ErrorCode::INVALID_DATA));
+    if (*database_type != detail::PathType::REGULAR_FILE)
+        return lighter::outcome_error(Error::storage("published session database is not a regular file", ErrorCode::INVALID_DATA));
     return {};
 }
 
@@ -514,10 +516,9 @@ Result<CatalogProjection> upsert_projection(const StatePaths &paths, const Sessi
 }
 
 Result<void> settle_projection_marker(const StatePaths &paths, SessionId id, u64 observed_revision) {
-    std::error_code error;
-    const auto marker_exists = std::filesystem::exists(paths.pending_marker(id), error);
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect pending catalog marker: " + error.message()));
-    if (!marker_exists) return {};
+    auto type = detail::inspect_path_no_follow(paths.pending_marker(id));
+    if (!type) return lighter::outcome_error(std::move(type).error());
+    if (*type == detail::PathType::ABSENT) return {};
     return remove_marker_if_satisfied(paths, id, observed_revision);
 }
 
@@ -615,10 +616,12 @@ Result<void> create_state_directory(const std::filesystem::path &path) {
         if (error) return lighter::outcome_error(Error::storage("cannot secure state directory: " + error.message()));
     }
 #endif
-    auto reparse = detail::is_reparse_point(path);
-    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-    if (*reparse)
+    auto type = detail::inspect_path_no_follow(path);
+    if (!type) return lighter::outcome_error(std::move(type).error());
+    if (*type == detail::PathType::REPARSE_POINT)
         return lighter::outcome_error(Error::storage("state directory is a symlink, junction, or reparse point: " + path.generic_string()));
+    if (*type != detail::PathType::DIRECTORY)
+        return lighter::outcome_error(Error::storage("state path is not a directory: " + path.generic_string()));
     return {};
 }
 
@@ -644,18 +647,17 @@ Result<SessionId> staging_path_id(const std::filesystem::path &path) {
 }
 
 Result<void> remove_staging_tree(const std::filesystem::path &path) {
-    auto reparse = detail::is_reparse_point(path);
-    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-    if (*reparse) return lighter::outcome_error(Error::storage("staging entry is a symlink, junction, or reparse point"));
+    auto type = detail::inspect_path_no_follow(path);
+    if (!type) return lighter::outcome_error(std::move(type).error());
+    if (*type == detail::PathType::REPARSE_POINT)
+        return lighter::outcome_error(Error::storage("staging entry is a symlink, junction, or reparse point"));
+    if (*type != detail::PathType::DIRECTORY) return lighter::outcome_error(Error::storage("staging entry is not a directory"));
     std::error_code error;
-    if (!std::filesystem::is_directory(path, error)) {
-        if (error) return lighter::outcome_error(Error::storage("cannot inspect staging entry: " + error.message()));
-        return lighter::outcome_error(Error::storage("staging entry is not a directory"));
-    }
     for (std::filesystem::recursive_directory_iterator iterator(path, error), end; !error && iterator != end; iterator.increment(error)) {
-        auto child_reparse = detail::is_reparse_point(iterator->path());
-        if (!child_reparse) return lighter::outcome_error(std::move(child_reparse).error());
-        if (*child_reparse) return lighter::outcome_error(Error::storage("staging tree contains a reparse point"));
+        auto child_type = detail::inspect_path_no_follow(iterator->path());
+        if (!child_type) return lighter::outcome_error(std::move(child_type).error());
+        if (*child_type == detail::PathType::REPARSE_POINT)
+            return lighter::outcome_error(Error::storage("staging tree contains a reparse point"));
     }
     if (error) return lighter::outcome_error(Error::storage("cannot inspect staging tree: " + error.message()));
     std::filesystem::remove_all(path, error);
@@ -1250,9 +1252,14 @@ Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
     bool projection_pending = false;
     {
         std::scoped_lock marker_lock(state->invalidation->mutex);
-        std::error_code marker_error;
-        projection_pending = std::filesystem::exists(paths.pending_marker(state->id), marker_error);
-        if (marker_error && !degradation) degradation = "cannot inspect pending catalog marker: " + marker_error.message();
+        auto marker_type = detail::inspect_path_no_follow(paths.pending_marker(state->id));
+        if (!marker_type) {
+            degradation = marker_type.error().message();
+        } else if (*marker_type == detail::PathType::REGULAR_FILE) {
+            projection_pending = true;
+        } else if (*marker_type != detail::PathType::ABSENT) {
+            degradation = "catalog marker has an invalid filesystem type";
+        }
         if (catalog_visible || projection_pending) {
             if (auto marker = write_marker(paths, state->id, target_revision); !marker) degradation = marker.error().message();
         }
@@ -1399,17 +1406,13 @@ Result<CatalogReconciliation> cleanup_abandoned_staging(const StatePaths &paths)
 
 Result<bool> catalog_rebuild_pending(const StatePaths &paths) {
     const auto marker = paths.catalog_rebuild_marker();
-    std::error_code error;
-    const auto exists = std::filesystem::exists(marker, error);
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect catalog rebuild marker: " + error.message()));
-    if (!exists) return false;
-    auto reparse = detail::is_reparse_point(marker);
-    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-    if (*reparse) return lighter::outcome_error(Error::storage("catalog rebuild marker is a symlink, junction, or reparse point"));
-    if (!std::filesystem::is_regular_file(marker, error)) {
-        if (error) return lighter::outcome_error(Error::storage("cannot inspect catalog rebuild marker: " + error.message()));
+    auto type = detail::inspect_path_no_follow(marker);
+    if (!type) return lighter::outcome_error(std::move(type).error());
+    if (*type == detail::PathType::ABSENT) return false;
+    if (*type == detail::PathType::REPARSE_POINT)
+        return lighter::outcome_error(Error::storage("catalog rebuild marker is a symlink, junction, or reparse point"));
+    if (*type != detail::PathType::REGULAR_FILE)
         return lighter::outcome_error(Error::storage("catalog rebuild marker is not a regular file"));
-    }
     std::ifstream input(marker, std::ios::binary);
     std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     if (!input || contents != "1\n") return lighter::outcome_error(Error::storage("catalog rebuild marker has invalid format"));
@@ -1422,10 +1425,15 @@ Result<SessionRepository> SessionRepository::open(std::filesystem::path state_ro
     auto repository = open_authority(state_root);
     if (!repository) return lighter::outcome_error(std::move(repository).error());
     if (mode == RepositoryOpenMode::DEFER_CATALOG_REBUILD) {
-        std::error_code error;
-        const auto catalog_exists = std::filesystem::exists(StatePaths{state_root}.catalog(), error);
-        if (error) {
-            repository->state->catalog_error = Error::storage("cannot inspect session catalog: " + error.message());
+        auto catalog_type = detail::inspect_path_no_follow(StatePaths{state_root}.catalog());
+        if (!catalog_type) {
+            repository->state->catalog_error = catalog_type.error();
+            repository->state->warnings.push_back("catalog unavailable: " + repository->state->catalog_error->message());
+            return *std::move(repository);
+        }
+        if (*catalog_type == detail::PathType::REPARSE_POINT ||
+            (*catalog_type != detail::PathType::ABSENT && *catalog_type != detail::PathType::REGULAR_FILE)) {
+            repository->state->catalog_error = Error::storage("session catalog has an invalid filesystem type", ErrorCode::INVALID_DATA);
             repository->state->warnings.push_back("catalog unavailable: " + repository->state->catalog_error->message());
             return *std::move(repository);
         }
@@ -1435,7 +1443,7 @@ Result<SessionRepository> SessionRepository::open(std::filesystem::path state_ro
             repository->state->warnings.push_back("catalog unavailable: " + rebuild_pending.error().message());
             return *std::move(repository);
         }
-        if (!catalog_exists || *rebuild_pending) {
+        if (*catalog_type == detail::PathType::ABSENT || *rebuild_pending) {
             repository->state->catalog_error = Error::storage("catalog rebuild was deferred for exact authoritative access");
             repository->state->warnings.push_back("catalog unavailable: " + repository->state->catalog_error->message());
             return *std::move(repository);
@@ -1522,10 +1530,9 @@ const std::vector<std::string> &SessionRepository::warnings() const noexcept { r
 
 Result<SessionWriter> SessionRepository::create(SessionId id) const {
     const StatePaths paths{state->root};
-    std::error_code error;
-    if (std::filesystem::exists(paths.session_directory(id), error))
-        return lighter::outcome_error(Error::storage("session identity is already published"));
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect target session path: " + error.message()));
+    auto target_type = detail::inspect_path_no_follow(paths.session_directory(id));
+    if (!target_type) return lighter::outcome_error(std::move(target_type).error());
+    if (*target_type != detail::PathType::ABSENT) return lighter::outcome_error(Error::storage("session identity is already published"));
     auto lease = acquire_session_lease(state->root, id);
     if (!lease) return lighter::outcome_error(std::move(lease).error());
     return SessionWriter(std::make_shared<SessionWriter::State>(state, *std::move(lease), id));
@@ -1584,8 +1591,8 @@ Result<CatalogReconciliation> SessionRepository::reconcile_pending() const {
             result.warnings.push_back(id.error().message());
             continue;
         }
-        auto reparse = detail::is_reparse_point(iterator->path());
-        if (!reparse || *reparse) {
+        auto type = detail::inspect_path_no_follow(iterator->path());
+        if (!type || *type != detail::PathType::REGULAR_FILE) {
             result.warnings.push_back("catalog marker is unreadable or a reparse point: " + iterator->path().filename().string());
             continue;
         }
@@ -1657,10 +1664,19 @@ Result<CatalogReconciliation> SessionRepository::rebuild_catalog() const {
             result.warnings.push_back("invalid published session directory: " + iterator->path().filename().string());
             continue;
         }
+        if (state->storage_hook.consume(testing::StorageFailure::CATALOG_REBUILD_PROJECTION_READ)) {
+            return lighter::outcome_error(Error::storage("injected catalog rebuild projection read failure", ErrorCode::IO));
+        }
         auto projection = read_published_projection(paths, *id);
         if (!projection) {
-            result.warnings.push_back("cannot read published session singleton " + to_string(*id) + ": " + projection.error().message());
-            continue;
+            if (projection.error().code == ErrorCode::NOT_FOUND || projection.error().code == ErrorCode::INVALID_DATA) {
+                result.warnings.push_back("cannot read published session singleton " + to_string(*id) + ": " +
+                                          projection.error().message());
+                continue;
+            }
+            return lighter::outcome_error(
+                Error::storage("catalog rebuild could not inspect session " + to_string(*id) + ": " + projection.error().message(),
+                               projection.error().code));
         }
         authoritative.push_back(*std::move(projection));
         ++result.repaired;

@@ -6,6 +6,7 @@
 
 #include <array>
 #include <system_error>
+#include <utility>
 
 #include <lighter/async/vocab/outcome.h>
 
@@ -64,10 +65,18 @@ Result<void> rename_directory_without_replacement(const std::filesystem::path &s
 
 Result<void> flush_published_directory(const std::filesystem::path &) { return {}; }
 
-Result<bool> is_reparse_point(const std::filesystem::path &path) {
+Result<PathType> inspect_path_no_follow(const std::filesystem::path &path) {
     const auto attributes = GetFileAttributesW(path.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES) return lighter::outcome_error(windows_error("cannot inspect state path"));
-    return (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const auto code = GetLastError();
+        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) return PathType::ABSENT;
+        auto error = windows_error("cannot inspect state path");
+        error.code = ErrorCode::IO;
+        return lighter::outcome_error(std::move(error));
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return PathType::REPARSE_POINT;
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return PathType::DIRECTORY;
+    return PathType::REGULAR_FILE;
 }
 
 } // namespace liminal::session::detail

@@ -865,6 +865,44 @@ void test_catalog_initialization_contention_returns_authority_only() {
     require(open_storage(temporary.root).has_value(), "catalog initialization did not recover after its owner released the lease");
 }
 
+void test_healthy_catalog_initialization_contention_is_bounded() {
+    TemporaryState temporary;
+    {
+        auto storage = open_storage(temporary.root);
+        require(storage.has_value(), "failed to initialize healthy catalog contention fixture");
+    }
+    auto acquired_owner = session::detail::acquire_catalog_initialization_lease(temporary.root);
+    require(acquired_owner.has_value(), "failed to hold healthy catalog initialization lease");
+    std::optional<session::detail::CatalogLease> owner{*std::move(acquired_owner)};
+    std::latch started{1};
+    std::optional<Result<session::SessionRepository>> opened;
+    std::jthread opener([&] {
+        started.count_down();
+        opened = session::SessionRepository::open(temporary.root);
+    });
+    started.wait();
+    owner.reset();
+    opener.join();
+    auto catalog = opened && *opened ? (*opened)->catalog() :
+                                       Result<session::SessionCatalog>{lighter::outcome_error(
+                                           opened ? opened->error() : Error::storage("healthy catalog opener did not return"))};
+    require(catalog.has_value(), "brief healthy-catalog initialization contention permanently disabled discovery");
+}
+
+void test_rebuild_inspection_failure_preserves_existing_catalog() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    auto published = storage ? publish(storage->repository, make_session("preserve failed rebuild projection")) :
+                               Result<Published>{lighter::outcome_error(storage.error())};
+    require(published.has_value(), "failed to publish rebuild-preservation fixture");
+    const auto id = published->value.id;
+    session::testing::fail_storage_once(storage->repository, session::testing::StorageFailure::CATALOG_REBUILD_PROJECTION_READ);
+    auto rebuilt = storage->repository.rebuild_catalog();
+    auto projection = storage->catalog.find(id);
+    require(!rebuilt && rebuilt.error().code == ErrorCode::IO && projection && *projection && (*projection)->summary.id == id,
+            "transient rebuild inspection failure committed a partial catalog replacement");
+}
+
 void test_empty_catalog_creation_crash_is_recovered_exclusively() {
     TemporaryState temporary;
     std::ofstream(session::StatePaths{temporary.root}.catalog(), std::ios::binary).close();
@@ -1576,6 +1614,8 @@ void test_published_authority_rejects_linked_session_directory() {
     require(!error, "failed to relocate linked-authority target");
     std::filesystem::create_directory_symlink(target, paths.session_directory(id), error);
     require(!error, "failed to create linked session-directory fixture");
+    std::filesystem::remove_all(target, error);
+    require(!error, "failed to make linked session-directory fixture dangling");
 
     auto repository = session::SessionRepository::open(temporary.root);
     require(repository.has_value(), "failed to reopen linked-authority repository");
@@ -1593,6 +1633,30 @@ void test_published_authority_rejects_linked_session_directory() {
     require(rebuilt && std::ranges::any_of(rebuilt->warnings, [](const std::string &warning) { return warning.contains("symlink"); }) &&
                 projection && !*projection,
             "catalog projection rebuild accepted a linked session authority");
+#endif
+}
+
+void test_dangling_catalog_link_is_not_recreated() {
+#ifndef _WIN32
+    TemporaryState temporary;
+    {
+        auto storage = open_storage(temporary.root);
+        require(storage.has_value(), "failed to initialize dangling-catalog fixture");
+    }
+    const session::StatePaths paths{temporary.root};
+    std::error_code error;
+    for (const auto &path : {paths.catalog(), std::filesystem::path(paths.catalog().string() + "-wal"),
+                             std::filesystem::path(paths.catalog().string() + "-shm")}) {
+        std::filesystem::remove(path, error);
+        error.clear();
+    }
+    const auto missing_target = temporary.root / "missing-catalog-target";
+    std::filesystem::create_symlink(missing_target, paths.catalog(), error);
+    require(!error, "failed to create dangling catalog-link fixture");
+    auto repository = session::SessionRepository::open(temporary.root);
+    auto catalog = repository ? repository->catalog() : Result<session::SessionCatalog>{lighter::outcome_error(repository.error())};
+    require(repository && !catalog && catalog.error().detail.contains("symlink") && std::filesystem::is_symlink(paths.catalog()),
+            "dangling catalog link was classified as absence or followed during creation");
 #endif
 }
 
@@ -1695,6 +1759,8 @@ int main(int argc, char **argv) {
     test_incomplete_catalog_rebuild_is_resumed_after_crash();
     test_concurrent_catalog_initialization_is_serialized();
     test_catalog_initialization_contention_returns_authority_only();
+    test_healthy_catalog_initialization_contention_is_bounded();
+    test_rebuild_inspection_failure_preserves_existing_catalog();
     test_empty_catalog_creation_crash_is_recovered_exclusively();
     test_corrupt_catalog_repair_requires_exclusive_maintenance();
     test_missing_catalog_recreation_requires_exclusive_maintenance();
@@ -1714,6 +1780,7 @@ int main(int argc, char **argv) {
     test_initial_publication_serializes_enqueued_mutations();
     test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session();
     test_published_authority_rejects_linked_session_directory();
+    test_dangling_catalog_link_is_not_recreated();
     test_prepared_switch_keeps_live_state_atomic();
     test_stale_catalog_hint_removal_requires_session_lease();
     test_removed_archive_surface_and_state_root_override();

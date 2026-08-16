@@ -26,6 +26,7 @@ enum struct StorageFailure {
     PUBLICATION_AFTER_RENAME_BEFORE_DIRECTORY_FLUSH,
     PUBLICATION_AFTER_RENAME,
     PUBLICATION_AFTER_REOPEN,
+    CATALOG_REBUILD_PROJECTION_READ,
 };
 
 using StorageHook = std::copyable_function<void(StorageEvent) const>;

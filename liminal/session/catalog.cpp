@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <system_error>
@@ -24,6 +25,7 @@ namespace {
 
 constexpr int k_catalog_application_id = 0x4c494d43;
 constexpr int k_catalog_schema_version = 1;
+constexpr auto k_healthy_catalog_initialization_wait = std::chrono::seconds(1);
 std::mutex catalog_open_mutex;
 
 std::string path_utf8(const std::filesystem::path &path) {
@@ -229,27 +231,50 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
     }
 #endif
     for (const auto &directory : {state_root, state_root / "locks"}) {
-        auto reparse = detail::is_reparse_point(directory);
-        if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-        if (*reparse)
+        auto type = detail::inspect_path_no_follow(directory);
+        if (!type) return lighter::outcome_error(std::move(type).error());
+        if (*type == detail::PathType::REPARSE_POINT)
             return lighter::outcome_error(
                 Error::storage("state path is a symlink, junction, or reparse point: " + directory.generic_string()));
+        if (*type != detail::PathType::DIRECTORY)
+            return lighter::outcome_error(Error::storage("state path is not a directory: " + directory.generic_string()));
     }
-    auto initialization_lease = detail::acquire_catalog_initialization_lease(state_root);
+    const auto catalog_path = state_root / "catalog.sqlite3";
+    auto catalog_type = detail::inspect_path_no_follow(catalog_path);
+    if (!catalog_type) return lighter::outcome_error(std::move(catalog_type).error());
+    if (*catalog_type == detail::PathType::REPARSE_POINT)
+        return lighter::outcome_error(Error::storage("session catalog is a symlink, junction, or reparse point", ErrorCode::INVALID_DATA));
+    if (*catalog_type != detail::PathType::ABSENT && *catalog_type != detail::PathType::REGULAR_FILE)
+        return lighter::outcome_error(Error::storage("session catalog is not a regular file", ErrorCode::INVALID_DATA));
+    const auto rebuild_marker = StatePaths{state_root}.catalog_rebuild_marker();
+    auto marker_type = detail::inspect_path_no_follow(rebuild_marker);
+    if (!marker_type) return lighter::outcome_error(std::move(marker_type).error());
+    if (*marker_type == detail::PathType::REPARSE_POINT)
+        return lighter::outcome_error(
+            Error::storage("catalog rebuild marker is a symlink, junction, or reparse point", ErrorCode::INVALID_DATA));
+    if (*marker_type != detail::PathType::ABSENT && *marker_type != detail::PathType::REGULAR_FILE)
+        return lighter::outcome_error(Error::storage("catalog rebuild marker is not a regular file", ErrorCode::INVALID_DATA));
+    auto catalog_exists = *catalog_type == detail::PathType::REGULAR_FILE;
+    auto rebuild_pending = *marker_type == detail::PathType::REGULAR_FILE;
+    const auto wait = catalog_exists && !rebuild_pending ? k_healthy_catalog_initialization_wait : std::chrono::milliseconds{};
+    auto initialization_lease = detail::acquire_catalog_initialization_lease(state_root, wait);
     if (!initialization_lease) return lighter::outcome_error(std::move(initialization_lease).error());
+    catalog_type = detail::inspect_path_no_follow(catalog_path);
+    if (!catalog_type) return lighter::outcome_error(std::move(catalog_type).error());
+    marker_type = detail::inspect_path_no_follow(rebuild_marker);
+    if (!marker_type) return lighter::outcome_error(std::move(marker_type).error());
+    if (*catalog_type == detail::PathType::REPARSE_POINT || *marker_type == detail::PathType::REPARSE_POINT)
+        return lighter::outcome_error(Error::storage("catalog initialization paths changed to a reparse point", ErrorCode::INVALID_DATA));
+    if ((*catalog_type != detail::PathType::ABSENT && *catalog_type != detail::PathType::REGULAR_FILE) ||
+        (*marker_type != detail::PathType::ABSENT && *marker_type != detail::PathType::REGULAR_FILE)) {
+        return lighter::outcome_error(
+            Error::storage("catalog initialization paths have an invalid filesystem type", ErrorCode::INVALID_DATA));
+    }
+    catalog_exists = *catalog_type == detail::PathType::REGULAR_FILE;
+    rebuild_pending = *marker_type == detail::PathType::REGULAR_FILE;
     auto state = std::make_shared<State>();
     state->root = state_root;
-    state->path = state_root / "catalog.sqlite3";
-    const auto catalog_exists = std::filesystem::exists(state->path, error);
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect session catalog: " + error.message()));
-    if (catalog_exists) {
-        auto reparse = detail::is_reparse_point(state->path);
-        if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-        if (*reparse) return lighter::outcome_error(Error::storage("session catalog is a symlink, junction, or reparse point"));
-    }
-    const auto rebuild_marker = StatePaths{state_root}.catalog_rebuild_marker();
-    const auto rebuild_pending = std::filesystem::exists(rebuild_marker, error);
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect catalog rebuild marker: " + error.message()));
+    state->path = catalog_path;
     auto needs_rebuild = !catalog_exists || rebuild_pending;
     auto maintenance_lease = detail::acquire_catalog_lease(state_root, needs_rebuild);
     if (!maintenance_lease) return lighter::outcome_error(std::move(maintenance_lease).error());
@@ -302,29 +327,27 @@ Result<SessionCatalog> SessionCatalog::repair_corrupt(const std::filesystem::pat
         auto initialization = detail::acquire_catalog_initialization_lease(state_root);
         if (!initialization) return lighter::outcome_error(std::move(initialization).error());
         const auto catalog = state_root / "catalog.sqlite3";
-        std::error_code error;
-        if (std::filesystem::exists(catalog, error)) {
-            auto reparse = detail::is_reparse_point(catalog);
-            if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-            if (*reparse)
-                return lighter::outcome_error(Error::storage("refusing to replace a catalog symlink, junction, or reparse point"));
-        }
-        if (error) return lighter::outcome_error(Error::storage("cannot inspect corrupt catalog: " + error.message()));
-        if (!std::filesystem::is_regular_file(catalog, error)) {
-            if (error) return lighter::outcome_error(Error::storage("cannot inspect corrupt catalog: " + error.message()));
+        auto catalog_type = detail::inspect_path_no_follow(catalog);
+        if (!catalog_type) return lighter::outcome_error(std::move(catalog_type).error());
+        if (*catalog_type == detail::PathType::REPARSE_POINT)
+            return lighter::outcome_error(Error::storage("refusing to replace a catalog symlink, junction, or reparse point"));
+        if (*catalog_type == detail::PathType::ABSENT)
             return lighter::outcome_error(Error::storage("cannot repair an absent session catalog"));
-        }
+        if (*catalog_type != detail::PathType::REGULAR_FILE)
+            return lighter::outcome_error(Error::storage("cannot repair a catalog that is not a regular file"));
         auto maintenance = detail::acquire_catalog_lease(state_root, true);
         if (!maintenance) return lighter::outcome_error(std::move(maintenance).error());
         const auto suffix = ".corrupt." + to_string(generate_session_id());
+        std::error_code error;
         std::filesystem::rename(catalog, catalog.string() + suffix, error);
         if (error) return lighter::outcome_error(Error::storage("cannot preserve corrupt catalog for replacement: " + error.message()));
         for (const auto sidecar : {std::string("-wal"), std::string("-shm")}) {
             const auto source = std::filesystem::path(catalog.string() + sidecar);
-            if (!std::filesystem::exists(source, error)) {
-                if (error) return lighter::outcome_error(Error::storage("cannot inspect corrupt catalog sidecar: " + error.message()));
-                continue;
-            }
+            auto source_type = detail::inspect_path_no_follow(source);
+            if (!source_type) return lighter::outcome_error(std::move(source_type).error());
+            if (*source_type == detail::PathType::ABSENT) continue;
+            if (*source_type != detail::PathType::REGULAR_FILE)
+                return lighter::outcome_error(Error::storage("refusing to preserve an invalid catalog sidecar path"));
             std::filesystem::rename(source, source.string() + suffix, error);
             if (error) return lighter::outcome_error(Error::storage("cannot preserve corrupt catalog sidecar: " + error.message()));
         }
@@ -458,22 +481,6 @@ Result<std::optional<CatalogProjection>> SessionCatalog::find(SessionId id) cons
         .observed_revision = static_cast<u64>(sqlite3_column_int64(query->value, 0)),
         .workspace_key = text(query->value, 1),
     }};
-}
-
-Result<std::vector<SessionId>> SessionCatalog::ids() const {
-    std::scoped_lock lock(state->mutex);
-    auto query = prepare(state->database, "SELECT id FROM sessions ORDER BY id");
-    if (!query) return lighter::outcome_error(std::move(query).error());
-    std::vector<SessionId> result;
-    while (true) {
-        const auto row = sqlite3_step(query->value);
-        if (row == SQLITE_DONE) break;
-        if (row != SQLITE_ROW) return lighter::outcome_error(sqlite_error(state->database, "cannot enumerate catalog identities", row));
-        auto id = column_id(query->value, 0);
-        if (!id) return lighter::outcome_error(std::move(id).error());
-        result.push_back(*id);
-    }
-    return result;
 }
 
 Result<void> SessionCatalog::upsert(const CatalogProjection &projection) const {
