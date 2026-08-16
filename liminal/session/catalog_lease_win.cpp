@@ -1,4 +1,5 @@
 #include "catalog_lease.h"
+#include "durable_fs.h"
 
 #ifdef _WIN32
 
@@ -6,12 +7,55 @@
 
 #include <algorithm>
 #include <chrono>
+#include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 #include <lighter/async/vocab/outcome.h>
 
 namespace liminal::session::detail {
+
+namespace {
+
+Result<void> validate_lock_directories(const std::filesystem::path &state_root) {
+    for (const auto &directory : {state_root, state_root / "locks"}) {
+        auto type = inspect_path_no_follow(directory);
+        if (!type) return lighter::outcome_error(std::move(type).error());
+        if (*type == PathType::REPARSE_POINT) {
+            return lighter::outcome_error(
+                Error::storage("catalog lock path is a symlink, junction, or reparse point: " + directory.generic_string()));
+        }
+        if (*type != PathType::DIRECTORY) {
+            return lighter::outcome_error(Error::storage("catalog lock path is not a directory: " + directory.generic_string()));
+        }
+    }
+    return {};
+}
+
+Result<HANDLE> open_lock_file(const std::filesystem::path &path, std::string_view description) {
+    const auto file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return lighter::outcome_error(Error::storage("cannot open " + std::string(description) + ": " +
+                                                     std::system_category().message(static_cast<int>(GetLastError()))));
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(file, &info)) {
+        const auto code = GetLastError();
+        CloseHandle(file);
+        return lighter::outcome_error(
+            Error::storage("cannot inspect catalog lock file: " + std::system_category().message(static_cast<int>(code))));
+    }
+    if ((info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        CloseHandle(file);
+        return lighter::outcome_error(Error::storage("catalog lock file is a reparse point or directory"));
+    }
+    return file;
+}
+
+} // namespace
 
 struct CatalogLease::State {
     HANDLE file = INVALID_HANDLE_VALUE;
@@ -23,17 +67,10 @@ struct CatalogLease::State {
 };
 
 Result<CatalogLease> acquire_catalog_lease(const std::filesystem::path &state_root, bool exclusive) {
-    std::error_code error;
-    const auto directory = state_root / "locks";
-    std::filesystem::create_directories(directory, error);
-    if (error) return lighter::outcome_error(Error::storage("cannot create catalog lock directory: " + error.message()));
-    const auto path = directory / "catalog-maintenance.lock";
-    const auto file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return lighter::outcome_error(
-            Error::storage("cannot open catalog maintenance lock: " + std::system_category().message(static_cast<int>(GetLastError()))));
-    }
+    if (auto valid = validate_lock_directories(state_root); !valid) return lighter::outcome_error(std::move(valid).error());
+    auto opened = open_lock_file(state_root / "locks" / "catalog-maintenance.lock", "catalog maintenance lock");
+    if (!opened) return lighter::outcome_error(std::move(opened).error());
+    const auto file = *opened;
     OVERLAPPED overlap{};
     const auto flags = (exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0) | LOCKFILE_FAIL_IMMEDIATELY;
     if (!LockFileEx(file, flags, 0, 1, 0, &overlap)) {
@@ -53,13 +90,11 @@ Result<CatalogLease> acquire_catalog_lease(const std::filesystem::path &state_ro
 
 Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &state_root, std::chrono::milliseconds timeout) {
     using namespace std::chrono_literals;
+    if (auto valid = validate_lock_directories(state_root); !valid) return lighter::outcome_error(std::move(valid).error());
     const auto path = state_root / "locks" / "catalog-initialize.lock";
-    const auto file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return lighter::outcome_error(
-            Error::storage("cannot open catalog initialization lock: " + std::system_category().message(static_cast<int>(GetLastError()))));
-    }
+    auto opened = open_lock_file(path, "catalog initialization lock");
+    if (!opened) return lighter::outcome_error(std::move(opened).error());
+    const auto file = *opened;
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (true) {
         OVERLAPPED overlap{};
@@ -71,6 +106,7 @@ Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem:
                 Error::storage("cannot acquire catalog initialization lock: " + std::system_category().message(static_cast<int>(code))));
         }
         if (code == ERROR_IO_PENDING) CancelIoEx(file, &overlap);
+        notify_catalog_initialization_conflict();
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
             CloseHandle(file);

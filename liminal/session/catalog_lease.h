@@ -26,5 +26,6 @@ private:
 
 Result<CatalogLease> acquire_catalog_lease(const std::filesystem::path &state_root, bool exclusive);
 Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem::path &state_root, std::chrono::milliseconds timeout = {});
+void notify_catalog_initialization_conflict();
 
 } // namespace liminal::session::detail

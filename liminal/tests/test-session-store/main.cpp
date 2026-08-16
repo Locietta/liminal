@@ -79,6 +79,10 @@ struct StorageHookReset {
     session::SessionRepository &repository;
 };
 
+struct CatalogConflictHookReset {
+    ~CatalogConflictHookReset() { session::testing::set_catalog_initialization_conflict_hook({}); }
+};
+
 struct Storage {
     session::SessionCatalog catalog;
     session::SessionRepository repository;
@@ -874,13 +878,12 @@ void test_healthy_catalog_initialization_contention_is_bounded() {
     auto acquired_owner = session::detail::acquire_catalog_initialization_lease(temporary.root);
     require(acquired_owner.has_value(), "failed to hold healthy catalog initialization lease");
     std::optional<session::detail::CatalogLease> owner{*std::move(acquired_owner)};
-    std::latch started{1};
+    std::latch conflicted{1};
+    session::testing::set_catalog_initialization_conflict_hook([&] { conflicted.count_down(); });
+    CatalogConflictHookReset reset_hook;
     std::optional<Result<session::SessionRepository>> opened;
-    std::jthread opener([&] {
-        started.count_down();
-        opened = session::SessionRepository::open(temporary.root);
-    });
-    started.wait();
+    std::jthread opener([&] { opened = session::SessionRepository::open(temporary.root); });
+    conflicted.wait();
     owner.reset();
     opener.join();
     auto catalog = opened && *opened ? (*opened)->catalog() :
@@ -1660,6 +1663,82 @@ void test_dangling_catalog_link_is_not_recreated() {
 #endif
 }
 
+void test_sqlite_sidecar_and_lease_links_are_rejected() {
+#ifndef _WIN32
+    TemporaryState temporary;
+    session::SessionId id;
+    {
+        auto storage = open_storage(temporary.root);
+        auto published = storage ? publish(storage->repository, make_session("linked auxiliary paths")) :
+                                   Result<Published>{lighter::outcome_error(storage.error())};
+        require(published.has_value(), "failed to publish linked-auxiliary fixture");
+        id = published->value.id;
+    }
+    const session::StatePaths paths{temporary.root};
+    const auto missing_target = temporary.root / "missing-auxiliary-target";
+    std::error_code error;
+
+    const auto session_wal = std::filesystem::path(paths.session_database(id).string() + "-wal");
+    std::filesystem::create_symlink(missing_target, session_wal, error);
+    require(!error, "failed to create linked session WAL fixture");
+    {
+        auto repository = session::SessionRepository::open(temporary.root);
+        auto acquired = repository ? repository->acquire(id) : Result<session::SessionWriter>{lighter::outcome_error(repository.error())};
+        require(repository && !acquired && acquired.error().detail.contains("SQLite auxiliary file is a symlink"),
+                "session acquisition followed or ignored a linked SQLite sidecar");
+    }
+    std::filesystem::remove(session_wal, error);
+    require(!error, "failed to remove linked session WAL fixture");
+
+    const auto catalog_wal = std::filesystem::path(paths.catalog().string() + "-wal");
+    std::filesystem::create_symlink(missing_target, catalog_wal, error);
+    require(!error, "failed to create linked catalog WAL fixture");
+    {
+        auto repository = session::SessionRepository::open(temporary.root);
+        auto catalog = repository ? repository->catalog() : Result<session::SessionCatalog>{lighter::outcome_error(repository.error())};
+        require(repository && !catalog && catalog.error().detail.contains("SQLite auxiliary file is a symlink"),
+                "catalog open followed or ignored a linked SQLite sidecar");
+    }
+    std::filesystem::remove(catalog_wal, error);
+    require(!error, "failed to remove linked catalog WAL fixture");
+
+    const auto session_lock = paths.locks() / (session::to_string(id) + ".lock");
+    std::filesystem::remove(session_lock, error);
+    require(!error, "failed to remove session lock fixture");
+    std::filesystem::create_symlink(missing_target, session_lock, error);
+    require(!error, "failed to create linked session lock fixture");
+    auto session_lease = session::acquire_session_lease(temporary.root, id);
+    require(!session_lease, "session lease followed a linked lock file");
+    std::filesystem::remove(session_lock, error);
+    require(!error, "failed to remove linked session lock fixture");
+
+    const auto catalog_lock = paths.locks() / "catalog-initialize.lock";
+    std::filesystem::remove(catalog_lock, error);
+    require(!error, "failed to remove catalog initialization lock fixture");
+    std::filesystem::create_symlink(missing_target, catalog_lock, error);
+    require(!error, "failed to create linked catalog lock fixture");
+    auto repository = session::SessionRepository::open(temporary.root);
+    auto catalog = repository ? repository->catalog() : Result<session::SessionCatalog>{lighter::outcome_error(repository.error())};
+    require(repository && !catalog, "catalog initialization followed a linked lock file");
+#endif
+}
+
+void test_catalog_repair_validates_root_before_lock_creation() {
+#ifndef _WIN32
+    TemporaryState temporary;
+    const auto target = temporary.root / "catalog-repair-target";
+    const auto linked_root = temporary.root / "catalog-repair-link";
+    std::error_code error;
+    std::filesystem::create_directories(target, error);
+    require(!error, "failed to create linked catalog-repair target");
+    std::filesystem::create_directory_symlink(target, linked_root, error);
+    require(!error, "failed to create linked catalog-repair root");
+    auto repaired = session::SessionRepository::repair_catalog(linked_root);
+    require(!repaired && !std::filesystem::exists(target / "locks"),
+            "direct catalog repair created lock state through an unvalidated root link");
+#endif
+}
+
 void test_prepared_switch_keeps_live_state_atomic() {
     TemporaryState temporary;
     auto storage = open_storage(temporary.root);
@@ -1781,6 +1860,8 @@ int main(int argc, char **argv) {
     test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session();
     test_published_authority_rejects_linked_session_directory();
     test_dangling_catalog_link_is_not_recreated();
+    test_sqlite_sidecar_and_lease_links_are_rejected();
+    test_catalog_repair_validates_root_before_lock_creation();
     test_prepared_switch_keeps_live_state_atomic();
     test_stale_catalog_hint_removal_requires_session_lease();
     test_removed_archive_surface_and_state_root_override();

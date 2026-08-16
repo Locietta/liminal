@@ -30,6 +30,7 @@ enum struct StorageFailure {
 };
 
 using StorageHook = std::copyable_function<void(StorageEvent) const>;
+using CatalogInitializationConflictHook = std::copyable_function<void() const>;
 
 struct StorageHookAccess {
     static void set(SessionRepository &repository, StorageHook hook);
@@ -43,6 +44,7 @@ struct PersistenceQueueAccess {
 
 inline void set_storage_hook(SessionRepository &repository, StorageHook hook) { StorageHookAccess::set(repository, std::move(hook)); }
 inline void fail_storage_once(SessionRepository &repository, StorageFailure failure) { StorageHookAccess::fail_once(repository, failure); }
+void set_catalog_initialization_conflict_hook(CatalogInitializationConflictHook hook);
 
 std::shared_ptr<PersistenceQueue> create_reopening_queue(std::filesystem::path state_root, SessionId id, std::string detail,
                                                          StorageHook hook);

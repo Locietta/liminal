@@ -202,9 +202,12 @@ COMMIT;
 }
 
 Result<sqlite3 *> open_database(const std::filesystem::path &path, bool create, bool wal) {
+    if (auto valid = detail::validate_sqlite_paths_no_follow(path, create); !valid) {
+        return lighter::outcome_error(std::move(valid).error());
+    }
     sqlite3 *database = nullptr;
     const auto encoded = path_utf8(path);
-    const auto flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | (create ? SQLITE_OPEN_CREATE : 0);
+    const auto flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW | (create ? SQLITE_OPEN_CREATE : 0);
     const auto code = sqlite3_open_v2(encoded.c_str(), &database, flags, nullptr);
     if (code != SQLITE_OK) {
         const auto error = sqlite_error(database, create ? "cannot create staged session database" : "cannot open session database", code);
@@ -232,6 +235,10 @@ Result<sqlite3 *> open_database(const std::filesystem::path &path, bool create, 
     if (sqlite3_step(mode->value) != SQLITE_ROW || text(mode->value, 0) != expected) {
         sqlite3_close(database);
         return lighter::outcome_error(Error::storage(std::string("session database did not enter ") + expected + " journal mode"));
+    }
+    if (auto valid = detail::validate_sqlite_paths_no_follow(path, false); !valid) {
+        sqlite3_close(database);
+        return lighter::outcome_error(std::move(valid).error());
     }
     return database;
 }
@@ -487,9 +494,13 @@ Result<void> validate_published_authority(const StatePaths &paths, SessionId id)
 
 Result<CatalogProjection> read_published_projection(const StatePaths &paths, SessionId id) {
     if (auto valid = validate_published_authority(paths, id); !valid) return lighter::outcome_error(std::move(valid).error());
+    if (auto valid = detail::validate_sqlite_paths_no_follow(paths.session_database(id), false); !valid) {
+        return lighter::outcome_error(std::move(valid).error());
+    }
     sqlite3 *database = nullptr;
     const auto encoded = path_utf8(paths.session_database(id));
-    const auto code = sqlite3_open_v2(encoded.c_str(), &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nullptr);
+    const auto code =
+        sqlite3_open_v2(encoded.c_str(), &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nullptr);
     if (code != SQLITE_OK) {
         const auto error_result = sqlite_error(database, "cannot open session database projection", code);
         if (database) sqlite3_close(database);
@@ -504,6 +515,11 @@ Result<CatalogProjection> read_published_projection(const StatePaths &paths, Ses
         return lighter::outcome_error(std::move(valid).error());
     }
     auto projection = read_projection(database, id);
+    if (projection) {
+        if (auto valid = detail::validate_sqlite_paths_no_follow(paths.session_database(id), false); !valid) {
+            projection = lighter::outcome_error(std::move(valid).error());
+        }
+    }
     sqlite3_close(database);
     return projection;
 }
@@ -1530,11 +1546,11 @@ const std::vector<std::string> &SessionRepository::warnings() const noexcept { r
 
 Result<SessionWriter> SessionRepository::create(SessionId id) const {
     const StatePaths paths{state->root};
+    auto lease = acquire_session_lease(state->root, id);
+    if (!lease) return lighter::outcome_error(std::move(lease).error());
     auto target_type = detail::inspect_path_no_follow(paths.session_directory(id));
     if (!target_type) return lighter::outcome_error(std::move(target_type).error());
     if (*target_type != detail::PathType::ABSENT) return lighter::outcome_error(Error::storage("session identity is already published"));
-    auto lease = acquire_session_lease(state->root, id);
-    if (!lease) return lighter::outcome_error(std::move(lease).error());
     return SessionWriter(std::make_shared<SessionWriter::State>(state, *std::move(lease), id));
 }
 

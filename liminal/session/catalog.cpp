@@ -6,7 +6,6 @@
 #include "paths.h"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -118,6 +117,44 @@ enum struct CatalogInitialization {
     NEEDS_CREATION,
 };
 
+Result<void> prepare_state_directory(const std::filesystem::path &path, std::string_view description) {
+    auto type = detail::inspect_path_no_follow(path);
+    if (!type) return lighter::outcome_error(std::move(type).error());
+    bool created = false;
+    if (*type == detail::PathType::ABSENT) {
+        std::error_code error;
+        created = std::filesystem::create_directories(path, error);
+        if (error) return lighter::outcome_error(Error::storage("cannot create " + std::string(description) + ": " + error.message()));
+        type = detail::inspect_path_no_follow(path);
+        if (!type) return lighter::outcome_error(std::move(type).error());
+    }
+    if (*type == detail::PathType::REPARSE_POINT) {
+        return lighter::outcome_error(
+            Error::storage(std::string(description) + " is a symlink, junction, or reparse point: " + path.generic_string()));
+    }
+    if (*type != detail::PathType::DIRECTORY) {
+        return lighter::outcome_error(Error::storage(std::string(description) + " is not a directory: " + path.generic_string()));
+    }
+#ifndef _WIN32
+    if (created) {
+        std::error_code error;
+        std::filesystem::permissions(path, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, error);
+        if (error) return lighter::outcome_error(Error::storage("cannot secure state directory: " + error.message()));
+    }
+#endif
+    return {};
+}
+
+Result<void> prepare_catalog_directories(const std::filesystem::path &state_root) {
+    if (auto prepared = prepare_state_directory(state_root, "state root"); !prepared) {
+        return lighter::outcome_error(std::move(prepared).error());
+    }
+    if (auto prepared = prepare_state_directory(state_root / "locks", "catalog lock directory"); !prepared) {
+        return lighter::outcome_error(std::move(prepared).error());
+    }
+    return {};
+}
+
 Result<CatalogInitialization> initialize(sqlite3 *database, const std::filesystem::path &rebuild_marker, bool allow_creation) {
     if (auto begun = execute(database, "BEGIN IMMEDIATE"); !begun) return lighter::outcome_error(std::move(begun).error());
     const auto fail = [database](Error error) -> Result<CatalogInitialization> {
@@ -217,28 +254,7 @@ struct SessionCatalog::State {
 
 Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_root) {
     std::scoped_lock process_lock(catalog_open_mutex);
-    std::error_code error;
-    const auto created_root = std::filesystem::create_directories(state_root, error);
-    if (error) return lighter::outcome_error(Error::storage("cannot create state root: " + error.message()));
-    const auto created_locks = std::filesystem::create_directories(state_root / "locks", error);
-    if (error) return lighter::outcome_error(Error::storage("cannot create catalog lock directory: " + error.message()));
-#ifndef _WIN32
-    for (const auto &[directory, created] :
-         std::array{std::pair{state_root, created_root}, std::pair{state_root / "locks", created_locks}}) {
-        if (!created) continue;
-        std::filesystem::permissions(directory, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, error);
-        if (error) return lighter::outcome_error(Error::storage("cannot secure state directory: " + error.message()));
-    }
-#endif
-    for (const auto &directory : {state_root, state_root / "locks"}) {
-        auto type = detail::inspect_path_no_follow(directory);
-        if (!type) return lighter::outcome_error(std::move(type).error());
-        if (*type == detail::PathType::REPARSE_POINT)
-            return lighter::outcome_error(
-                Error::storage("state path is a symlink, junction, or reparse point: " + directory.generic_string()));
-        if (*type != detail::PathType::DIRECTORY)
-            return lighter::outcome_error(Error::storage("state path is not a directory: " + directory.generic_string()));
-    }
+    if (auto prepared = prepare_catalog_directories(state_root); !prepared) return lighter::outcome_error(std::move(prepared).error());
     const auto catalog_path = state_root / "catalog.sqlite3";
     auto catalog_type = detail::inspect_path_no_follow(catalog_path);
     if (!catalog_type) return lighter::outcome_error(std::move(catalog_type).error());
@@ -282,9 +298,13 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
     state->rebuild_exclusive = needs_rebuild;
     if (needs_rebuild) state->initialization_lease = *std::move(initialization_lease);
     const auto open_database = [&]() -> Result<void> {
+        if (auto valid = detail::validate_sqlite_paths_no_follow(state->path, needs_rebuild); !valid) {
+            return lighter::outcome_error(std::move(valid).error());
+        }
         const auto encoded = path_utf8(state->path);
         const auto code =
-            sqlite3_open_v2(encoded.c_str(), &state->database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
+            sqlite3_open_v2(encoded.c_str(), &state->database,
+                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nullptr);
         if (code != SQLITE_OK) return lighter::outcome_error(sqlite_error(state->database, "cannot open session catalog", code));
         if (sqlite3_libversion_number() < 3051003 || sqlite3_libversion_number() >= 4000000) {
             return lighter::outcome_error(Error::storage("SQLite 3.51.3 or newer (and older than 4.0) is required"));
@@ -319,14 +339,21 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
     if (sqlite3_step(wal->value) != SQLITE_ROW || text(wal->value, 0) != "wal") {
         return lighter::outcome_error(Error::storage("session catalog did not enter WAL journal mode"));
     }
+    if (auto valid = detail::validate_sqlite_paths_no_follow(state->path, false); !valid) {
+        return lighter::outcome_error(std::move(valid).error());
+    }
     return SessionCatalog(std::move(state));
 }
 
 Result<SessionCatalog> SessionCatalog::repair_corrupt(const std::filesystem::path &state_root) {
+    if (auto prepared = prepare_catalog_directories(state_root); !prepared) return lighter::outcome_error(std::move(prepared).error());
     const auto replaced = [&]() -> Result<void> {
         auto initialization = detail::acquire_catalog_initialization_lease(state_root);
         if (!initialization) return lighter::outcome_error(std::move(initialization).error());
         const auto catalog = state_root / "catalog.sqlite3";
+        if (auto valid = detail::validate_sqlite_paths_no_follow(catalog, false); !valid) {
+            return lighter::outcome_error(std::move(valid).error());
+        }
         auto catalog_type = detail::inspect_path_no_follow(catalog);
         if (!catalog_type) return lighter::outcome_error(std::move(catalog_type).error());
         if (*catalog_type == detail::PathType::REPARSE_POINT)
@@ -341,7 +368,7 @@ Result<SessionCatalog> SessionCatalog::repair_corrupt(const std::filesystem::pat
         std::error_code error;
         std::filesystem::rename(catalog, catalog.string() + suffix, error);
         if (error) return lighter::outcome_error(Error::storage("cannot preserve corrupt catalog for replacement: " + error.message()));
-        for (const auto sidecar : {std::string("-wal"), std::string("-shm")}) {
+        for (const auto sidecar : {std::string("-journal"), std::string("-wal"), std::string("-shm")}) {
             const auto source = std::filesystem::path(catalog.string() + sidecar);
             auto source_type = detail::inspect_path_no_follow(source);
             if (!source_type) return lighter::outcome_error(std::move(source_type).error());
