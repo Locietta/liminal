@@ -60,7 +60,7 @@ Interactive switching must preserve the current live session until both preparat
 
 Naming is an authoritative session mutation and follows the same ownership and persistence rules as semantic history. It does not advance conversation recency. After its session commit, Liminal makes a bounded synchronous catalog-refresh attempt so selectors normally reflect the new title immediately.
 
-Every published session participates in ordinary workspace discovery. Conversation recency advances non-regressingly when a user task is admitted and becomes durable atomically with that task start. Output, tools, task completion, recovery bookkeeping, model changes, rename, checkout, compaction, catalog repair, and SQLite maintenance do not advance it.
+There is no archived or otherwise hidden session state: every published session remains resumable and participates in ordinary workspace discovery until a future explicit deletion removes it. Conversation recency advances non-regressingly when a user task is admitted and becomes durable atomically with that task start. Output, tools, task completion, recovery bookkeeping, model changes, rename, checkout, compaction, catalog repair, and SQLite maintenance do not advance it.
 
 ## Catalog recovery
 
