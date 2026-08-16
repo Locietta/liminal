@@ -3,6 +3,7 @@
 
 #include "catalog.h"
 #include "catalog_lease.h"
+#include "catalog_validation.h"
 #include "codec.h"
 #include "durable_fs.h"
 #include "lease.h"
@@ -392,7 +393,10 @@ Result<void> remove_marker_if_satisfied(const StatePaths &paths, SessionId id, u
 }
 
 Result<CatalogProjection> read_projection(sqlite3 *database, SessionId expected) {
-    auto query = prepare(database, "SELECT session_id,revision,workspace_key,updated_at_ms,title,preview FROM session WHERE singleton=1");
+    auto query = prepare(database, R"sql(
+SELECT session_id,revision,created_at_ms,updated_at_ms,workspace_root,workspace_key,title,preview
+FROM session WHERE singleton=1
+)sql");
     if (!query) return lighter::outcome_error(std::move(query).error());
     const auto row = sqlite3_step(query->value);
     if (row == SQLITE_DONE) return lighter::outcome_error(Error::storage("session database has no singleton row"));
@@ -400,14 +404,19 @@ Result<CatalogProjection> read_projection(sqlite3 *database, SessionId expected)
     auto id = column_id(query->value, 0);
     if (!id) return lighter::outcome_error(std::move(id).error());
     if (*id != expected) return lighter::outcome_error(Error::storage("session database identity does not match its directory"));
-    return CatalogProjection{
+    const auto created_at_ms = sqlite3_column_int64(query->value, 2);
+    const auto workspace_root = text(query->value, 4);
+    CatalogProjection projection{
         .summary = {.id = *id,
                     .updated_at_ms = sqlite3_column_int64(query->value, 3),
-                    .title = optional_text(query->value, 4),
-                    .preview = text(query->value, 5)},
+                    .title = optional_text(query->value, 6),
+                    .preview = text(query->value, 7)},
         .observed_revision = static_cast<u64>(sqlite3_column_int64(query->value, 1)),
-        .workspace_key = text(query->value, 2),
+        .workspace_key = text(query->value, 5),
     };
+    if (auto valid = detail::validate_authoritative_projection(projection, created_at_ms, workspace_root); !valid)
+        return lighter::outcome_error(std::move(valid).error());
+    return projection;
 }
 
 Result<CatalogProjection> read_published_projection(const StatePaths &paths, SessionId id) {
@@ -626,12 +635,23 @@ struct StagedBaseline {
     u64 tokens_used = 0;
 };
 
+enum struct WriterMaterialization {
+    EMPTY,
+    STAGED,
+    PUBLISHED_NEEDS_ATTACH,
+    PUBLISHED,
+};
+
 struct SessionWriter::State {
     State(std::shared_ptr<SessionRepository::State> repository, SessionLease lease, SessionId id)
-        : repository(std::move(repository)), invalidation(std::make_shared<CatalogInvalidationOwner>(std::move(lease))), id(id) {}
+        : repository(std::move(repository)), invalidation(std::make_shared<CatalogInvalidationOwner>(std::move(lease))), id(id) {
+        if (this->repository->catalog_error) {
+            invalidation->status = {.degraded = true, .detail = this->repository->catalog_error->message()};
+        }
+    }
     ~State() {
         if (database) sqlite3_close(database);
-        if (!published && !staging_directory.empty()) {
+        if (!staging_directory.empty()) {
             std::error_code error;
             std::filesystem::remove_all(staging_directory, error);
         }
@@ -644,8 +664,8 @@ struct SessionWriter::State {
     DurableHead head;
     std::vector<EncodedEntry> staged_entries;
     std::optional<StagedBaseline> staged_baseline;
-    bool published = false;
-    bool staged = false;
+    std::optional<std::string> publication_degradation;
+    WriterMaterialization materialization = WriterMaterialization::EMPTY;
     std::mutex mutex;
 };
 
@@ -727,7 +747,7 @@ VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?2
         .entry_count = prepared.delta.entry_count,
         .tokens_used = prepared.delta.tokens_used,
     };
-    state.staged = true;
+    state.materialization = WriterMaterialization::STAGED;
     return {};
 }
 
@@ -788,46 +808,71 @@ UPDATE session SET created_at_ms=?3,updated_at_ms=?4,workspace_root=?5,workspace
 }
 
 struct PublishedAuthority {
-    CatalogProjection projection;
     std::optional<std::string> degradation;
 };
+
+Result<void> inject_publication_failure(SessionWriter::State &state, testing::StorageFailure failure) {
+    if (!state.repository->storage_hook.consume(failure)) return {};
+    return lighter::outcome_error(Error::storage("injected staged publication failure"));
+}
+
+Result<PublishedAuthority> attach_published(SessionWriter::State &state) {
+    const StatePaths paths{state.repository->root};
+    auto opened = open_database(paths.session_database(state.id), false, true);
+    if (!opened) return lighter::outcome_error(std::move(opened).error());
+    if (auto injected = inject_publication_failure(state, testing::StorageFailure::PUBLICATION_AFTER_REOPEN); !injected) {
+        sqlite3_close(*opened);
+        return lighter::outcome_error(std::move(injected).error());
+    }
+    auto projection = read_projection(*opened, state.id);
+    if (!projection) {
+        sqlite3_close(*opened);
+        return lighter::outcome_error(std::move(projection).error());
+    }
+    state.database = *opened;
+    state.materialization = WriterMaterialization::PUBLISHED;
+    state.staged_entries.clear();
+    state.staged_entries.shrink_to_fit();
+    state.staged_baseline.reset();
+    return PublishedAuthority{.degradation = state.publication_degradation};
+}
 
 Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const SessionDelta &delta) {
     if (auto valid = validate_staged_final(state, delta); !valid) return lighter::outcome_error(std::move(valid).error());
     if (auto updated = update_staged_singleton(state, delta); !updated) return lighter::outcome_error(std::move(updated).error());
     const StatePaths paths{state.repository->root};
-    std::optional<std::string> degradation;
     {
         std::scoped_lock marker_lock(state.invalidation->mutex);
-        if (auto marker = write_marker(paths, state.id, 1); !marker) degradation = marker.error().message();
+        auto marker = write_marker(paths, state.id, 1);
+        state.publication_degradation = marker ? std::nullopt : std::optional{marker.error().message()};
     }
+    if (auto injected = inject_publication_failure(state, testing::StorageFailure::PUBLICATION_BEFORE_RENAME); !injected)
+        return lighter::outcome_error(std::move(injected).error());
     if (auto published = detail::publish_directory_without_replacement(state.staging_directory, paths.session_directory(state.id));
         !published) {
         return lighter::outcome_error(std::move(published).error());
     }
     state.staging_directory.clear();
-    state.published = true;
-    state.staged = false;
-    state.staged_entries.clear();
-    state.staged_entries.shrink_to_fit();
-    state.staged_baseline.reset();
-    auto opened = open_database(paths.session_database(state.id), false, true);
-    if (!opened) return lighter::outcome_error(std::move(opened).error());
-    state.database = *opened;
-    auto projection = read_projection(state.database, state.id);
-    if (!projection) return lighter::outcome_error(std::move(projection).error());
-    return PublishedAuthority{.projection = *std::move(projection), .degradation = std::move(degradation)};
+    state.materialization = WriterMaterialization::PUBLISHED_NEEDS_ATTACH;
+    if (auto injected = inject_publication_failure(state, testing::StorageFailure::PUBLICATION_AFTER_RENAME); !injected)
+        return lighter::outcome_error(std::move(injected).error());
+    return attach_published(state);
 }
 
 SessionCommitResult project_publication(SessionWriter::State &state, PublishedAuthority published) {
     const StatePaths paths{state.repository->root};
-    auto projection = upsert_projection(paths, state.repository->catalog, state.id);
-    if (!projection) {
-        published.degradation = projection.error().message();
+    if (!state.repository->catalog) {
+        published.degradation =
+            state.repository->catalog_error ? state.repository->catalog_error->message() : "session catalog is unavailable";
     } else {
-        std::scoped_lock marker_lock(state.invalidation->mutex);
-        if (auto settled = settle_projection_marker(paths, state.id, projection->observed_revision); !settled)
-            published.degradation = settled.error().message();
+        auto projection = upsert_projection(paths, *state.repository->catalog, state.id);
+        if (!projection) {
+            published.degradation = projection.error().message();
+        } else {
+            std::scoped_lock marker_lock(state.invalidation->mutex);
+            if (auto settled = settle_projection_marker(paths, state.id, projection->observed_revision); !settled)
+                published.degradation = settled.error().message();
+        }
     }
     set_catalog_status(*state.invalidation, published.degradation);
     return {.catalog_degradation = std::move(published.degradation)};
@@ -939,7 +984,8 @@ private:
 
 Result<Session> SessionWriter::load() {
     std::scoped_lock lock(state->mutex);
-    if (!state->published || !state->database) return lighter::outcome_error(Error::storage("session is not published"));
+    if (state->materialization != WriterMaterialization::PUBLISHED || !state->database)
+        return lighter::outcome_error(Error::storage("session is not published"));
     auto singleton = prepare(state->database, R"sql(
 SELECT session_id,created_at_ms,updated_at_ms,workspace_root,workspace_key,working_directory,title,preview,
  active_leaf_entry_id,next_entry_id,next_task_id,next_provider_call_id,last_provider,last_model,last_reasoning_effort,
@@ -1035,44 +1081,46 @@ Result<void> SessionWriter::stage_initial(const SessionDelta &delta) {
     auto prepared = prepare_delta(delta, head);
     if (!prepared) return lighter::outcome_error(std::move(prepared).error());
     std::scoped_lock lock(state->mutex);
-    if (state->published || state->staged) return lighter::outcome_error(Error::storage("session writer is already materialized"));
+    if (state->materialization != WriterMaterialization::EMPTY)
+        return lighter::outcome_error(Error::storage("session writer is already materialized"));
     return stage_prepared(*state, *prepared);
 }
 
 Result<CatalogProjection> SessionWriter::projection() const {
     std::scoped_lock lock(state->mutex);
-    if (!state->published || !state->database) return lighter::outcome_error(Error::storage("session is not published"));
+    if (state->materialization != WriterMaterialization::PUBLISHED || !state->database)
+        return lighter::outcome_error(Error::storage("session is not published"));
     return read_projection(state->database, state->id);
 }
 
 Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
     DurableHead head;
-    bool staged = false;
+    WriterMaterialization materialization;
     {
         std::scoped_lock lock(state->mutex);
         head = state->head;
-        staged = state->staged;
+        materialization = state->materialization;
     }
-    if (staged) {
+    if (materialization == WriterMaterialization::STAGED || materialization == WriterMaterialization::PUBLISHED_NEEDS_ATTACH) {
         std::unique_lock lock(state->mutex);
-        auto published = publish_staged(*state, delta);
+        auto published = state->materialization == WriterMaterialization::STAGED ? publish_staged(*state, delta) : attach_published(*state);
         if (!published) return lighter::outcome_error(std::move(published).error());
         lock.unlock();
         auto result = project_publication(*state, *std::move(published));
-        if (result.catalog_degradation) state->repository->indexer->enqueue(state->id, state->invalidation);
+        if (result.catalog_degradation && state->repository->indexer) state->repository->indexer->enqueue(state->id, state->invalidation);
         return result;
     }
     auto prepared = prepare_delta(delta, head);
     if (!prepared) return lighter::outcome_error(std::move(prepared).error());
     std::unique_lock lock(state->mutex);
-    if (!state->published) {
+    if (state->materialization == WriterMaterialization::EMPTY) {
         if (auto staged_result = stage_prepared(*state, *prepared); !staged_result)
             return lighter::outcome_error(std::move(staged_result).error());
         auto published = publish_staged(*state, delta);
         if (!published) return lighter::outcome_error(std::move(published).error());
         lock.unlock();
         auto result = project_publication(*state, *std::move(published));
-        if (result.catalog_degradation) state->repository->indexer->enqueue(state->id, state->invalidation);
+        if (result.catalog_degradation && state->repository->indexer) state->repository->indexer->enqueue(state->id, state->invalidation);
         return result;
     }
     if (head.revision != state->head.revision) return lighter::outcome_error(Error::storage("session writer received concurrent commits"));
@@ -1148,7 +1196,10 @@ WHERE singleton=1 AND revision=?1
     notify_storage_test_hook(state->repository->storage_hook, testing::StorageEvent::AUTHORITATIVE_COMMIT_COMPLETED);
     lock.unlock();
     if (catalog_visible || projection_pending) {
-        if (title_changed) {
+        if (!state->repository->indexer) {
+            degradation = state->repository->catalog_error ? state->repository->catalog_error->message() : "session catalog is unavailable";
+            set_catalog_status(*state->invalidation, degradation);
+        } else if (title_changed) {
             if (auto projected = state->repository->indexer->refresh_live(state->id, *state->invalidation); !projected) {
                 degradation = projected.error().message();
                 state->repository->indexer->enqueue(state->id, state->invalidation);
@@ -1162,6 +1213,9 @@ WHERE singleton=1 AND revision=?1
 }
 
 Result<void> SessionWriter::refresh_catalog() {
+    if (!state->repository->indexer) {
+        return lighter::outcome_error(state->repository->catalog_error.value_or(Error::storage("session catalog is unavailable")));
+    }
     auto refreshed = state->repository->indexer->refresh_live(state->id, *state->invalidation);
     if (!refreshed) state->repository->indexer->enqueue(state->id, state->invalidation);
     return refreshed;
@@ -1174,6 +1228,10 @@ CatalogRefreshStatus SessionWriter::catalog_status() const {
 
 void testing::StorageHookAccess::set(SessionRepository &repository, StorageHook hook) {
     repository.state->storage_hook.set(std::move(hook));
+}
+
+void testing::StorageHookAccess::fail_once(SessionRepository &repository, StorageFailure failure) {
+    repository.state->storage_hook.fail_once(failure);
 }
 
 SessionDelta make_delta(const Session &session, std::span<const SessionEntry> entries) {
@@ -1238,10 +1296,42 @@ Result<bool> catalog_rebuild_pending(const StatePaths &paths) {
 
 } // namespace
 
-Result<SessionRepository> SessionRepository::open(std::filesystem::path state_root) {
+Result<SessionRepository> SessionRepository::open(std::filesystem::path state_root, RepositoryOpenMode mode) {
+    auto repository = open_authority(state_root);
+    if (!repository) return lighter::outcome_error(std::move(repository).error());
+    if (mode == RepositoryOpenMode::DEFER_CATALOG_REBUILD) {
+        std::error_code error;
+        const auto catalog_exists = std::filesystem::exists(StatePaths{state_root}.catalog(), error);
+        if (error) {
+            repository->state->catalog_error = Error::storage("cannot inspect session catalog: " + error.message());
+            repository->state->warnings.push_back("catalog unavailable: " + repository->state->catalog_error->message());
+            return *std::move(repository);
+        }
+        auto rebuild_pending = catalog_rebuild_pending(StatePaths{state_root});
+        if (!rebuild_pending) {
+            repository->state->catalog_error = rebuild_pending.error();
+            repository->state->warnings.push_back("catalog unavailable: " + rebuild_pending.error().message());
+            return *std::move(repository);
+        }
+        if (!catalog_exists || *rebuild_pending) {
+            repository->state->catalog_error = Error::storage("catalog rebuild was deferred for exact authoritative access");
+            repository->state->warnings.push_back("catalog unavailable: " + repository->state->catalog_error->message());
+            return *std::move(repository);
+        }
+    }
     auto catalog = SessionCatalog::open(state_root);
-    if (!catalog) return lighter::outcome_error(std::move(catalog).error());
-    return open_with_catalog(std::move(state_root), *std::move(catalog));
+    if (!catalog) {
+        repository->state->catalog_error = catalog.error();
+        repository->state->warnings.push_back("catalog unavailable: " + catalog.error().message());
+        return *std::move(repository);
+    }
+    if (auto attached = attach_catalog(*repository, *std::move(catalog)); !attached) {
+        repository->state->indexer.reset();
+        repository->state->catalog.reset();
+        repository->state->catalog_error = attached.error();
+        repository->state->warnings.push_back("catalog unavailable: " + attached.error().message());
+    }
+    return *std::move(repository);
 }
 
 Result<SessionRepository> SessionRepository::repair_catalog(std::filesystem::path state_root) {
@@ -1250,31 +1340,38 @@ Result<SessionRepository> SessionRepository::repair_catalog(std::filesystem::pat
     return open_with_catalog(std::move(state_root), *std::move(catalog));
 }
 
-Result<SessionRepository> SessionRepository::open_with_catalog(std::filesystem::path state_root, SessionCatalog catalog) {
+Result<SessionRepository> SessionRepository::open_authority(std::filesystem::path state_root) {
     const StatePaths paths{state_root};
     if (auto created = create_state_directory(paths.root); !created) return lighter::outcome_error(std::move(created).error());
     for (const auto &directory : {paths.sessions(), paths.staging(), paths.catalog_pending(), paths.locks()}) {
         if (auto created = create_state_directory(directory); !created) return lighter::outcome_error(std::move(created).error());
     }
-    auto repository_state = std::make_shared<State>(std::move(state_root), std::move(catalog));
+    auto repository_state = std::make_shared<State>(std::move(state_root));
     SessionRepository repository(std::move(repository_state));
-    repository.state->indexer =
-        std::make_shared<CatalogIndexer>(repository.state->root, repository.state->catalog, repository.state->storage_hook);
     auto staging = cleanup_abandoned_staging(paths);
     if (!staging) return lighter::outcome_error(std::move(staging).error());
     repository.state->warnings.insert(repository.state->warnings.end(), std::make_move_iterator(staging->warnings.begin()),
                                       std::make_move_iterator(staging->warnings.end()));
+    return repository;
+}
+
+Result<void> SessionRepository::attach_catalog(SessionRepository &repository, SessionCatalog catalog) {
+    const StatePaths paths{repository.state->root};
+    repository.state->catalog = std::move(catalog);
+    repository.state->catalog_error.reset();
+    repository.state->indexer =
+        std::make_shared<CatalogIndexer>(repository.state->root, *repository.state->catalog, repository.state->storage_hook);
     auto rebuild_pending = catalog_rebuild_pending(paths);
     if (!rebuild_pending) return lighter::outcome_error(std::move(rebuild_pending).error());
     if (*rebuild_pending) {
-        if (!repository.state->catalog.owns_rebuild_exclusivity()) {
+        if (!repository.state->catalog->owns_rebuild_exclusivity()) {
             return lighter::outcome_error(Error::storage("catalog rebuild does not own exclusive maintenance"));
         }
         auto rebuilt = repository.rebuild_catalog();
         if (!rebuilt) return lighter::outcome_error(std::move(rebuilt).error());
         if (auto completed = detail::durable_remove_file(paths.catalog_rebuild_marker()); !completed)
             return lighter::outcome_error(Error::storage("cannot complete catalog rebuild: " + completed.error().message()));
-        if (auto completed = repository.state->catalog.complete_rebuild(); !completed)
+        if (auto completed = repository.state->catalog->complete_rebuild(); !completed)
             return lighter::outcome_error(std::move(completed).error());
         repository.state->warnings.insert(repository.state->warnings.end(), std::make_move_iterator(rebuilt->warnings.begin()),
                                           std::make_move_iterator(rebuilt->warnings.end()));
@@ -1283,11 +1380,22 @@ Result<SessionRepository> SessionRepository::open_with_catalog(std::filesystem::
     if (!reconciled) return lighter::outcome_error(std::move(reconciled).error());
     repository.state->warnings.insert(repository.state->warnings.end(), std::make_move_iterator(reconciled->warnings.begin()),
                                       std::make_move_iterator(reconciled->warnings.end()));
-    return repository;
+    return {};
+}
+
+Result<SessionRepository> SessionRepository::open_with_catalog(std::filesystem::path state_root, SessionCatalog catalog) {
+    auto repository = open_authority(std::move(state_root));
+    if (!repository) return lighter::outcome_error(std::move(repository).error());
+    if (auto attached = attach_catalog(*repository, std::move(catalog)); !attached)
+        return lighter::outcome_error(std::move(attached).error());
+    return *std::move(repository);
 }
 
 const std::filesystem::path &SessionRepository::root() const noexcept { return state->root; }
-const SessionCatalog &SessionRepository::catalog() const noexcept { return state->catalog; }
+Result<SessionCatalog> SessionRepository::catalog() const {
+    if (state->catalog) return *state->catalog;
+    return lighter::outcome_error(state->catalog_error.value_or(Error::storage("session catalog is unavailable")));
+}
 const std::vector<std::string> &SessionRepository::warnings() const noexcept { return state->warnings; }
 
 Result<SessionWriter> SessionRepository::create(SessionId id) const {
@@ -1337,11 +1445,12 @@ Result<SessionWriter> SessionRepository::acquire(SessionId id) const {
     auto opened = open_database(paths.session_database(id), false, true);
     if (!opened) return lighter::outcome_error(std::move(opened).error());
     writer_state->database = *opened;
-    writer_state->published = true;
+    writer_state->materialization = WriterMaterialization::PUBLISHED;
     return SessionWriter(std::move(writer_state));
 }
 
 Result<bool> SessionRepository::remove_catalog_hint_if_authority_absent(SessionId id) const {
+    if (!state->catalog) return lighter::outcome_error(state->catalog_error.value_or(Error::storage("session catalog is unavailable")));
     const StatePaths paths{state->root};
     auto lease = acquire_session_lease(state->root, id);
     if (!lease) return lighter::outcome_error(std::move(lease).error());
@@ -1349,7 +1458,7 @@ Result<bool> SessionRepository::remove_catalog_hint_if_authority_absent(SessionI
     const auto authority_exists = std::filesystem::exists(paths.session_database(id), error);
     if (error) return lighter::outcome_error(Error::storage("cannot recheck session authority: " + error.message()));
     if (authority_exists) return false;
-    if (auto removed = state->catalog.remove(id); !removed) return lighter::outcome_error(std::move(removed).error());
+    if (auto removed = state->catalog->remove(id); !removed) return lighter::outcome_error(std::move(removed).error());
     return true;
 }
 
@@ -1373,6 +1482,7 @@ Result<SessionId> SessionRepository::resolve_exact(std::string_view value) const
 }
 
 Result<CatalogReconciliation> SessionRepository::reconcile_pending() const {
+    if (!state->catalog) return lighter::outcome_error(state->catalog_error.value_or(Error::storage("session catalog is unavailable")));
     const StatePaths paths{state->root};
     CatalogReconciliation result;
     std::error_code iteration_error;
@@ -1408,7 +1518,7 @@ Result<CatalogReconciliation> SessionRepository::reconcile_pending() const {
             continue;
         }
         if (absent) {
-            if (auto removed_row = state->catalog.remove(*id); !removed_row) {
+            if (auto removed_row = state->catalog->remove(*id); !removed_row) {
                 result.warnings.push_back(removed_row.error().message());
                 continue;
             }
@@ -1423,7 +1533,7 @@ Result<CatalogReconciliation> SessionRepository::reconcile_pending() const {
             result.warnings.push_back("cannot read authoritative singleton for " + to_string(*id) + ": " + projection.error().message());
             continue;
         }
-        if (auto projected = state->catalog.upsert(*projection); !projected) {
+        if (auto projected = state->catalog->upsert(*projection); !projected) {
             result.warnings.push_back("cannot refresh catalog for " + to_string(*id) + ": " + projected.error().message());
             continue;
         }
@@ -1445,6 +1555,7 @@ Result<CatalogReconciliation> SessionRepository::reconcile_pending() const {
 }
 
 Result<CatalogReconciliation> SessionRepository::rebuild_catalog() const {
+    if (!state->catalog) return lighter::outcome_error(state->catalog_error.value_or(Error::storage("session catalog is unavailable")));
     const StatePaths paths{state->root};
     CatalogReconciliation result;
     std::vector<SessionId> authoritative;
@@ -1461,12 +1572,12 @@ Result<CatalogReconciliation> SessionRepository::rebuild_catalog() const {
             result.warnings.push_back("cannot read published session singleton " + to_string(*id) + ": " + projection.error().message());
             continue;
         }
-        if (auto projected = state->catalog.upsert(*projection); !projected) return lighter::outcome_error(std::move(projected).error());
+        if (auto projected = state->catalog->upsert(*projection); !projected) return lighter::outcome_error(std::move(projected).error());
         authoritative.push_back(*id);
         ++result.repaired;
     }
     if (iteration_error) return lighter::outcome_error(Error::storage("cannot enumerate published sessions: " + iteration_error.message()));
-    auto catalog_ids = state->catalog.ids();
+    auto catalog_ids = state->catalog->ids();
     if (!catalog_ids) return lighter::outcome_error(std::move(catalog_ids).error());
     for (const auto id : *catalog_ids) {
         if (std::ranges::find(authoritative, id) != authoritative.end()) continue;
@@ -1474,7 +1585,7 @@ Result<CatalogReconciliation> SessionRepository::rebuild_catalog() const {
         if (!lease) continue;
         std::error_code error;
         if (!std::filesystem::exists(paths.session_database(id), error) && !error) {
-            if (auto removed = state->catalog.remove(id); !removed) result.warnings.push_back(removed.error().message());
+            if (auto removed = state->catalog->remove(id); !removed) result.warnings.push_back(removed.error().message());
         }
     }
     return result;

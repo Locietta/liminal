@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,15 +29,29 @@ struct StorageHookSlot {
         hook = std::move(replacement);
     }
 
+    void fail_once(testing::StorageFailure replacement) {
+        std::scoped_lock lock(mutex);
+        failure = replacement;
+    }
+
+    bool consume(testing::StorageFailure expected) {
+        std::scoped_lock lock(mutex);
+        if (failure != expected) return false;
+        failure.reset();
+        return true;
+    }
+
     mutable std::mutex mutex;
     testing::StorageHook hook;
+    std::optional<testing::StorageFailure> failure;
 };
 
 struct SessionRepository::State {
-    State(std::filesystem::path root, SessionCatalog catalog) : root(std::move(root)), catalog(std::move(catalog)) {}
+    explicit State(std::filesystem::path root) : root(std::move(root)) {}
 
     std::filesystem::path root;
-    SessionCatalog catalog;
+    std::optional<SessionCatalog> catalog;
+    std::optional<Error> catalog_error;
     std::vector<std::string> warnings;
     StorageHookSlot storage_hook;
     std::shared_ptr<CatalogIndexer> indexer;

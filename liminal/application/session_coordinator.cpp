@@ -70,7 +70,9 @@ SessionCoordinator::SessionCoordinator(session::SessionRepository repository, Se
 }
 
 Result<session::SessionPage> SessionCoordinator::page(const session::SessionPageQuery &query) const {
-    return repository.catalog().page(query);
+    auto catalog = repository.catalog();
+    if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+    return catalog->page(query);
 }
 
 void SessionSwitch::flush_current(session::PersistenceQueue *queue) {
@@ -156,7 +158,9 @@ Result<PreparedSession> SessionCoordinator::prepare(session::SessionId id) const
 }
 
 Result<AcquiredSession> SessionCoordinator::acquire_catalog_hint(session::SessionId id) const {
-    auto hint = repository.catalog().find(id);
+    auto catalog = repository.catalog();
+    if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+    auto hint = catalog->find(id);
     if (!hint) return lighter::outcome_error(std::move(hint).error());
     if (!*hint) return lighter::outcome_error(Error::storage("selected session is no longer present in the catalog", ErrorCode::NOT_FOUND));
     auto acquired = acquire_with_workspace(id, (*hint)->workspace_key);
@@ -173,7 +177,9 @@ Result<AcquiredSession> SessionCoordinator::acquire_catalog_hint(session::Sessio
 
 Result<AcquiredSession> SessionCoordinator::acquire_latest(std::string_view workspace_key) const {
     while (true) {
-        auto latest = repository.catalog().latest(workspace_key);
+        auto catalog = repository.catalog();
+        if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+        auto latest = catalog->latest(workspace_key);
         if (!latest) return lighter::outcome_error(std::move(latest).error());
         auto acquired = acquire_catalog_hint(latest->id);
         if (acquired) return acquired;

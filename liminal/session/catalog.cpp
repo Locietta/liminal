@@ -1,6 +1,7 @@
 #include "catalog.h"
 
 #include "catalog_lease.h"
+#include "catalog_validation.h"
 #include "durable_fs.h"
 #include "paths.h"
 
@@ -457,6 +458,7 @@ Result<std::vector<SessionId>> SessionCatalog::ids() const {
 }
 
 Result<void> SessionCatalog::upsert(const CatalogProjection &projection) const {
+    if (auto valid = detail::validate_catalog_projection(projection); !valid) return lighter::outcome_error(std::move(valid).error());
     std::scoped_lock lock(state->mutex);
     auto transaction = execute(state->database, "BEGIN IMMEDIATE");
     if (!transaction) return transaction;

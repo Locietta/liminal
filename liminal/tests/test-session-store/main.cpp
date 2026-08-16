@@ -86,7 +86,8 @@ Result<Storage> open_storage(const std::filesystem::path &root) {
     auto repository = session::SessionRepository::open(root);
     if (!repository) return lighter::outcome_error(std::move(repository).error());
     auto catalog = repository->catalog();
-    return Storage{.catalog = std::move(catalog), .repository = *std::move(repository)};
+    if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+    return Storage{.catalog = *std::move(catalog), .repository = *std::move(repository)};
 }
 
 session::Session make_session(std::string task, i64 admission_time = 1'000'000) {
@@ -441,6 +442,45 @@ void test_catalog_failure_cannot_rollback_session_and_pending_recovers() {
             "crash after catalog upsert and before marker removal was not idempotently recoverable");
 }
 
+void test_catalog_failure_preserves_exact_authority_and_new_persistence() {
+    TemporaryState temporary;
+    session::SessionId existing_id;
+    {
+        auto storage = open_storage(temporary.root);
+        auto published = storage ? publish(storage->repository, make_session("exact without catalog")) :
+                                   Result<Published>{lighter::outcome_error(storage.error())};
+        require(published.has_value(), "failed to publish catalog-independent authority fixture");
+        existing_id = published->value.id;
+    }
+
+    const session::StatePaths paths{temporary.root};
+    std::error_code error;
+    for (const auto &path : {paths.catalog(), std::filesystem::path(paths.catalog().string() + "-wal"),
+                             std::filesystem::path(paths.catalog().string() + "-shm")}) {
+        std::filesystem::remove(path, error);
+        error.clear();
+    }
+    auto repository = session::SessionRepository::open(temporary.root, session::RepositoryOpenMode::DEFER_CATALOG_REBUILD);
+    require(repository.has_value() && !std::filesystem::exists(paths.catalog()),
+            "exact authoritative opening rebuilt a missing catalog eagerly");
+    auto catalog = repository->catalog();
+    require(!catalog, "authority-only repository exposed a deferred catalog");
+    auto resolved = repository->resolve_exact(session::to_string(existing_id));
+    require(resolved && *resolved == existing_id, "exact resolution depended on the corrupt catalog");
+    auto existing = repository->acquire(existing_id);
+    auto loaded = existing ? existing->load() : Result<session::Session>{lighter::outcome_error(existing.error())};
+    require(loaded && loaded->id == existing_id, "exact authoritative acquisition depended on the corrupt catalog");
+
+    auto fresh = make_session("persist without catalog");
+    const auto fresh_id = fresh.id;
+    auto writer = repository->create(fresh_id);
+    require(writer.has_value(), "catalog failure prevented creating an authoritative writer");
+    auto committed = writer->commit(session::make_delta(fresh, fresh.entries));
+    require(committed && committed->catalog_degradation && std::filesystem::is_regular_file(paths.session_database(fresh_id)) &&
+                std::filesystem::is_regular_file(paths.pending_marker(fresh_id)),
+            "catalog failure promoted successful authoritative publication to semantic persistence failure");
+}
+
 void test_blocked_catalog_projection_does_not_block_semantic_commit() {
     TemporaryState temporary;
     auto storage = open_storage(temporary.root);
@@ -610,6 +650,61 @@ void test_missing_catalog_rebuild_reads_only_singletons() {
     require(writer.has_value() && !writer->load(), "full session load unexpectedly accepted the corrupt payload");
 }
 
+void test_catalog_ingestion_rejects_invalid_singleton_projections() {
+    TemporaryState temporary;
+    session::SessionId valid_id;
+    session::SessionId invalid_id;
+    {
+        auto storage = open_storage(temporary.root);
+        auto valid = storage ? publish(storage->repository, make_session("valid projection")) :
+                               Result<Published>{lighter::outcome_error(storage.error())};
+        auto invalid = storage ? publish(storage->repository, make_session("invalid projection")) :
+                                 Result<Published>{lighter::outcome_error(storage.error())};
+        require(valid && invalid, "failed to publish projection-validation fixtures");
+        valid_id = valid->value.id;
+        invalid_id = invalid->value.id;
+
+        session::CatalogProjection projection{
+            .summary = {.id = session::generate_session_id(), .updated_at_ms = 1, .preview = "valid"},
+            .observed_revision = 1,
+            .workspace_key = "workspace",
+        };
+        projection.observed_revision = 0;
+        require(!storage->catalog.upsert(projection), "catalog accepted a zero authoritative revision");
+        projection.observed_revision = 1;
+        projection.workspace_key.clear();
+        require(!storage->catalog.upsert(projection), "catalog accepted an empty workspace identity");
+        projection.workspace_key = "workspace";
+        projection.summary.updated_at_ms = 0;
+        require(!storage->catalog.upsert(projection), "catalog accepted an invalid conversation timestamp");
+        projection.summary.updated_at_ms = 1;
+        projection.summary.title = "";
+        require(!storage->catalog.upsert(projection), "catalog accepted an empty title");
+        projection.summary.title.reset();
+        projection.summary.preview = std::string(1, static_cast<char>(0x80));
+        require(!storage->catalog.upsert(projection), "catalog accepted invalid UTF-8 preview metadata");
+    }
+
+    const session::StatePaths paths{temporary.root};
+    auto *database = open_sqlite(paths.session_database(invalid_id));
+    execute(database, "UPDATE session SET preview=CAST(X'80' AS TEXT)", "failed to corrupt authoritative projection fixture");
+    sqlite3_close(database);
+    std::error_code error;
+    for (const auto &path : {paths.catalog(), std::filesystem::path(paths.catalog().string() + "-wal"),
+                             std::filesystem::path(paths.catalog().string() + "-shm")}) {
+        std::filesystem::remove(path, error);
+        error.clear();
+    }
+    auto rebuilt = open_storage(temporary.root);
+    require(rebuilt.has_value(), "invalid authoritative projection prevented catalog reconstruction");
+    auto valid = rebuilt->catalog.find(valid_id);
+    auto invalid = rebuilt->catalog.find(invalid_id);
+    require(valid && *valid && invalid && !*invalid &&
+                std::ranges::any_of(rebuilt->repository.warnings(),
+                                    [](const std::string &warning) { return warning.contains("invalid preview"); }),
+            "catalog rebuild did not report and exclude an invalid authoritative singleton projection");
+}
+
 void test_missing_catalog_rebuild_includes_leased_sessions() {
     TemporaryState temporary;
     session::SessionId id;
@@ -676,8 +771,8 @@ PRAGMA journal_mode = WAL;
         require(std::filesystem::is_regular_file(paths.catalog_rebuild_marker()), "failed to record interrupted catalog rebuild fixture");
         execute(blocker, "PRAGMA busy_timeout=0; BEGIN IMMEDIATE", "failed to block interrupted catalog rebuild");
         auto failed = session::SessionRepository::open(temporary.root);
-        require(!failed && std::filesystem::is_regular_file(paths.catalog_rebuild_marker()),
-                "failed catalog rebuild cleared its durable incomplete marker");
+        require(failed && !failed->catalog() && std::filesystem::is_regular_file(paths.catalog_rebuild_marker()),
+                "failed catalog rebuild did not leave authority available with a degraded catalog");
         execute(blocker, "ROLLBACK", "failed to release interrupted catalog rebuild");
         sqlite3_close(blocker);
     }
@@ -742,10 +837,13 @@ void test_corrupt_catalog_repair_requires_exclusive_maintenance() {
     std::ofstream corrupt(paths.catalog(), std::ios::binary);
     corrupt << "foreign corrupt bytes";
     corrupt.close();
-    require(!session::SessionRepository::open(temporary.root), "corrupt catalog was silently adopted");
+    auto degraded = session::SessionRepository::open(temporary.root);
+    require(degraded && !degraded->catalog(), "corrupt catalog was silently adopted");
     auto repository = session::SessionRepository::repair_catalog(temporary.root);
     require(repository.has_value(), "exclusive corrupt-catalog replacement and rebuild failed");
-    auto page = repository->catalog().page({.workspace_key = "workspace"});
+    auto repaired_catalog = repository->catalog();
+    require(repaired_catalog.has_value(), "repaired repository did not expose its rebuilt catalog");
+    auto page = repaired_catalog->page({.workspace_key = "workspace"});
     require(page && page->sessions.size() == 1 && page->sessions.front().id == id,
             "corrupt-catalog repair did not rebuild published session discovery");
 }
@@ -764,8 +862,11 @@ void test_missing_catalog_recreation_requires_exclusive_maintenance() {
     }
     require(!std::filesystem::exists(paths.catalog()), "failed to unlink the live POSIX catalog fixture");
     auto replacement = session::SessionRepository::open(temporary.root);
-    require(!replacement && replacement.error().detail.contains("every Liminal process") && !std::filesystem::exists(paths.catalog()),
-            "missing catalog was recreated while another process-equivalent owner retained an open handle");
+    auto replacement_catalog =
+        replacement ? replacement->catalog() : Result<session::SessionCatalog>{lighter::outcome_error(replacement.error())};
+    require(replacement && !replacement_catalog && replacement_catalog.error().detail.contains("every Liminal process") &&
+                !std::filesystem::exists(paths.catalog()),
+            "missing catalog contention did not preserve authority-only repository access");
 #endif
 }
 
@@ -794,6 +895,35 @@ void test_staging_cancellation_and_complete_publication() {
     auto published = staged->commit(session::make_delta(value, value.entries));
     require(published.has_value() && scalar_text(session::StatePaths{temporary.root}.session_database(id), "PRAGMA journal_mode") == "wal",
             "complete staged image did not publish and reopen in verified WAL mode");
+}
+
+void test_publication_retries_across_rename_and_reopen_boundaries() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open publication-boundary storage");
+    constexpr std::array failures{
+        session::testing::StorageFailure::PUBLICATION_BEFORE_RENAME,
+        session::testing::StorageFailure::PUBLICATION_AFTER_RENAME,
+        session::testing::StorageFailure::PUBLICATION_AFTER_REOPEN,
+    };
+    for (const auto failure : failures) {
+        auto value = make_session("retry atomic publication");
+        auto writer = storage->repository.create(value.id);
+        require(writer.has_value(), "failed to create publication-boundary writer");
+        session::testing::fail_storage_once(storage->repository, failure);
+        auto first = writer->commit(session::make_delta(value, value.entries));
+        require(!first, "publication failure injection did not interrupt its boundary");
+        const auto published = failure != session::testing::StorageFailure::PUBLICATION_BEFORE_RENAME;
+        require(std::filesystem::is_regular_file(session::StatePaths{temporary.root}.session_database(value.id)) == published,
+                "publication failure crossed the wrong side of the atomic rename");
+
+        auto retried = writer->commit(session::make_delta(value, value.entries));
+        auto loaded = retried ? writer->load() : Result<session::Session>{lighter::outcome_error(retried.error())};
+        auto projection = storage->catalog.find(value.id);
+        require(retried && loaded && loaded->entries.size() == value.entries.size() && projection && *projection &&
+                    (*projection)->observed_revision == 1,
+                "retry did not attach and project the already-published authoritative database exactly once");
+    }
 }
 
 void test_abandoned_staging_and_marker_are_reconciled() {
@@ -1357,11 +1487,13 @@ int main(int argc, char **argv) {
     test_cross_process_lease_exclusion(executable);
     test_encoding_failure_precedes_begin();
     test_catalog_failure_cannot_rollback_session_and_pending_recovers();
+    test_catalog_failure_preserves_exact_authority_and_new_persistence();
     test_blocked_catalog_projection_does_not_block_semantic_commit();
     test_revision_guard_and_precommit_marker();
     test_normal_startup_does_not_scan_sessions();
     test_invalid_pending_marker_is_reported_without_scanning_sessions();
     test_missing_catalog_rebuild_reads_only_singletons();
+    test_catalog_ingestion_rejects_invalid_singleton_projections();
     test_missing_catalog_rebuild_includes_leased_sessions();
     test_incomplete_catalog_rebuild_is_resumed_after_crash();
     test_concurrent_catalog_initialization_is_serialized();
@@ -1369,6 +1501,7 @@ int main(int argc, char **argv) {
     test_corrupt_catalog_repair_requires_exclusive_maintenance();
     test_missing_catalog_recreation_requires_exclusive_maintenance();
     test_staging_cancellation_and_complete_publication();
+    test_publication_retries_across_rename_and_reopen_boundaries();
     test_abandoned_staging_and_marker_are_reconciled();
     test_staged_final_snapshot_is_fully_validated();
     test_recency_rename_fork_and_discovery();

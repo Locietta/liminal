@@ -79,16 +79,25 @@ Result<AcquiredStartupSession> acquire_startup_session(const StartupOptions &opt
     auto path = session::state_root_path();
     if (!path) return lighter::outcome_error(std::move(path).error());
 
-    auto repository = session::SessionRepository::open(*path);
+    const auto exact_resume = options.kind == StartupKind::RESUME && options.session.size() == 36;
+    auto repository = session::SessionRepository::open(*path, exact_resume ? session::RepositoryOpenMode::DEFER_CATALOG_REBUILD :
+                                                                             session::RepositoryOpenMode::INITIALIZE_CATALOG);
     if (!repository) return lighter::outcome_error(std::move(repository).error());
     application::SessionCoordinator coordinator(*repository, preparation_services(models, tools, configured_model_selector()));
 
     auto acquired = [&]() -> Result<application::AcquiredSession> {
         if (options.kind != StartupKind::RESUME) return coordinator.acquire_latest(workspace.key);
         const auto exact = options.session.size() == 36;
-        auto resolved = exact ? repository->resolve_exact(options.session) : repository->catalog().resolve_prefix(options.session);
+        if (!exact) {
+            auto catalog = repository->catalog();
+            if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+            auto resolved = catalog->resolve_prefix(options.session);
+            if (!resolved) return lighter::outcome_error(std::move(resolved).error());
+            return coordinator.acquire_catalog_hint(*resolved);
+        }
+        auto resolved = repository->resolve_exact(options.session);
         if (!resolved) return lighter::outcome_error(std::move(resolved).error());
-        return exact ? coordinator.acquire(*resolved) : coordinator.acquire_catalog_hint(*resolved);
+        return coordinator.acquire(*resolved);
     }();
     if (!acquired) return lighter::outcome_error(std::move(acquired).error());
     for (const auto &warning : repository->warnings()) acquired->notices.push_back("[session catalog warning: " + warning + "]\n");
