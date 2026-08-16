@@ -55,9 +55,8 @@ Result<SessionModelResolution> resolve_session_model(model::Catalog &models, con
     };
 }
 
-SessionCoordinator::SessionCoordinator(session::SessionRepository repository, session::SessionCatalog catalog,
-                                       SessionPreparationServices services)
-    : repository(std::move(repository)), catalog(std::move(catalog)), services(std::move(services)) {
+SessionCoordinator::SessionCoordinator(session::SessionRepository repository, SessionPreparationServices services)
+    : repository(std::move(repository)), services(std::move(services)) {
     lighter::check(static_cast<bool>(this->services.project), "session preparation requires a transcript projector");
     lighter::check(static_cast<bool>(this->services.resolve_model), "session preparation requires a model resolver");
     if (!this->services.persistence) {
@@ -70,7 +69,9 @@ SessionCoordinator::SessionCoordinator(session::SessionRepository repository, se
     }
 }
 
-Result<session::SessionPage> SessionCoordinator::page(const session::SessionPageQuery &query) const { return catalog.page(query); }
+Result<session::SessionPage> SessionCoordinator::page(const session::SessionPageQuery &query) const {
+    return repository.catalog().page(query);
+}
 
 void SessionSwitch::flush_current(session::PersistenceQueue *queue) {
     if (!queue) {
@@ -155,7 +156,7 @@ Result<PreparedSession> SessionCoordinator::prepare(session::SessionId id) const
 }
 
 Result<AcquiredSession> SessionCoordinator::acquire_catalog_hint(session::SessionId id) const {
-    auto hint = catalog.find(id);
+    auto hint = repository.catalog().find(id);
     if (!hint) return lighter::outcome_error(std::move(hint).error());
     if (!*hint) return lighter::outcome_error(Error::storage("selected session is no longer present in the catalog", ErrorCode::NOT_FOUND));
     auto acquired = acquire_with_workspace(id, (*hint)->workspace_key);
@@ -172,7 +173,7 @@ Result<AcquiredSession> SessionCoordinator::acquire_catalog_hint(session::Sessio
 
 Result<AcquiredSession> SessionCoordinator::acquire_latest(std::string_view workspace_key) const {
     while (true) {
-        auto latest = catalog.latest(workspace_key);
+        auto latest = repository.catalog().latest(workspace_key);
         if (!latest) return lighter::outcome_error(std::move(latest).error());
         auto acquired = acquire_catalog_hint(latest->id);
         if (acquired) return acquired;

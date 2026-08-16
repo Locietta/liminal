@@ -47,9 +47,6 @@ struct SessionPage {
 struct SessionCatalog {
     struct State;
 
-    static Result<SessionCatalog> open(const std::filesystem::path &state_root);
-    static Result<SessionCatalog> repair_corrupt(const std::filesystem::path &state_root);
-
     const std::filesystem::path &path() const noexcept;
     Result<SessionId> resolve_prefix(std::string_view text) const;
     Result<SessionSummary> latest(std::string_view workspace_key) const;
@@ -61,6 +58,8 @@ struct SessionCatalog {
 
 private:
     friend struct SessionRepository;
+    static Result<SessionCatalog> open(const std::filesystem::path &state_root);
+    static Result<SessionCatalog> repair_corrupt(const std::filesystem::path &state_root);
     explicit SessionCatalog(std::shared_ptr<State> state) : state(std::move(state)) {}
     bool owns_rebuild_exclusivity() const noexcept;
     Result<void> complete_rebuild() const;

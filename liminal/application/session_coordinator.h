@@ -107,7 +107,7 @@ private:
 /// Coordinates ownership, semantic recovery, transcript projection, and model
 /// resolution before a saved session can replace a live application session.
 struct SessionCoordinator {
-    SessionCoordinator(session::SessionRepository repository, session::SessionCatalog catalog, SessionPreparationServices services);
+    SessionCoordinator(session::SessionRepository repository, SessionPreparationServices services);
 
     Result<session::SessionPage> page(const session::SessionPageQuery &query) const;
     Result<AcquiredSession> acquire(session::SessionId id) const;
@@ -125,7 +125,6 @@ private:
     Result<AcquiredSession> acquire_with_workspace(session::SessionId id, const std::optional<std::string> &workspace_key) const;
     Result<PreparedSession> prepare_catalog_hint(session::SessionId id) const;
     session::SessionRepository repository;
-    session::SessionCatalog catalog;
     SessionPreparationServices services;
 };
 

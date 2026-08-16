@@ -39,9 +39,7 @@ constexpr int k_session_application_id = 0x4c494d53;
 constexpr int k_session_schema_version = 1;
 constexpr usize k_marker_maximum_size = 64;
 
-void notify_storage_test_hook(const testing::StorageHook &hook, testing::StorageEvent event) {
-    if (hook) hook(event);
-}
+void notify_storage_test_hook(const StorageHookSlot &hook, testing::StorageEvent event) { hook.notify(event); }
 
 std::string path_utf8(const std::filesystem::path &path) {
     const auto value = path.generic_u8string();
@@ -842,9 +840,10 @@ struct CatalogIndexer {
         SessionId id;
         std::weak_ptr<CatalogInvalidationOwner> owner;
         usize failures = 0;
+        std::chrono::steady_clock::time_point not_before;
     };
 
-    CatalogIndexer(std::filesystem::path root, SessionCatalog catalog, const testing::StorageHook &storage_hook)
+    CatalogIndexer(std::filesystem::path root, SessionCatalog catalog, const StorageHookSlot &storage_hook)
         : paths{std::move(root)}, catalog(std::move(catalog)), storage_hook(storage_hook),
           worker([this](std::stop_token stop) { run(stop); }) {}
 
@@ -857,7 +856,7 @@ struct CatalogIndexer {
         {
             std::scoped_lock lock(mutex);
             if (!queued.insert(id).second) return;
-            requests.push_back({.id = id, .owner = owner});
+            requests.push_back({.id = id, .owner = owner, .not_before = std::chrono::steady_clock::now()});
         }
         changed.notify_all();
     }
@@ -897,25 +896,40 @@ private:
             Request request;
             {
                 std::unique_lock lock(mutex);
-                changed.wait(lock, stop, [this] { return !requests.empty(); });
-                if (stop.stop_requested()) return;
-                request = std::move(requests.front());
-                requests.pop_front();
-                queued.erase(request.id);
+                while (true) {
+                    changed.wait(lock, stop, [this] { return !requests.empty(); });
+                    if (stop.stop_requested()) return;
+                    const auto now = std::chrono::steady_clock::now();
+                    auto ready = std::ranges::find_if(requests, [now](const Request &candidate) { return candidate.not_before <= now; });
+                    if (ready != requests.end()) {
+                        request = std::move(*ready);
+                        requests.erase(ready);
+                        queued.erase(request.id);
+                        break;
+                    }
+                    const auto earliest = std::ranges::min_element(requests, {}, &Request::not_before)->not_before;
+                    changed.wait_until(lock, stop, earliest, [this, earliest] {
+                        return std::ranges::any_of(requests,
+                                                   [earliest](const Request &candidate) { return candidate.not_before < earliest; });
+                    });
+                    if (stop.stop_requested()) return;
+                }
             }
             if (auto refreshed = refresh(request); refreshed) continue;
             ++request.failures;
             const auto delay = request.failures == 1 ? 100ms : request.failures == 2 ? 300ms : request.failures == 3 ? 1s : 5s;
-            std::unique_lock lock(mutex);
-            changed.wait_for(lock, stop, delay, [this] { return !requests.empty(); });
-            if (stop.stop_requested()) return;
-            if (queued.insert(request.id).second) requests.push_back(std::move(request));
+            request.not_before = std::chrono::steady_clock::now() + delay;
+            {
+                std::scoped_lock lock(mutex);
+                if (queued.insert(request.id).second) requests.push_back(std::move(request));
+            }
+            changed.notify_all();
         }
     }
 
     StatePaths paths;
     SessionCatalog catalog;
-    const testing::StorageHook &storage_hook;
+    const StorageHookSlot &storage_hook;
     std::mutex mutex;
     std::condition_variable_any changed;
     std::deque<Request> requests;
@@ -1158,7 +1172,9 @@ CatalogRefreshStatus SessionWriter::catalog_status() const {
     return state->invalidation->status;
 }
 
-void testing::StorageHookAccess::set(SessionRepository &repository, StorageHook hook) { repository.state->storage_hook = std::move(hook); }
+void testing::StorageHookAccess::set(SessionRepository &repository, StorageHook hook) {
+    repository.state->storage_hook.set(std::move(hook));
+}
 
 SessionDelta make_delta(const Session &session, std::span<const SessionEntry> entries) {
     return {.entries = {entries.begin(), entries.end()},
@@ -1222,7 +1238,19 @@ Result<bool> catalog_rebuild_pending(const StatePaths &paths) {
 
 } // namespace
 
-Result<SessionRepository> SessionRepository::open(std::filesystem::path state_root, SessionCatalog catalog) {
+Result<SessionRepository> SessionRepository::open(std::filesystem::path state_root) {
+    auto catalog = SessionCatalog::open(state_root);
+    if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+    return open_with_catalog(std::move(state_root), *std::move(catalog));
+}
+
+Result<SessionRepository> SessionRepository::repair_catalog(std::filesystem::path state_root) {
+    auto catalog = SessionCatalog::repair_corrupt(state_root);
+    if (!catalog) return lighter::outcome_error(std::move(catalog).error());
+    return open_with_catalog(std::move(state_root), *std::move(catalog));
+}
+
+Result<SessionRepository> SessionRepository::open_with_catalog(std::filesystem::path state_root, SessionCatalog catalog) {
     const StatePaths paths{state_root};
     if (auto created = create_state_directory(paths.root); !created) return lighter::outcome_error(std::move(created).error());
     for (const auto &directory : {paths.sessions(), paths.staging(), paths.catalog_pending(), paths.locks()}) {
@@ -1259,6 +1287,7 @@ Result<SessionRepository> SessionRepository::open(std::filesystem::path state_ro
 }
 
 const std::filesystem::path &SessionRepository::root() const noexcept { return state->root; }
+const SessionCatalog &SessionRepository::catalog() const noexcept { return state->catalog; }
 const std::vector<std::string> &SessionRepository::warnings() const noexcept { return state->warnings; }
 
 Result<SessionWriter> SessionRepository::create(SessionId id) const {

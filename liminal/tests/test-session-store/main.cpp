@@ -82,11 +82,10 @@ struct Storage {
 };
 
 Result<Storage> open_storage(const std::filesystem::path &root) {
-    auto catalog = session::SessionCatalog::open(root);
-    if (!catalog) return lighter::outcome_error(std::move(catalog).error());
-    auto repository = session::SessionRepository::open(root, *catalog);
+    auto repository = session::SessionRepository::open(root);
     if (!repository) return lighter::outcome_error(std::move(repository).error());
-    return Storage{.catalog = *std::move(catalog), .repository = *std::move(repository)};
+    auto catalog = repository->catalog();
+    return Storage{.catalog = std::move(catalog), .repository = *std::move(repository)};
 }
 
 session::Session make_session(std::string task, i64 admission_time = 1'000'000) {
@@ -655,12 +654,26 @@ void test_incomplete_catalog_rebuild_is_resumed_after_crash() {
     }
 
     {
-        auto interrupted = session::SessionCatalog::open(temporary.root);
-        require(interrupted.has_value() && std::filesystem::is_regular_file(paths.catalog_rebuild_marker()),
-                "new catalog did not durably record its incomplete rebuild before becoming valid");
         auto *blocker = open_sqlite(paths.catalog());
+        execute(blocker, R"sql(
+CREATE TABLE sessions (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    observed_revision INTEGER NOT NULL,
+    workspace_key TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    title TEXT,
+    preview TEXT NOT NULL
+);
+CREATE INDEX sessions_workspace_recent ON sessions(workspace_key, updated_at_ms DESC, id DESC);
+PRAGMA application_id = 1279872323;
+PRAGMA user_version = 1;
+PRAGMA journal_mode = WAL;
+)sql",
+                "failed to create interrupted catalog fixture");
+        std::ofstream(paths.catalog_rebuild_marker(), std::ios::binary) << "1\n";
+        require(std::filesystem::is_regular_file(paths.catalog_rebuild_marker()), "failed to record interrupted catalog rebuild fixture");
         execute(blocker, "PRAGMA busy_timeout=0; BEGIN IMMEDIATE", "failed to block interrupted catalog rebuild");
-        auto failed = session::SessionRepository::open(temporary.root, *interrupted);
+        auto failed = session::SessionRepository::open(temporary.root);
         require(!failed && std::filesystem::is_regular_file(paths.catalog_rebuild_marker()),
                 "failed catalog rebuild cleared its durable incomplete marker");
         execute(blocker, "ROLLBACK", "failed to release interrupted catalog rebuild");
@@ -716,7 +729,7 @@ void test_corrupt_catalog_repair_requires_exclusive_maintenance() {
                                    Result<Published>{lighter::outcome_error(storage.error())};
         require(published.has_value(), "failed to publish corrupt-catalog fixture");
         id = published->value.id;
-        auto refused = session::SessionCatalog::repair_corrupt(temporary.root);
+        auto refused = session::SessionRepository::repair_catalog(temporary.root);
         require(!refused && refused.error().detail.contains("every Liminal process"),
                 "catalog replacement ignored an existing catalog owner");
     }
@@ -727,12 +740,10 @@ void test_corrupt_catalog_repair_requires_exclusive_maintenance() {
     std::ofstream corrupt(paths.catalog(), std::ios::binary);
     corrupt << "foreign corrupt bytes";
     corrupt.close();
-    require(!session::SessionCatalog::open(temporary.root), "corrupt catalog was silently adopted");
-    auto repaired_catalog = session::SessionCatalog::repair_corrupt(temporary.root);
-    require(repaired_catalog.has_value(), "exclusive corrupt-catalog replacement failed");
-    auto repository = session::SessionRepository::open(temporary.root, *repaired_catalog);
-    require(repository.has_value(), "repaired catalog could not rebuild from authoritative singletons");
-    auto page = repaired_catalog->page({.workspace_key = "workspace"});
+    require(!session::SessionRepository::open(temporary.root), "corrupt catalog was silently adopted");
+    auto repository = session::SessionRepository::repair_catalog(temporary.root);
+    require(repository.has_value(), "exclusive corrupt-catalog replacement and rebuild failed");
+    auto page = repository->catalog().page({.workspace_key = "workspace"});
     require(page && page->sessions.size() == 1 && page->sessions.front().id == id,
             "corrupt-catalog repair did not rebuild published session discovery");
 }
@@ -750,7 +761,7 @@ void test_missing_catalog_recreation_requires_exclusive_maintenance() {
         error.clear();
     }
     require(!std::filesystem::exists(paths.catalog()), "failed to unlink the live POSIX catalog fixture");
-    auto replacement = session::SessionCatalog::open(temporary.root);
+    auto replacement = session::SessionRepository::open(temporary.root);
     require(!replacement && replacement.error().detail.contains("every Liminal process") && !std::filesystem::exists(paths.catalog()),
             "missing catalog was recreated while another process-equivalent owner retained an open handle");
 #endif
@@ -1220,7 +1231,7 @@ void test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session() {
         [](const std::optional<session::SessionModelPreference> &) -> Result<application::SessionModelResolution> {
             return lighter::outcome_error(Error::config("model resolution should not run for a missing session"));
         });
-    application::SessionCoordinator coordinator(storage->repository, storage->catalog, std::move(services));
+    application::SessionCoordinator coordinator(storage->repository, std::move(services));
     auto switching = coordinator.begin_switch(live.id, missing);
     require(!switching && live.id == live_id && live.entries.size() == live_entries,
             "failed catalog-hint acquisition mutated the currently active session");
@@ -1281,7 +1292,7 @@ void test_prepared_switch_keeps_live_state_atomic() {
                 .model = {.entry = {.provider = "test", .id = "test", .name = "Test"}},
             };
         });
-    application::SessionCoordinator coordinator(storage->repository, storage->catalog, std::move(services));
+    application::SessionCoordinator coordinator(storage->repository, std::move(services));
     auto switching = coordinator.begin_switch(live.id, target_id);
     require(switching && switching->state() == application::SessionSwitchState::PREPARED && live.id == live_id &&
                 live.entries.size() == live_entries,

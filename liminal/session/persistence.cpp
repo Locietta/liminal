@@ -70,9 +70,7 @@ std::shared_ptr<PersistenceQueue> testing::PersistenceQueueAccess::create_reopen
                                                                                     std::string detail, StorageHook storage_hook) {
     auto callbacks =
         lazy_writer_callbacks([state_root = std::move(state_root), id, storage_hook = std::move(storage_hook)]() -> Result<SessionWriter> {
-            auto catalog = SessionCatalog::open(state_root);
-            if (!catalog) return lighter::outcome_error(std::move(catalog).error());
-            auto repository = SessionRepository::open(state_root, *std::move(catalog));
+            auto repository = SessionRepository::open(state_root);
             if (!repository) return lighter::outcome_error(std::move(repository).error());
             if (storage_hook) testing::set_storage_hook(*repository, storage_hook);
             return repository->create(id);
@@ -125,9 +123,7 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create_resolving(SessionId i
     auto callbacks = lazy_writer_callbacks([id]() -> Result<SessionWriter> {
         auto path = state_root_path();
         if (!path) return lighter::outcome_error(std::move(path).error());
-        auto catalog = SessionCatalog::open(*path);
-        if (!catalog) return lighter::outcome_error(std::move(catalog).error());
-        auto repository = SessionRepository::open(*path, *std::move(catalog));
+        auto repository = SessionRepository::open(*path);
         if (!repository) return lighter::outcome_error(std::move(repository).error());
         return repository->create(id);
     });
