@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -20,15 +21,22 @@ struct PersistenceQueueAccess;
 struct PersistenceStatus {
     bool degraded = false;
     bool catalog_degraded = false;
+    bool publication_attachment_pending = false;
     usize pending_mutations = 0;
     std::string detail;
     std::string catalog_detail;
+};
+
+enum struct InitialPublicationStatus {
+    ATTACHED,
+    ATTACHMENT_PENDING,
 };
 
 struct PersistenceQueue {
     using Commit = std::copyable_function<Result<SessionCommitResult>(const SessionDelta &) const>;
     using TestCommit = std::copyable_function<Result<void>(const SessionDelta &) const>;
     using CatalogStatus = std::copyable_function<CatalogRefreshStatus() const>;
+    using PublicationPending = std::copyable_function<bool() const>;
 
     static std::shared_ptr<PersistenceQueue> create(SessionWriter writer);
     static std::shared_ptr<PersistenceQueue> create_unpublished(SessionWriter writer);
@@ -44,9 +52,9 @@ struct PersistenceQueue {
     SessionId session_id() const noexcept;
     PersistenceStatus status() const;
     /// Publishes the first complete snapshot through an otherwise unused
-    /// queue. This is synchronous so a prepared session cannot become visible
-    /// before its initial transaction succeeds.
-    Result<void> publish_initial(const SessionDelta &delta);
+    /// queue. A post-rename attachment failure returns ATTACHMENT_PENDING and
+    /// retains the exact snapshot for ordered background recovery.
+    Result<InitialPublicationStatus> publish_initial(const SessionDelta &delta);
     Result<void> flush();
 
 private:
@@ -60,7 +68,8 @@ private:
         FAILED,
     };
 
-    PersistenceQueue(SessionId id, Commit commit, PublicationState publication_state, CatalogStatus catalog_status = {});
+    PersistenceQueue(SessionId id, Commit commit, PublicationState publication_state, CatalogStatus catalog_status = {},
+                     PublicationPending publication_pending = {});
     void enqueue(SessionDelta delta);
     void mark_degraded(std::string detail);
     void run(std::stop_token stop);
@@ -69,9 +78,11 @@ private:
     const SessionId id;
     Commit commit;
     CatalogStatus read_catalog_status;
+    PublicationPending publication_pending;
     mutable std::mutex mutex;
     std::condition_variable_any changed;
     std::deque<SessionDelta> pending;
+    std::optional<SessionDelta> publication_retry;
     u64 enqueued_mutations = 0;
     u64 persisted_mutations = 0;
     u64 failure_generation = 0;

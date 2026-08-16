@@ -910,20 +910,121 @@ void test_publication_retries_across_rename_and_reopen_boundaries() {
         auto value = make_session("retry atomic publication");
         auto writer = storage->repository.create(value.id);
         require(writer.has_value(), "failed to create publication-boundary writer");
+        const auto initial = session::make_delta(value, value.entries);
         session::testing::fail_storage_once(storage->repository, failure);
-        auto first = writer->commit(session::make_delta(value, value.entries));
+        auto first = writer->commit(initial);
         require(!first, "publication failure injection did not interrupt its boundary");
         const auto published = failure != session::testing::StorageFailure::PUBLICATION_BEFORE_RENAME;
         require(std::filesystem::is_regular_file(session::StatePaths{temporary.root}.session_database(value.id)) == published,
                 "publication failure crossed the wrong side of the atomic rename");
+        if (published) {
+            auto changed = initial;
+            changed.metadata.updated_at_ms += 1;
+            changed.metadata.title = "different finalized snapshot";
+            changed.next_task_id += 1;
+            auto rejected = writer->commit(changed);
+            require(!rejected && rejected.error().detail.contains("does not match"),
+                    "post-rename attachment acknowledged a delta other than the finalized snapshot");
+        }
 
-        auto retried = writer->commit(session::make_delta(value, value.entries));
+        auto retried = writer->commit(initial);
         auto loaded = retried ? writer->load() : Result<session::Session>{lighter::outcome_error(retried.error())};
         auto projection = storage->catalog.find(value.id);
         require(retried && loaded && loaded->entries.size() == value.entries.size() && projection && *projection &&
                     (*projection)->observed_revision == 1,
                 "retry did not attach and project the already-published authoritative database exactly once");
     }
+}
+
+void test_concurrent_publication_revalidates_materialization_under_lock() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open concurrent-publication storage");
+    auto value = make_session("concurrent publication");
+    auto writer = storage->repository.stage(value.id, session::make_delta(value, value.entries));
+    require(writer.has_value(), "failed to stage concurrent-publication fixture");
+    const auto initial = session::make_delta(value, value.entries);
+
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        usize snapshots = 0;
+        bool release = false;
+    };
+    auto gate = std::make_shared<Gate>();
+    StorageHookReset reset(storage->repository);
+    session::testing::set_storage_hook(storage->repository, [gate](session::testing::StorageEvent event) {
+        if (event != session::testing::StorageEvent::PUBLICATION_STATE_SNAPSHOTTED) return;
+        std::unique_lock lock(gate->mutex);
+        ++gate->snapshots;
+        gate->changed.notify_all();
+        gate->changed.wait(lock, [&] { return gate->release; });
+    });
+
+    std::array<std::optional<Result<session::SessionCommitResult>>, 2> results;
+    std::array<std::jthread, 2> publishers{
+        std::jthread([&] { results[0] = writer->commit(initial); }),
+        std::jthread([&] { results[1] = writer->commit(initial); }),
+    };
+    {
+        std::unique_lock lock(gate->mutex);
+        gate->changed.wait(lock, [&] { return gate->snapshots == 2; });
+        gate->release = true;
+    }
+    gate->changed.notify_all();
+    for (auto &publisher : publishers) publisher.join();
+    const auto succeeded = std::ranges::count_if(results, [](const auto &result) { return result && result->has_value(); });
+    const auto rejected = std::ranges::count_if(
+        results, [](const auto &result) { return result && !*result && result->error().detail.contains("concurrent publication"); });
+    auto loaded = writer->load();
+    require(succeeded == 1 && rejected == 1 && loaded && loaded->entries.size() == value.entries.size(),
+            "concurrent staged commits did not publish exactly once and reject stale materialization");
+}
+
+void test_unpublished_queue_recovers_post_rename_attachment() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open unpublished-retry storage");
+    auto value = make_session("recover fork publication");
+    auto writer = storage->repository.stage(value.id, session::make_delta(value, value.entries));
+    require(writer.has_value(), "failed to stage unpublished-retry fixture");
+    auto queue = session::PersistenceQueue::create_unpublished(*std::move(writer));
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        usize snapshots = 0;
+        bool retry_blocked = false;
+        bool release = false;
+    };
+    auto gate = std::make_shared<Gate>();
+    StorageHookReset reset(storage->repository);
+    session::testing::set_storage_hook(storage->repository, [gate](session::testing::StorageEvent event) {
+        if (event != session::testing::StorageEvent::PUBLICATION_STATE_SNAPSHOTTED) return;
+        std::unique_lock lock(gate->mutex);
+        ++gate->snapshots;
+        if (gate->snapshots == 1) return;
+        gate->retry_blocked = true;
+        gate->changed.notify_all();
+        gate->changed.wait(lock, [&] { return gate->release; });
+    });
+    session::testing::fail_storage_once(storage->repository, session::testing::StorageFailure::PUBLICATION_AFTER_RENAME);
+    auto published = queue->publish_initial(session::make_delta(value, value.entries));
+    {
+        std::unique_lock lock(gate->mutex);
+        gate->changed.wait(lock, [&] { return gate->retry_blocked; });
+    }
+    require(published && *published == session::InitialPublicationStatus::ATTACHMENT_PENDING && queue->status().degraded &&
+                queue->status().publication_attachment_pending,
+            "post-rename publication failure was not represented as recoverable published authority");
+    {
+        std::scoped_lock lock(gate->mutex);
+        gate->release = true;
+    }
+    gate->changed.notify_all();
+    require(queue->flush().has_value(), "unpublished queue did not retry attachment of the same finalized snapshot");
+    auto projection = storage->catalog.find(value.id);
+    require(!queue->status().degraded && projection && *projection && (*projection)->observed_revision == 1,
+            "attachment retry did not recover the published fork and its catalog projection");
 }
 
 void test_abandoned_staging_and_marker_are_reconciled() {
@@ -1502,6 +1603,8 @@ int main(int argc, char **argv) {
     test_missing_catalog_recreation_requires_exclusive_maintenance();
     test_staging_cancellation_and_complete_publication();
     test_publication_retries_across_rename_and_reopen_boundaries();
+    test_concurrent_publication_revalidates_materialization_under_lock();
+    test_unpublished_queue_recovers_post_rename_attachment();
     test_abandoned_staging_and_marker_are_reconciled();
     test_staged_final_snapshot_is_fully_validated();
     test_recency_rename_fork_and_discovery();

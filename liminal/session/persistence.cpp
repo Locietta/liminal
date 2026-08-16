@@ -94,7 +94,9 @@ std::shared_ptr<PersistenceQueue> PersistenceQueue::create_unpublished(SessionWr
     auto owned_writer = std::make_shared<SessionWriter>(std::move(writer));
     Commit commit = [owned_writer](const SessionDelta &delta) { return owned_writer->commit(delta); };
     CatalogStatus status = [owned_writer] { return owned_writer->catalog_status(); };
-    return std::shared_ptr<PersistenceQueue>(new PersistenceQueue(id, std::move(commit), PublicationState::UNPUBLISHED, std::move(status)));
+    PublicationPending pending = [owned_writer] { return owned_writer->publication_attachment_pending(); };
+    return std::shared_ptr<PersistenceQueue>(
+        new PersistenceQueue(id, std::move(commit), PublicationState::UNPUBLISHED, std::move(status), std::move(pending)));
 }
 
 std::shared_ptr<PersistenceQueue> PersistenceQueue::create_for_test(SessionId id, TestCommit commit) {
@@ -138,8 +140,10 @@ std::shared_ptr<PersistenceQueue> testing::create_reopening_queue(std::filesyste
     return PersistenceQueueAccess::create_reopening(std::move(state_root), id, std::move(detail), std::move(hook));
 }
 
-PersistenceQueue::PersistenceQueue(SessionId id, Commit commit, PublicationState publication_state, CatalogStatus catalog_status)
-    : id(id), commit(std::move(commit)), read_catalog_status(std::move(catalog_status)), publication_state(publication_state),
+PersistenceQueue::PersistenceQueue(SessionId id, Commit commit, PublicationState publication_state, CatalogStatus catalog_status,
+                                   PublicationPending publication_pending)
+    : id(id), commit(std::move(commit)), read_catalog_status(std::move(catalog_status)),
+      publication_pending(std::move(publication_pending)), publication_state(publication_state),
       worker([this](std::stop_token stop) { run(stop); }) {}
 
 PersistenceQueue::~PersistenceQueue() {
@@ -174,7 +178,7 @@ PersistenceStatus PersistenceQueue::status() const {
     return result;
 }
 
-Result<void> PersistenceQueue::publish_initial(const SessionDelta &delta) {
+Result<InitialPublicationStatus> PersistenceQueue::publish_initial(const SessionDelta &delta) {
     {
         std::scoped_lock lock(mutex);
         if (publication_state != PublicationState::UNPUBLISHED || !pending.empty() || enqueued_mutations != 0 || persisted_mutations != 0 ||
@@ -185,6 +189,7 @@ Result<void> PersistenceQueue::publish_initial(const SessionDelta &delta) {
         commit_active = true;
     }
     auto published = commit(delta);
+    bool attachment_pending = false;
     {
         std::scoped_lock lock(mutex);
         commit_active = false;
@@ -196,6 +201,15 @@ Result<void> PersistenceQueue::publish_initial(const SessionDelta &delta) {
                 current_status.catalog_detail = *published->catalog_degradation;
             }
             if (!pending.empty()) retry_requested = true;
+        } else if (publication_pending && publication_pending()) {
+            publication_state = PublicationState::ACTIVE;
+            publication_retry = delta;
+            retry_requested = true;
+            attachment_pending = true;
+            current_status.degraded = true;
+            current_status.publication_attachment_pending = true;
+            current_status.pending_mutations = pending.size();
+            current_status.detail = published.error().message();
         } else {
             publication_state = PublicationState::FAILED;
             current_status.degraded = true;
@@ -204,8 +218,9 @@ Result<void> PersistenceQueue::publish_initial(const SessionDelta &delta) {
         }
     }
     changed.notify_all();
+    if (attachment_pending) return InitialPublicationStatus::ATTACHMENT_PENDING;
     if (!published) return lighter::outcome_error(std::move(published).error());
-    return {};
+    return InitialPublicationStatus::ATTACHED;
 }
 
 void PersistenceQueue::mark_degraded(std::string detail) {
@@ -226,15 +241,16 @@ Result<void> PersistenceQueue::flush() {
         return lighter::outcome_error(
             Error::storage(current_status.detail.empty() ? "initial session publication failed" : current_status.detail));
     }
-    if (pending.empty()) return {};
+    if (pending.empty() && !publication_retry) return {};
     const auto target = enqueued_mutations;
     const auto observed_failure = failure_generation;
     retry_requested = true;
     changed.notify_all();
     changed.wait(lock, [this, target, observed_failure] {
-        return persisted_mutations >= target || (failure_generation > observed_failure && last_failed_through >= target && !commit_active);
+        return (!publication_retry && persisted_mutations >= target) ||
+               (failure_generation > observed_failure && last_failed_through >= target && !commit_active);
     });
-    if (persisted_mutations >= target) return {};
+    if (!publication_retry && persisted_mutations >= target) return {};
     return lighter::outcome_error(Error::storage(current_status.detail.empty() ? "session has an unsaved tail" : current_status.detail));
 }
 
@@ -254,16 +270,24 @@ void PersistenceQueue::run(std::stop_token stop) {
         SessionDelta delta;
         usize count = 0;
         u64 attempt_through = 0;
+        bool publication_attempt = false;
         {
             std::unique_lock lock(mutex);
             changed.wait(lock, stop, [this] {
-                return publication_state == PublicationState::ACTIVE && !commit_active && !pending.empty() && retry_requested;
+                return publication_state == PublicationState::ACTIVE && !commit_active &&
+                       (publication_retry.has_value() || !pending.empty()) && retry_requested;
             });
             if (stop.stop_requested()) return;
             retry_requested = false;
-            count = pending.size();
-            attempt_through = persisted_mutations + count;
-            delta = pending_delta_locked(count);
+            publication_attempt = publication_retry.has_value();
+            if (publication_attempt) {
+                delta = *publication_retry;
+                attempt_through = enqueued_mutations;
+            } else {
+                count = pending.size();
+                attempt_through = persisted_mutations + count;
+                delta = pending_delta_locked(count);
+            }
             commit_active = true;
         }
 
@@ -272,15 +296,19 @@ void PersistenceQueue::run(std::stop_token stop) {
             std::scoped_lock lock(mutex);
             commit_active = false;
             if (result) {
-                for (usize index = 0; index < count; ++index) pending.pop_front();
-                persisted_mutations += count;
+                if (publication_attempt) {
+                    publication_retry.reset();
+                } else {
+                    for (usize index = 0; index < count; ++index) pending.pop_front();
+                    persisted_mutations += count;
+                }
                 current_status = {.pending_mutations = pending.size()};
                 if (result->catalog_degradation) {
                     current_status.catalog_degraded = true;
                     current_status.catalog_detail = *result->catalog_degradation;
                 }
                 failures = 0;
-                if (!pending.empty()) retry_requested = true;
+                if (publication_retry || !pending.empty()) retry_requested = true;
                 changed.notify_all();
                 continue;
             }

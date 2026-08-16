@@ -47,6 +47,7 @@ struct SessionWriter {
     Result<SessionCommitResult> commit(const SessionDelta &delta);
     Result<void> refresh_catalog();
     CatalogRefreshStatus catalog_status() const;
+    bool publication_attachment_pending() const;
 
 private:
     friend struct SessionRepository;

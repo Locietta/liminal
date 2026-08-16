@@ -664,6 +664,7 @@ struct SessionWriter::State {
     DurableHead head;
     std::vector<EncodedEntry> staged_entries;
     std::optional<StagedBaseline> staged_baseline;
+    std::optional<PreparedDelta> finalized_publication;
     std::optional<std::string> publication_degradation;
     WriterMaterialization materialization = WriterMaterialization::EMPTY;
     std::mutex mutex;
@@ -758,7 +759,39 @@ bool same_entry(const EncodedEntry &left, const EncodedEntry &right) {
            left.payload.provider_call_id == right.payload.provider_call_id;
 }
 
-Result<void> validate_staged_final(const SessionWriter::State &state, const SessionDelta &delta) {
+bool same_model_preference(const std::optional<SessionModelPreference> &left, const std::optional<SessionModelPreference> &right) {
+    if (left.has_value() != right.has_value()) return false;
+    return !left || (left->provider == right->provider && left->model == right->model && left->reasoning_effort == right->reasoning_effort);
+}
+
+bool same_publication_delta(const PreparedDelta &left, const PreparedDelta &right) {
+    const auto &left_delta = left.delta;
+    const auto &right_delta = right.delta;
+    return left_delta.active_leaf == right_delta.active_leaf && left_delta.next_entry_id == right_delta.next_entry_id &&
+           left_delta.next_task_id == right_delta.next_task_id && left_delta.next_provider_call_id == right_delta.next_provider_call_id &&
+           left_delta.entry_count == right_delta.entry_count && left_delta.tokens_used == right_delta.tokens_used &&
+           left_delta.metadata.created_at_ms == right_delta.metadata.created_at_ms &&
+           left_delta.metadata.updated_at_ms == right_delta.metadata.updated_at_ms &&
+           left_delta.metadata.workspace == right_delta.metadata.workspace &&
+           left_delta.metadata.working_directory == right_delta.metadata.working_directory &&
+           left_delta.metadata.title == right_delta.metadata.title && left_delta.metadata.preview == right_delta.metadata.preview &&
+           same_model_preference(left_delta.metadata.model_preference, right_delta.metadata.model_preference) &&
+           left_delta.metadata.forked_from == right_delta.metadata.forked_from && left.entries.size() == right.entries.size() &&
+           std::ranges::equal(left.entries, right.entries, same_entry);
+}
+
+Result<void> validate_publication_retry(const SessionWriter::State &state, const SessionDelta &delta) {
+    if (!state.finalized_publication) return lighter::outcome_error(Error::storage("published session has no retained finalized snapshot"));
+    DurableHead empty;
+    auto candidate = prepare_delta(delta, empty);
+    if (!candidate) return lighter::outcome_error(std::move(candidate).error());
+    if (!same_publication_delta(*state.finalized_publication, *candidate)) {
+        return lighter::outcome_error(Error::storage("publication retry does not match the durably published snapshot"));
+    }
+    return {};
+}
+
+Result<PreparedDelta> prepare_staged_final(const SessionWriter::State &state, const SessionDelta &delta) {
     auto prepared = prepare_delta(delta, {});
     if (!prepared) return lighter::outcome_error(std::move(prepared).error());
     if (!state.staged_baseline) return lighter::outcome_error(Error::storage("staged publication has no retained baseline"));
@@ -776,7 +809,7 @@ Result<void> validate_staged_final(const SessionWriter::State &state, const Sess
         delta.entry_count < initial.entry_count || delta.tokens_used < initial.tokens_used) {
         return lighter::outcome_error(Error::storage("staged publication snapshot regresses its retained baseline"));
     }
-    return {};
+    return *std::move(prepared);
 }
 
 Result<void> update_staged_singleton(SessionWriter::State &state, const SessionDelta &delta) {
@@ -816,7 +849,8 @@ Result<void> inject_publication_failure(SessionWriter::State &state, testing::St
     return lighter::outcome_error(Error::storage("injected staged publication failure"));
 }
 
-Result<PublishedAuthority> attach_published(SessionWriter::State &state) {
+Result<PublishedAuthority> attach_published(SessionWriter::State &state, const SessionDelta &delta) {
+    if (auto valid = validate_publication_retry(state, delta); !valid) return lighter::outcome_error(std::move(valid).error());
     const StatePaths paths{state.repository->root};
     auto opened = open_database(paths.session_database(state.id), false, true);
     if (!opened) return lighter::outcome_error(std::move(opened).error());
@@ -834,12 +868,17 @@ Result<PublishedAuthority> attach_published(SessionWriter::State &state) {
     state.staged_entries.clear();
     state.staged_entries.shrink_to_fit();
     state.staged_baseline.reset();
+    state.finalized_publication.reset();
     return PublishedAuthority{.degradation = state.publication_degradation};
 }
 
 Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const SessionDelta &delta) {
-    if (auto valid = validate_staged_final(state, delta); !valid) return lighter::outcome_error(std::move(valid).error());
+    auto finalized = prepare_staged_final(state, delta);
+    if (!finalized) return lighter::outcome_error(std::move(finalized).error());
     if (auto updated = update_staged_singleton(state, delta); !updated) return lighter::outcome_error(std::move(updated).error());
+    finalized->delta.entries.clear();
+    finalized->delta.entries.shrink_to_fit();
+    state.finalized_publication = *std::move(finalized);
     const StatePaths paths{state.repository->root};
     {
         std::scoped_lock marker_lock(state.invalidation->mutex);
@@ -854,9 +893,12 @@ Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const Ses
     }
     state.staging_directory.clear();
     state.materialization = WriterMaterialization::PUBLISHED_NEEDS_ATTACH;
+    state.staged_entries.clear();
+    state.staged_entries.shrink_to_fit();
+    state.staged_baseline.reset();
     if (auto injected = inject_publication_failure(state, testing::StorageFailure::PUBLICATION_AFTER_RENAME); !injected)
         return lighter::outcome_error(std::move(injected).error());
-    return attach_published(state);
+    return attach_published(state, delta);
 }
 
 SessionCommitResult project_publication(SessionWriter::State &state, PublishedAuthority published) {
@@ -1102,8 +1144,11 @@ Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
         materialization = state->materialization;
     }
     if (materialization == WriterMaterialization::STAGED || materialization == WriterMaterialization::PUBLISHED_NEEDS_ATTACH) {
+        notify_storage_test_hook(state->repository->storage_hook, testing::StorageEvent::PUBLICATION_STATE_SNAPSHOTTED);
         std::unique_lock lock(state->mutex);
-        auto published = state->materialization == WriterMaterialization::STAGED ? publish_staged(*state, delta) : attach_published(*state);
+        if (state->materialization != materialization)
+            return lighter::outcome_error(Error::storage("session writer received concurrent publication attempts"));
+        auto published = materialization == WriterMaterialization::STAGED ? publish_staged(*state, delta) : attach_published(*state, delta);
         if (!published) return lighter::outcome_error(std::move(published).error());
         lock.unlock();
         auto result = project_publication(*state, *std::move(published));
@@ -1113,7 +1158,9 @@ Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
     auto prepared = prepare_delta(delta, head);
     if (!prepared) return lighter::outcome_error(std::move(prepared).error());
     std::unique_lock lock(state->mutex);
-    if (state->materialization == WriterMaterialization::EMPTY) {
+    if (state->materialization != materialization || head.revision != state->head.revision)
+        return lighter::outcome_error(Error::storage("session writer received concurrent commits"));
+    if (materialization == WriterMaterialization::EMPTY) {
         if (auto staged_result = stage_prepared(*state, *prepared); !staged_result)
             return lighter::outcome_error(std::move(staged_result).error());
         auto published = publish_staged(*state, delta);
@@ -1123,7 +1170,8 @@ Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
         if (result.catalog_degradation && state->repository->indexer) state->repository->indexer->enqueue(state->id, state->invalidation);
         return result;
     }
-    if (head.revision != state->head.revision) return lighter::outcome_error(Error::storage("session writer received concurrent commits"));
+    if (materialization != WriterMaterialization::PUBLISHED || !state->database)
+        return lighter::outcome_error(Error::storage("session writer is not ready for semantic commits"));
     const auto target_revision = state->head.revision + 1;
     const bool title_changed = delta.metadata.title != state->head.title;
     const bool catalog_visible = delta.metadata.updated_at_ms != state->head.updated_at_ms || delta.metadata.title != state->head.title ||
@@ -1224,6 +1272,11 @@ Result<void> SessionWriter::refresh_catalog() {
 CatalogRefreshStatus SessionWriter::catalog_status() const {
     std::scoped_lock lock(state->invalidation->status_mutex);
     return state->invalidation->status;
+}
+
+bool SessionWriter::publication_attachment_pending() const {
+    std::scoped_lock lock(state->mutex);
+    return state->materialization == WriterMaterialization::PUBLISHED_NEEDS_ATTACH;
 }
 
 void testing::StorageHookAccess::set(SessionRepository &repository, StorageHook hook) {

@@ -217,6 +217,12 @@ Result<PreparedSession> SessionCoordinator::publish_fork(ForkPlan plan) const {
     plan.target.session.metadata.updated_at_ms = std::max(plan.target.session.metadata.updated_at_ms, session::unix_milliseconds_now());
     auto published = queue->publish_initial(session::make_delta(plan.target.session, plan.target.session.entries));
     if (!published) return lighter::outcome_error(std::move(published).error());
+    if (*published == session::InitialPublicationStatus::ATTACHMENT_PENDING) {
+        const auto status = queue->status();
+        if (status.publication_attachment_pending) {
+            plan.target.notices.push_back("[fork published; storage attachment is recovering: " + status.detail + "]\n");
+        }
+    }
     return std::move(plan.target);
 }
 
