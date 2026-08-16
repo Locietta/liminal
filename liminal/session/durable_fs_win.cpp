@@ -55,12 +55,14 @@ Result<void> durable_remove_file(const std::filesystem::path &path) {
     return lighter::outcome_error(windows_error("cannot remove catalog marker"));
 }
 
-Result<void> publish_directory_without_replacement(const std::filesystem::path &source, const std::filesystem::path &target) {
+Result<void> rename_directory_without_replacement(const std::filesystem::path &source, const std::filesystem::path &target) {
     if (!MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH)) {
         return lighter::outcome_error(windows_error("cannot publish staged session directory"));
     }
     return {};
 }
+
+Result<void> flush_published_directory(const std::filesystem::path &) { return {}; }
 
 Result<bool> is_reparse_point(const std::filesystem::path &path) {
     const auto attributes = GetFileAttributesW(path.c_str());

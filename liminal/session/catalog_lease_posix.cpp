@@ -50,9 +50,12 @@ Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem:
     const auto file = open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR);
     if (file < 0)
         return lighter::outcome_error(Error::storage("cannot open catalog initialization lock: " + std::string(std::strerror(errno))));
-    if (flock(file, LOCK_EX) != 0) {
+    if (flock(file, LOCK_EX | LOCK_NB) != 0) {
         const auto code = errno;
         close(file);
+        if (code == EWOULDBLOCK || code == EAGAIN) {
+            return lighter::outcome_error(Error::storage("session catalog initialization is already in progress"));
+        }
         return lighter::outcome_error(Error::storage("cannot acquire catalog initialization lock: " + std::string(std::strerror(code))));
     }
     auto state = std::make_shared<CatalogLease::State>();

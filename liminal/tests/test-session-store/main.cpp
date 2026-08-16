@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <latch>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -34,6 +35,7 @@
 
 #include <liminal/application/session_coordinator.h>
 #include <liminal/session/catalog.h>
+#include <liminal/session/catalog_lease.h>
 #include <liminal/session/lease.h>
 #include <liminal/session/paths.h>
 #include <liminal/session/persistence.h>
@@ -390,6 +392,44 @@ void test_encoding_failure_precedes_begin() {
     sqlite3_close(blocker);
     require(scalar_i64(paths.session_database(published->value.id), "SELECT revision FROM session") == 1,
             "encoding failure changed the authoritative database");
+}
+
+void test_unsigned_values_must_fit_sqlite_integer_range() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open SQLite-range validation storage");
+    auto value = make_session("validate integer range");
+    auto writer = storage->repository.create(value.id);
+    require(writer.has_value(), "failed to create SQLite-range validation writer");
+    const auto initial = session::make_delta(value, value.entries);
+    const auto maximum = std::numeric_limits<u64>::max();
+    const auto require_rejected = [&](session::SessionDelta candidate) {
+        auto rejected = writer->commit(candidate);
+        require(!rejected && rejected.error().detail.contains("outside SQLite's integer range") &&
+                    !std::filesystem::exists(session::StatePaths{temporary.root}.session_directory(value.id)),
+                "out-of-range unsigned session value reached authoritative SQLite state");
+    };
+
+    auto candidate = initial;
+    candidate.tokens_used = maximum;
+    require_rejected(candidate);
+    candidate = initial;
+    candidate.next_task_id = maximum;
+    require_rejected(candidate);
+    candidate = initial;
+    candidate.active_leaf = session::EntryId{maximum};
+    require_rejected(candidate);
+    candidate = initial;
+    candidate.entries.front().id = session::EntryId{maximum};
+    require_rejected(candidate);
+    candidate = initial;
+    std::get<session::TaskStarted>(candidate.entries.front().payload).id = session::TaskId{maximum};
+    require_rejected(candidate);
+    candidate = initial;
+    candidate.metadata.forked_from = session::ForkOrigin{.session = session::generate_session_id(), .entry = session::EntryId{maximum}};
+    require_rejected(candidate);
+
+    require(writer->commit(initial).has_value(), "range validation left an unused writer unable to publish valid state");
 }
 
 void test_catalog_failure_cannot_rollback_session_and_pending_recovers() {
@@ -795,18 +835,34 @@ void test_concurrent_catalog_initialization_is_serialized() {
     for (usize index = 0; index < opener_count; ++index) {
         threads.emplace_back([&, index] {
             start.arrive_and_wait();
-            auto storage = open_storage(temporary.root);
-            opened[index] = storage.has_value();
-            if (!storage) errors[index] = storage.error().message();
+            auto repository = session::SessionRepository::open(temporary.root);
+            opened[index] = repository.has_value();
+            if (!repository) errors[index] = repository.error().message();
         });
     }
     threads.clear();
     for (usize index = 0; index < opener_count; ++index) {
-        if (!opened[index]) fail("concurrent first catalog opener failed: " + errors[index]);
+        if (!opened[index]) fail("concurrent first authority opener failed: " + errors[index]);
     }
     auto storage = open_storage(temporary.root);
     require(storage.has_value() && !std::filesystem::exists(session::StatePaths{temporary.root}.catalog_rebuild_marker()),
             "concurrently initialized catalog did not finish its serialized rebuild");
+}
+
+void test_catalog_initialization_contention_returns_authority_only() {
+    TemporaryState temporary;
+    std::error_code error;
+    std::filesystem::create_directories(session::StatePaths{temporary.root}.locks(), error);
+    require(!error, "failed to create initialization-contention lock directory");
+    {
+        auto owner = session::detail::acquire_catalog_initialization_lease(temporary.root);
+        require(owner.has_value(), "failed to hold catalog initialization fixture lease");
+        auto repository = session::SessionRepository::open(temporary.root);
+        auto catalog = repository ? repository->catalog() : Result<session::SessionCatalog>{lighter::outcome_error(repository.error())};
+        require(repository && !catalog && catalog.error().detail.contains("initialization is already in progress"),
+                "catalog initialization contention blocked or rejected authoritative repository access");
+    }
+    require(open_storage(temporary.root).has_value(), "catalog initialization did not recover after its owner released the lease");
 }
 
 void test_empty_catalog_creation_crash_is_recovered_exclusively() {
@@ -903,6 +959,7 @@ void test_publication_retries_across_rename_and_reopen_boundaries() {
     require(storage.has_value(), "failed to open publication-boundary storage");
     constexpr std::array failures{
         session::testing::StorageFailure::PUBLICATION_BEFORE_RENAME,
+        session::testing::StorageFailure::PUBLICATION_AFTER_RENAME_BEFORE_DIRECTORY_FLUSH,
         session::testing::StorageFailure::PUBLICATION_AFTER_RENAME,
         session::testing::StorageFailure::PUBLICATION_AFTER_REOPEN,
     };
@@ -1501,6 +1558,44 @@ void test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session() {
     require(removed && !*removed, "latest-session acquisition did not remove its missing catalog hint");
 }
 
+void test_published_authority_rejects_linked_session_directory() {
+#ifndef _WIN32
+    TemporaryState temporary;
+    session::SessionId id;
+    {
+        auto storage = open_storage(temporary.root);
+        auto published = storage ? publish(storage->repository, make_session("linked authority")) :
+                                   Result<Published>{lighter::outcome_error(storage.error())};
+        require(published.has_value(), "failed to publish linked-authority fixture");
+        id = published->value.id;
+    }
+    const session::StatePaths paths{temporary.root};
+    const auto target = temporary.root / "linked-authority-target";
+    std::error_code error;
+    std::filesystem::rename(paths.session_directory(id), target, error);
+    require(!error, "failed to relocate linked-authority target");
+    std::filesystem::create_directory_symlink(target, paths.session_directory(id), error);
+    require(!error, "failed to create linked session-directory fixture");
+
+    auto repository = session::SessionRepository::open(temporary.root);
+    require(repository.has_value(), "failed to reopen linked-authority repository");
+    auto exact = repository->resolve_exact(session::to_string(id));
+    auto acquired = repository->acquire(id);
+    auto stale = repository->remove_catalog_hint_if_authority_absent(id);
+    require(!exact && !acquired && !stale && exact.error().detail.contains("session directory is a symlink") &&
+                acquired.error().detail.contains("session directory is a symlink") &&
+                stale.error().detail.contains("session directory is a symlink"),
+            "exact, acquisition, and stale-hint paths did not share linked-authority validation");
+    auto rebuilt = repository->rebuild_catalog();
+    auto catalog = repository->catalog();
+    auto projection =
+        catalog ? catalog->find(id) : Result<std::optional<session::CatalogProjection>>{lighter::outcome_error(catalog.error())};
+    require(rebuilt && std::ranges::any_of(rebuilt->warnings, [](const std::string &warning) { return warning.contains("symlink"); }) &&
+                projection && !*projection,
+            "catalog projection rebuild accepted a linked session authority");
+#endif
+}
+
 void test_prepared_switch_keeps_live_state_atomic() {
     TemporaryState temporary;
     auto storage = open_storage(temporary.root);
@@ -1587,6 +1682,7 @@ int main(int argc, char **argv) {
     test_independent_session_write_transactions();
     test_cross_process_lease_exclusion(executable);
     test_encoding_failure_precedes_begin();
+    test_unsigned_values_must_fit_sqlite_integer_range();
     test_catalog_failure_cannot_rollback_session_and_pending_recovers();
     test_catalog_failure_preserves_exact_authority_and_new_persistence();
     test_blocked_catalog_projection_does_not_block_semantic_commit();
@@ -1598,6 +1694,7 @@ int main(int argc, char **argv) {
     test_missing_catalog_rebuild_includes_leased_sessions();
     test_incomplete_catalog_rebuild_is_resumed_after_crash();
     test_concurrent_catalog_initialization_is_serialized();
+    test_catalog_initialization_contention_returns_authority_only();
     test_empty_catalog_creation_crash_is_recovered_exclusively();
     test_corrupt_catalog_repair_requires_exclusive_maintenance();
     test_missing_catalog_recreation_requires_exclusive_maintenance();
@@ -1616,6 +1713,7 @@ int main(int argc, char **argv) {
     test_flush_waits_for_complete_pending_prefix();
     test_initial_publication_serializes_enqueued_mutations();
     test_exact_open_bypasses_catalog_and_failed_hint_preserves_live_session();
+    test_published_authority_rejects_linked_session_directory();
     test_prepared_switch_keeps_live_state_atomic();
     test_stale_catalog_hint_removal_requires_session_lease();
     test_removed_archive_surface_and_state_root_override();

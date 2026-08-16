@@ -92,6 +92,25 @@ std::optional<std::string> optional_text(sqlite3_stmt *statement, int column) {
 
 std::string text(sqlite3_stmt *statement, int column) { return optional_text(statement, column).value_or(""); }
 
+Result<void> bind_and_step_projection(sqlite3 *database, sqlite3_stmt *statement, const CatalogProjection &projection) {
+    sqlite3_reset(statement);
+    sqlite3_clear_bindings(statement);
+    bind_id(statement, 1, projection.summary.id);
+    sqlite3_bind_int64(statement, 2, static_cast<sqlite3_int64>(projection.observed_revision));
+    sqlite3_bind_text(statement, 3, projection.workspace_key.data(), static_cast<int>(projection.workspace_key.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement, 4, projection.summary.updated_at_ms);
+    if (projection.summary.title)
+        sqlite3_bind_text(statement, 5, projection.summary.title->data(), static_cast<int>(projection.summary.title->size()),
+                          SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(statement, 5);
+    sqlite3_bind_text(statement, 6, projection.summary.preview.data(), static_cast<int>(projection.summary.preview.size()),
+                      SQLITE_TRANSIENT);
+    const auto row = sqlite3_step(statement);
+    if (row != SQLITE_DONE) return lighter::outcome_error(sqlite_error(database, "cannot update session projection", row));
+    return {};
+}
+
 enum struct CatalogInitialization {
     READY,
     NEEDS_CREATION,
@@ -136,9 +155,9 @@ Result<CatalogInitialization> initialize(sqlite3 *database, const std::filesyste
     auto created = execute(database, R"sql(
 CREATE TABLE sessions (
     id BLOB PRIMARY KEY CHECK(length(id) = 16),
-    observed_revision INTEGER NOT NULL,
-    workspace_key TEXT NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
+    observed_revision INTEGER NOT NULL CHECK(observed_revision>0),
+    workspace_key TEXT NOT NULL CHECK(length(workspace_key)>0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms>0),
     title TEXT,
     preview TEXT NOT NULL
 );
@@ -473,22 +492,9 @@ WHERE excluded.observed_revision>=sessions.observed_revision
         static_cast<void>(execute(state->database, "ROLLBACK"));
         return lighter::outcome_error(std::move(query).error());
     }
-    bind_id(query->value, 1, projection.summary.id);
-    sqlite3_bind_int64(query->value, 2, static_cast<sqlite3_int64>(projection.observed_revision));
-    sqlite3_bind_text(query->value, 3, projection.workspace_key.data(), static_cast<int>(projection.workspace_key.size()),
-                      SQLITE_TRANSIENT);
-    sqlite3_bind_int64(query->value, 4, projection.summary.updated_at_ms);
-    if (projection.summary.title)
-        sqlite3_bind_text(query->value, 5, projection.summary.title->data(), static_cast<int>(projection.summary.title->size()),
-                          SQLITE_TRANSIENT);
-    else
-        sqlite3_bind_null(query->value, 5);
-    sqlite3_bind_text(query->value, 6, projection.summary.preview.data(), static_cast<int>(projection.summary.preview.size()),
-                      SQLITE_TRANSIENT);
-    const auto row = sqlite3_step(query->value);
-    if (row != SQLITE_DONE) {
+    if (auto updated = bind_and_step_projection(state->database, query->value, projection); !updated) {
         static_cast<void>(execute(state->database, "ROLLBACK"));
-        return lighter::outcome_error(sqlite_error(state->database, "cannot update session projection", row));
+        return updated;
     }
     auto committed = execute(state->database, "COMMIT");
     if (!committed) {
@@ -496,6 +502,30 @@ WHERE excluded.observed_revision>=sessions.observed_revision
         return committed;
     }
     rollback = false;
+    return {};
+}
+
+Result<void> SessionCatalog::replace_all(std::span<const CatalogProjection> projections) const {
+    for (const auto &projection : projections) {
+        if (auto valid = detail::validate_catalog_projection(projection); !valid) return lighter::outcome_error(std::move(valid).error());
+    }
+    std::scoped_lock lock(state->mutex);
+    if (auto transaction = execute(state->database, "BEGIN IMMEDIATE"); !transaction) return transaction;
+    const auto rollback = [this](Error error) -> Result<void> {
+        static_cast<void>(execute(state->database, "ROLLBACK"));
+        return lighter::outcome_error(std::move(error));
+    };
+    if (auto cleared = execute(state->database, "DELETE FROM sessions"); !cleared) return rollback(std::move(cleared).error());
+    auto insert = prepare(state->database, R"sql(
+INSERT INTO sessions(id,observed_revision,workspace_key,updated_at_ms,title,preview) VALUES(?1,?2,?3,?4,?5,?6)
+)sql");
+    if (!insert) return rollback(std::move(insert).error());
+    for (const auto &projection : projections) {
+        if (auto inserted = bind_and_step_projection(state->database, insert->value, projection); !inserted) {
+            return rollback(std::move(inserted).error());
+        }
+    }
+    if (auto committed = execute(state->database, "COMMIT"); !committed) return rollback(std::move(committed).error());
     return {};
 }
 

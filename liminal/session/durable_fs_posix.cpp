@@ -80,16 +80,18 @@ Result<void> durable_remove_file(const std::filesystem::path &path) {
     return flush_directory(path.parent_path());
 }
 
-Result<void> publish_directory_without_replacement(const std::filesystem::path &source, const std::filesystem::path &target) {
+Result<void> rename_directory_without_replacement(const std::filesystem::path &source, const std::filesystem::path &target) {
 #ifdef SYS_renameat2
     if (syscall(SYS_renameat2, AT_FDCWD, source.c_str(), AT_FDCWD, target.c_str(), 1) != 0) {
         return lighter::outcome_error(posix_error("cannot publish staged session directory"));
     }
-    return flush_directory(target.parent_path());
+    return {};
 #else
     return lighter::outcome_error(Error::storage("atomic no-replace directory publication is unsupported on this platform"));
 #endif
 }
+
+Result<void> flush_published_directory(const std::filesystem::path &target) { return flush_directory(target.parent_path()); }
 
 Result<bool> is_reparse_point(const std::filesystem::path &path) {
     struct stat info{};

@@ -2,12 +2,14 @@
 
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include <liminal/error.h>
 #include <liminal/session/store.h>

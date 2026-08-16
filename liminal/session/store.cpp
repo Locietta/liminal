@@ -19,6 +19,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <set>
@@ -39,6 +40,7 @@ namespace {
 constexpr int k_session_application_id = 0x4c494d53;
 constexpr int k_session_schema_version = 1;
 constexpr usize k_marker_maximum_size = 64;
+constexpr u64 k_maximum_sqlite_integer = static_cast<u64>(std::numeric_limits<sqlite3_int64>::max());
 
 void notify_storage_test_hook(const StorageHookSlot &hook, testing::StorageEvent event) { hook.notify(event); }
 
@@ -159,35 +161,37 @@ BEGIN IMMEDIATE;
 CREATE TABLE session (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     session_id BLOB NOT NULL UNIQUE CHECK(length(session_id)=16),
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms>0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms>=created_at_ms),
     workspace_root TEXT NOT NULL,
     workspace_key TEXT NOT NULL,
     working_directory TEXT NOT NULL,
     title TEXT,
     preview TEXT NOT NULL,
-    active_leaf_entry_id INTEGER,
-    next_entry_id INTEGER NOT NULL,
-    next_task_id INTEGER NOT NULL,
-    next_provider_call_id INTEGER NOT NULL,
-    entry_count INTEGER NOT NULL,
-    tokens_used INTEGER NOT NULL,
+    active_leaf_entry_id INTEGER CHECK(active_leaf_entry_id IS NULL OR active_leaf_entry_id>0),
+    next_entry_id INTEGER NOT NULL CHECK(next_entry_id>0),
+    next_task_id INTEGER NOT NULL CHECK(next_task_id>0),
+    next_provider_call_id INTEGER NOT NULL CHECK(next_provider_call_id>0),
+    entry_count INTEGER NOT NULL CHECK(entry_count>0),
+    tokens_used INTEGER NOT NULL CHECK(tokens_used>=0),
     last_provider TEXT,
     last_model TEXT,
     last_reasoning_effort TEXT,
-    revision INTEGER NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision>0),
     forked_from_session_id BLOB,
-    forked_from_entry_id INTEGER
+    forked_from_entry_id INTEGER CHECK(forked_from_entry_id IS NULL OR forked_from_entry_id>0),
+    CHECK((forked_from_session_id IS NULL)=(forked_from_entry_id IS NULL))
 );
 CREATE TABLE session_entries (
-    entry_id INTEGER PRIMARY KEY,
-    task_id INTEGER,
-    provider_call_id INTEGER,
-    parent_entry_id INTEGER REFERENCES session_entries(entry_id),
+    entry_id INTEGER PRIMARY KEY CHECK(entry_id>0),
+    task_id INTEGER CHECK(task_id IS NULL OR task_id>0),
+    provider_call_id INTEGER CHECK(provider_call_id IS NULL OR provider_call_id>0),
+    parent_entry_id INTEGER REFERENCES session_entries(entry_id) CHECK(parent_entry_id IS NULL OR parent_entry_id>0),
     kind INTEGER NOT NULL,
     payload_version INTEGER NOT NULL,
     payload_json TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms>0),
+    CHECK(parent_entry_id IS NULL OR parent_entry_id<entry_id)
 );
 CREATE INDEX session_entries_children ON session_entries(parent_entry_id);
 CREATE INDEX session_entries_provider_calls ON session_entries(task_id,provider_call_id,entry_id);
@@ -260,6 +264,17 @@ struct DurableHead {
 };
 
 Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) {
+    if (delta.next_entry_id > k_maximum_sqlite_integer || delta.next_task_id > k_maximum_sqlite_integer ||
+        delta.next_provider_call_id > k_maximum_sqlite_integer || delta.entry_count > k_maximum_sqlite_integer ||
+        delta.tokens_used > k_maximum_sqlite_integer || (delta.active_leaf && delta.active_leaf->value > k_maximum_sqlite_integer) ||
+        (delta.metadata.forked_from && delta.metadata.forked_from->entry.value > k_maximum_sqlite_integer)) {
+        return lighter::outcome_error(Error::storage("session delta contains an unsigned value outside SQLite's integer range"));
+    }
+    if (head.revision > k_maximum_sqlite_integer || head.entry_count > k_maximum_sqlite_integer ||
+        head.next_task_id > k_maximum_sqlite_integer || head.next_provider_call_id > k_maximum_sqlite_integer ||
+        head.tokens_used > k_maximum_sqlite_integer) {
+        return lighter::outcome_error(Error::storage("durable session head contains an unsigned value outside SQLite's integer range"));
+    }
     if (!head.exists && delta.entries.empty())
         return lighter::outcome_error(Error::storage("cannot materialize a session without a semantic entry"));
     if (!delta.metadata.workspace || delta.metadata.workspace->root.empty() || delta.metadata.workspace->key.empty()) {
@@ -289,7 +304,10 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
     if (delta.metadata.forked_from && delta.metadata.forked_from->entry.value == 0) {
         return lighter::outcome_error(Error::storage("session delta has an invalid fork origin"));
     }
-    if (delta.entry_count != head.entry_count + delta.entries.size() || delta.next_entry_id != delta.entry_count + 1) {
+    const auto appended = static_cast<u64>(delta.entries.size());
+    if (appended > k_maximum_sqlite_integer || head.entry_count > k_maximum_sqlite_integer - appended ||
+        delta.entry_count != head.entry_count + appended || delta.entry_count == k_maximum_sqlite_integer ||
+        delta.next_entry_id != delta.entry_count + 1) {
         return lighter::outcome_error(Error::storage("session delta does not extend the durable entry sequence"));
     }
     if (delta.active_leaf && (delta.active_leaf->value == 0 || delta.active_leaf->value > delta.entry_count)) {
@@ -301,8 +319,12 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
     }
     u64 maximum_task_id = 0;
     u64 maximum_provider_call_id = 0;
+    bool lifecycle_id_out_of_range = false;
     for (usize index = 0; index < delta.entries.size(); ++index) {
         const auto &entry = delta.entries[index];
+        if (entry.id.value > k_maximum_sqlite_integer || (entry.parent_id && entry.parent_id->value > k_maximum_sqlite_integer)) {
+            return lighter::outcome_error(Error::storage("session entry contains an unsigned value outside SQLite's integer range"));
+        }
         if (entry.id.value != head.entry_count + index + 1 || entry.created_at_ms <= 0 ||
             (entry.parent_id && (entry.parent_id->value == 0 || entry.parent_id->value >= entry.id.value))) {
             return lighter::outcome_error(Error::storage("session delta contains an invalid entry envelope"));
@@ -310,17 +332,25 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
         std::visit(
             [&](const auto &payload) {
                 using T = std::remove_cvref_t<decltype(payload)>;
-                if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>)
+                if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>) {
+                    lifecycle_id_out_of_range |= payload.id.value > k_maximum_sqlite_integer;
                     maximum_task_id = std::max(maximum_task_id, payload.id.value);
-                else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolResults>) {
+                } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolResults>) {
+                    lifecycle_id_out_of_range |=
+                        payload.task_id.value > k_maximum_sqlite_integer || payload.provider_call_id.value > k_maximum_sqlite_integer;
                     maximum_task_id = std::max(maximum_task_id, payload.task_id.value);
                     maximum_provider_call_id = std::max(maximum_provider_call_id, payload.provider_call_id.value);
                 } else if constexpr (std::same_as<T, ProviderCallCompleted> || std::same_as<T, ProviderCallAborted>) {
+                    lifecycle_id_out_of_range |=
+                        payload.task_id.value > k_maximum_sqlite_integer || payload.id.value > k_maximum_sqlite_integer;
                     maximum_task_id = std::max(maximum_task_id, payload.task_id.value);
                     maximum_provider_call_id = std::max(maximum_provider_call_id, payload.id.value);
                 }
             },
             entry.payload);
+    }
+    if (lifecycle_id_out_of_range) {
+        return lighter::outcome_error(Error::storage("session entry contains an unsigned value outside SQLite's integer range"));
     }
     if (delta.next_task_id <= maximum_task_id || delta.next_provider_call_id <= maximum_provider_call_id) {
         return lighter::outcome_error(Error::storage("session delta lifecycle counters do not cover its entries"));
@@ -335,6 +365,12 @@ Result<PreparedDelta> prepare_delta(const SessionDelta &delta, const DurableHead
     for (const auto &entry : delta.entries) {
         auto encoded = encode_payload(entry.payload);
         if (!encoded) return lighter::outcome_error(std::move(encoded).error());
+        if ((encoded->task_id && encoded->task_id->value > k_maximum_sqlite_integer) ||
+            (encoded->provider_call_id && encoded->provider_call_id->value > k_maximum_sqlite_integer) ||
+            encoded->version > static_cast<u32>(std::numeric_limits<int>::max()) ||
+            static_cast<u32>(encoded->kind) > static_cast<u32>(std::numeric_limits<int>::max())) {
+            return lighter::outcome_error(Error::storage("session entry contains an unsigned value outside SQLite's integer range"));
+        }
         prepared.entries.push_back(
             {.id = entry.id, .parent_id = entry.parent_id, .created_at_ms = entry.created_at_ms, .payload = *std::move(encoded)});
     }
@@ -364,7 +400,8 @@ Result<u64> read_marker(const std::filesystem::path &path) {
     revision_text.remove_suffix(1);
     u64 revision = 0;
     const auto parsed = std::from_chars(revision_text.data(), revision_text.data() + revision_text.size(), revision);
-    if (parsed.ec != std::errc{} || parsed.ptr != revision_text.data() + revision_text.size() || revision == 0) {
+    if (parsed.ec != std::errc{} || parsed.ptr != revision_text.data() + revision_text.size() || revision == 0 ||
+        revision > k_maximum_sqlite_integer) {
         return lighter::outcome_error(Error::storage("catalog marker has an invalid target revision"));
     }
     return revision;
@@ -419,21 +456,35 @@ FROM session WHERE singleton=1
     return projection;
 }
 
-Result<CatalogProjection> read_published_projection(const StatePaths &paths, SessionId id) {
+Result<void> validate_published_authority(const StatePaths &paths, SessionId id) {
+    const auto directory = paths.session_directory(id);
+    const auto database = paths.session_database(id);
     std::error_code error;
-    if (!std::filesystem::is_directory(paths.session_directory(id), error)) {
+    const auto directory_exists = std::filesystem::exists(directory, error);
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect session directory: " + error.message()));
+    if (!directory_exists) return lighter::outcome_error(Error::storage("session was not found", ErrorCode::NOT_FOUND));
+    auto reparse = detail::is_reparse_point(directory);
+    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+    if (*reparse) return lighter::outcome_error(Error::storage("session directory is a symlink, junction, or reparse point"));
+    if (!std::filesystem::is_directory(directory, error)) {
         if (error) return lighter::outcome_error(Error::storage("cannot inspect session directory: " + error.message()));
-        return lighter::outcome_error(Error::storage("session was not found"));
+        return lighter::outcome_error(Error::storage("session authority is not a directory"));
     }
-    if (!std::filesystem::is_regular_file(paths.session_database(id), error)) {
+    const auto database_exists = std::filesystem::exists(database, error);
+    if (error) return lighter::outcome_error(Error::storage("cannot inspect session database: " + error.message()));
+    if (!database_exists) return lighter::outcome_error(Error::storage("published session database is absent", ErrorCode::NOT_FOUND));
+    reparse = detail::is_reparse_point(database);
+    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
+    if (*reparse) return lighter::outcome_error(Error::storage("session database is a symlink, junction, or reparse point"));
+    if (!std::filesystem::is_regular_file(database, error)) {
         if (error) return lighter::outcome_error(Error::storage("cannot inspect session database: " + error.message()));
-        return lighter::outcome_error(Error::storage("published session database is absent"));
+        return lighter::outcome_error(Error::storage("published session database is not a regular file"));
     }
-    for (const auto &path : {paths.session_directory(id), paths.session_database(id)}) {
-        auto reparse = detail::is_reparse_point(path);
-        if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-        if (*reparse) return lighter::outcome_error(Error::storage("session authority is a symlink, junction, or reparse point"));
-    }
+    return {};
+}
+
+Result<CatalogProjection> read_published_projection(const StatePaths &paths, SessionId id) {
+    if (auto valid = validate_published_authority(paths, id); !valid) return lighter::outcome_error(std::move(valid).error());
     sqlite3 *database = nullptr;
     const auto encoded = path_utf8(paths.session_database(id));
     const auto code = sqlite3_open_v2(encoded.c_str(), &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nullptr);
@@ -666,6 +717,7 @@ struct SessionWriter::State {
     std::optional<StagedBaseline> staged_baseline;
     std::optional<PreparedDelta> finalized_publication;
     std::optional<std::string> publication_degradation;
+    bool publication_directory_flush_pending = false;
     WriterMaterialization materialization = WriterMaterialization::EMPTY;
     std::mutex mutex;
 };
@@ -852,6 +904,12 @@ Result<void> inject_publication_failure(SessionWriter::State &state, testing::St
 Result<PublishedAuthority> attach_published(SessionWriter::State &state, const SessionDelta &delta) {
     if (auto valid = validate_publication_retry(state, delta); !valid) return lighter::outcome_error(std::move(valid).error());
     const StatePaths paths{state.repository->root};
+    if (state.publication_directory_flush_pending) {
+        if (auto flushed = detail::flush_published_directory(paths.session_directory(state.id)); !flushed) {
+            return lighter::outcome_error(std::move(flushed).error());
+        }
+        state.publication_directory_flush_pending = false;
+    }
     auto opened = open_database(paths.session_database(state.id), false, true);
     if (!opened) return lighter::outcome_error(std::move(opened).error());
     if (auto injected = inject_publication_failure(state, testing::StorageFailure::PUBLICATION_AFTER_REOPEN); !injected) {
@@ -887,15 +945,24 @@ Result<PublishedAuthority> publish_staged(SessionWriter::State &state, const Ses
     }
     if (auto injected = inject_publication_failure(state, testing::StorageFailure::PUBLICATION_BEFORE_RENAME); !injected)
         return lighter::outcome_error(std::move(injected).error());
-    if (auto published = detail::publish_directory_without_replacement(state.staging_directory, paths.session_directory(state.id));
+    if (auto published = detail::rename_directory_without_replacement(state.staging_directory, paths.session_directory(state.id));
         !published) {
         return lighter::outcome_error(std::move(published).error());
     }
     state.staging_directory.clear();
     state.materialization = WriterMaterialization::PUBLISHED_NEEDS_ATTACH;
+    state.publication_directory_flush_pending = true;
     state.staged_entries.clear();
     state.staged_entries.shrink_to_fit();
     state.staged_baseline.reset();
+    if (auto injected = inject_publication_failure(state, testing::StorageFailure::PUBLICATION_AFTER_RENAME_BEFORE_DIRECTORY_FLUSH);
+        !injected) {
+        return lighter::outcome_error(std::move(injected).error());
+    }
+    if (auto flushed = detail::flush_published_directory(paths.session_directory(state.id)); !flushed) {
+        return lighter::outcome_error(std::move(flushed).error());
+    }
+    state.publication_directory_flush_pending = false;
     if (auto injected = inject_publication_failure(state, testing::StorageFailure::PUBLICATION_AFTER_RENAME); !injected)
         return lighter::outcome_error(std::move(injected).error());
     return attach_published(state, delta);
@@ -1172,6 +1239,8 @@ Result<SessionCommitResult> SessionWriter::commit(const SessionDelta &delta) {
     }
     if (materialization != WriterMaterialization::PUBLISHED || !state->database)
         return lighter::outcome_error(Error::storage("session writer is not ready for semantic commits"));
+    if (state->head.revision == k_maximum_sqlite_integer)
+        return lighter::outcome_error(Error::storage("session revision exceeds SQLite's integer range"));
     const auto target_revision = state->head.revision + 1;
     const bool title_changed = delta.metadata.title != state->head.title;
     const bool catalog_visible = delta.metadata.updated_at_ms != state->head.updated_at_ms || delta.metadata.title != state->head.title ||
@@ -1473,27 +1542,7 @@ Result<SessionWriter> SessionRepository::acquire(SessionId id) const {
     const StatePaths paths{state->root};
     auto lease = acquire_session_lease(state->root, id);
     if (!lease) return lighter::outcome_error(std::move(lease).error());
-    std::error_code error;
-    const auto directory_exists = std::filesystem::exists(paths.session_directory(id), error);
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect session directory: " + error.message()));
-    if (!directory_exists) return lighter::outcome_error(Error::storage("session was not found", ErrorCode::NOT_FOUND));
-    if (!std::filesystem::is_directory(paths.session_directory(id), error)) {
-        if (error) return lighter::outcome_error(Error::storage("cannot inspect session directory: " + error.message()));
-        return lighter::outcome_error(Error::storage("session authority is not a directory"));
-    }
-    auto reparse = detail::is_reparse_point(paths.session_directory(id));
-    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-    if (*reparse) return lighter::outcome_error(Error::storage("session directory is a symlink, junction, or reparse point"));
-    const auto database_exists = std::filesystem::exists(paths.session_database(id), error);
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect session database: " + error.message()));
-    if (!database_exists) return lighter::outcome_error(Error::storage("published session database is absent", ErrorCode::NOT_FOUND));
-    if (!std::filesystem::is_regular_file(paths.session_database(id), error)) {
-        if (error) return lighter::outcome_error(Error::storage("cannot inspect session database: " + error.message()));
-        return lighter::outcome_error(Error::storage("published session database is not a regular file"));
-    }
-    reparse = detail::is_reparse_point(paths.session_database(id));
-    if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-    if (*reparse) return lighter::outcome_error(Error::storage("session database is a symlink, junction, or reparse point"));
+    if (auto valid = validate_published_authority(paths, id); !valid) return lighter::outcome_error(std::move(valid).error());
     auto writer_state = std::make_shared<SessionWriter::State>(state, *std::move(lease), id);
     auto opened = open_database(paths.session_database(id), false, true);
     if (!opened) return lighter::outcome_error(std::move(opened).error());
@@ -1507,10 +1556,9 @@ Result<bool> SessionRepository::remove_catalog_hint_if_authority_absent(SessionI
     const StatePaths paths{state->root};
     auto lease = acquire_session_lease(state->root, id);
     if (!lease) return lighter::outcome_error(std::move(lease).error());
-    std::error_code error;
-    const auto authority_exists = std::filesystem::exists(paths.session_database(id), error);
-    if (error) return lighter::outcome_error(Error::storage("cannot recheck session authority: " + error.message()));
-    if (authority_exists) return false;
+    auto authority = validate_published_authority(paths, id);
+    if (authority) return false;
+    if (authority.error().code != ErrorCode::NOT_FOUND) return lighter::outcome_error(std::move(authority).error());
     if (auto removed = state->catalog->remove(id); !removed) return lighter::outcome_error(std::move(removed).error());
     return true;
 }
@@ -1519,18 +1567,8 @@ Result<SessionId> SessionRepository::resolve_exact(std::string_view value) const
     if (value.size() != 36) return lighter::outcome_error(Error::config("a full session ID must contain 36 characters"));
     auto id = parse_session_id(value);
     if (!id) return lighter::outcome_error(std::move(id).error());
-    const StatePaths paths{state->root};
-    std::error_code error;
-    if (std::filesystem::exists(paths.session_database(*id), error)) {
-        auto reparse = detail::is_reparse_point(paths.session_database(*id));
-        if (!reparse) return lighter::outcome_error(std::move(reparse).error());
-        if (*reparse) return lighter::outcome_error(Error::storage("session database is a symlink, junction, or reparse point"));
-    }
-    if (error) return lighter::outcome_error(Error::storage("cannot inspect exact session path: " + error.message()));
-    if (!std::filesystem::is_regular_file(paths.session_database(*id), error)) {
-        if (error) return lighter::outcome_error(Error::storage("cannot inspect exact session path: " + error.message()));
-        return lighter::outcome_error(Error::storage("session was not found"));
-    }
+    if (auto valid = validate_published_authority(StatePaths{state->root}, *id); !valid)
+        return lighter::outcome_error(std::move(valid).error());
     return *id;
 }
 
@@ -1564,13 +1602,8 @@ Result<CatalogReconciliation> SessionRepository::reconcile_pending() const {
                 result.warnings.push_back("cannot lease pending session " + to_string(*id) + ": " + lease.error().message());
             continue;
         }
-        std::error_code absent_error;
-        const auto absent = !std::filesystem::exists(paths.session_database(*id), absent_error);
-        if (absent_error) {
-            result.warnings.push_back("cannot inspect pending session " + to_string(*id) + ": " + absent_error.message());
-            continue;
-        }
-        if (absent) {
+        auto authority = validate_published_authority(paths, *id);
+        if (!authority && authority.error().code == ErrorCode::NOT_FOUND) {
             if (auto removed_row = state->catalog->remove(*id); !removed_row) {
                 result.warnings.push_back(removed_row.error().message());
                 continue;
@@ -1579,6 +1612,10 @@ Result<CatalogReconciliation> SessionRepository::reconcile_pending() const {
                 result.warnings.push_back(removed.error().message());
             else
                 ++result.repaired;
+            continue;
+        }
+        if (!authority) {
+            result.warnings.push_back("cannot validate pending session " + to_string(*id) + ": " + authority.error().message());
             continue;
         }
         auto projection = read_published_projection(paths, *id);
@@ -1611,7 +1648,7 @@ Result<CatalogReconciliation> SessionRepository::rebuild_catalog() const {
     if (!state->catalog) return lighter::outcome_error(state->catalog_error.value_or(Error::storage("session catalog is unavailable")));
     const StatePaths paths{state->root};
     CatalogReconciliation result;
-    std::vector<SessionId> authoritative;
+    std::vector<CatalogProjection> authoritative;
     std::error_code iteration_error;
     for (std::filesystem::directory_iterator iterator(paths.sessions(), iteration_error), end; !iteration_error && iterator != end;
          iterator.increment(iteration_error)) {
@@ -1625,22 +1662,11 @@ Result<CatalogReconciliation> SessionRepository::rebuild_catalog() const {
             result.warnings.push_back("cannot read published session singleton " + to_string(*id) + ": " + projection.error().message());
             continue;
         }
-        if (auto projected = state->catalog->upsert(*projection); !projected) return lighter::outcome_error(std::move(projected).error());
-        authoritative.push_back(*id);
+        authoritative.push_back(*std::move(projection));
         ++result.repaired;
     }
     if (iteration_error) return lighter::outcome_error(Error::storage("cannot enumerate published sessions: " + iteration_error.message()));
-    auto catalog_ids = state->catalog->ids();
-    if (!catalog_ids) return lighter::outcome_error(std::move(catalog_ids).error());
-    for (const auto id : *catalog_ids) {
-        if (std::ranges::find(authoritative, id) != authoritative.end()) continue;
-        auto lease = acquire_session_lease(state->root, id);
-        if (!lease) continue;
-        std::error_code error;
-        if (!std::filesystem::exists(paths.session_database(id), error) && !error) {
-            if (auto removed = state->catalog->remove(id); !removed) result.warnings.push_back(removed.error().message());
-        }
-    }
+    if (auto replaced = state->catalog->replace_all(authoritative); !replaced) return lighter::outcome_error(std::move(replaced).error());
     return result;
 }
 

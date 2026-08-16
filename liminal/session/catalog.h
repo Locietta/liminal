@@ -3,8 +3,10 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <liminal/error.h>
@@ -62,6 +64,7 @@ private:
     static Result<SessionCatalog> repair_corrupt(const std::filesystem::path &state_root);
     explicit SessionCatalog(std::shared_ptr<State> state) : state(std::move(state)) {}
     bool owns_rebuild_exclusivity() const noexcept;
+    Result<void> replace_all(std::span<const CatalogProjection> projections) const;
     Result<void> complete_rebuild() const;
     std::shared_ptr<State> state;
 };

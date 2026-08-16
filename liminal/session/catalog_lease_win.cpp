@@ -57,9 +57,12 @@ Result<CatalogLease> acquire_catalog_initialization_lease(const std::filesystem:
             Error::storage("cannot open catalog initialization lock: " + std::system_category().message(static_cast<int>(GetLastError()))));
     }
     OVERLAPPED overlap{};
-    if (!LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlap)) {
+    if (!LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlap)) {
         const auto code = GetLastError();
         CloseHandle(file);
+        if (code == ERROR_LOCK_VIOLATION || code == ERROR_IO_PENDING) {
+            return lighter::outcome_error(Error::storage("session catalog initialization is already in progress"));
+        }
         return lighter::outcome_error(
             Error::storage("cannot acquire catalog initialization lock: " + std::system_category().message(static_cast<int>(code))));
     }
