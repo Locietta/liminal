@@ -29,6 +29,7 @@ std::string path_text(const std::filesystem::path &path) {
 } // namespace
 
 std::filesystem::path StatePaths::catalog() const { return root / "catalog.sqlite3"; }
+std::filesystem::path StatePaths::catalog_repair_marker() const { return root / "catalog-repair-pending"; }
 std::filesystem::path StatePaths::catalog_rebuild_marker() const { return root / "catalog-rebuild-pending"; }
 std::filesystem::path StatePaths::sessions() const { return root / "sessions"; }
 std::filesystem::path StatePaths::staging() const { return root / "staging"; }

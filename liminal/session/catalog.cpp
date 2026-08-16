@@ -176,37 +176,93 @@ Result<void> validate_rebuild_marker(const std::filesystem::path &marker) {
     return {};
 }
 
-Result<void> ensure_rebuild_marker(const std::filesystem::path &marker) {
+Result<std::optional<SessionId>> read_repair_marker(const std::filesystem::path &marker) {
     auto type = detail::inspect_path_no_follow(marker);
     if (!type) return lighter::outcome_error(std::move(type).error());
-    if (*type == detail::PathType::ABSENT) {
-        auto marked = detail::durable_replace_file(marker, "1\n");
-        if (!marked) {
-            return lighter::outcome_error(Error::storage("cannot mark catalog rebuild incomplete: " + marked.error().message()));
-        }
-        return {};
+    if (*type == detail::PathType::ABSENT) return std::optional<SessionId>{};
+    if (*type == detail::PathType::REPARSE_POINT) {
+        return lighter::outcome_error(
+            Error::storage("catalog repair marker is a symlink, junction, or reparse point", ErrorCode::INVALID_DATA));
     }
-    return validate_rebuild_marker(marker);
+    if (*type != detail::PathType::REGULAR_FILE) {
+        return lighter::outcome_error(Error::storage("catalog repair marker is not a regular file", ErrorCode::INVALID_DATA));
+    }
+    std::ifstream input(marker, std::ios::binary);
+    const std::string contents(std::istreambuf_iterator<char>(input), {});
+    if (!input || contents.size() != 37 || contents.back() != '\n') {
+        return lighter::outcome_error(Error::storage("catalog repair marker has invalid format", ErrorCode::INVALID_DATA));
+    }
+    const auto text = std::string_view(contents).substr(0, contents.size() - 1);
+    auto id = parse_session_id(text);
+    if (!id || to_string(*id) != text) {
+        return lighter::outcome_error(Error::storage("catalog repair marker has invalid format", ErrorCode::INVALID_DATA));
+    }
+    return std::optional<SessionId>{*id};
 }
 
-Result<void> quarantine_catalog_family(const std::filesystem::path &catalog) {
-    const auto quarantine_suffix = std::filesystem::path{".corrupt." + to_string(generate_session_id())};
+Result<SessionId> ensure_repair_marker(const std::filesystem::path &marker) {
+    auto pending = read_repair_marker(marker);
+    if (!pending) return lighter::outcome_error(std::move(pending).error());
+    if (*pending) return **pending;
+    const auto id = generate_session_id();
+    if (auto marked = detail::durable_replace_file(marker, to_string(id) + "\n"); !marked) {
+        return lighter::outcome_error(Error::storage("cannot mark catalog repair incomplete: " + marked.error().message()));
+    }
+    return id;
+}
+
+Result<void> quarantine_catalog_family(const std::filesystem::path &catalog, SessionId quarantine_id) {
+    const auto quarantine_suffix = std::filesystem::path{".corrupt." + to_string(quarantine_id)};
     const auto family = std::array{detail::path_with_suffix(catalog, std::filesystem::path{"-journal"}),
                                    detail::path_with_suffix(catalog, std::filesystem::path{"-wal"}),
                                    detail::path_with_suffix(catalog, std::filesystem::path{"-shm"}), catalog};
     for (const auto &source : family) {
+        const auto target = detail::path_with_suffix(source, quarantine_suffix);
         auto type = detail::inspect_path_no_follow(source);
         if (!type) return lighter::outcome_error(std::move(type).error());
+        auto target_type = detail::inspect_path_no_follow(target);
+        if (!target_type) return lighter::outcome_error(std::move(target_type).error());
+        if (*target_type != detail::PathType::ABSENT && *target_type != detail::PathType::REGULAR_FILE) {
+            return lighter::outcome_error(
+                Error::storage("catalog quarantine path has an invalid filesystem type", ErrorCode::INVALID_DATA));
+        }
         if (*type == detail::PathType::ABSENT) continue;
         if (*type != detail::PathType::REGULAR_FILE) {
             return lighter::outcome_error(
                 Error::storage("refusing to quarantine an invalid catalog database-family path", ErrorCode::INVALID_DATA));
         }
+        if (*target_type != detail::PathType::ABSENT) {
+            return lighter::outcome_error(
+                Error::storage("live and quarantined catalog database-family paths both exist", ErrorCode::INVALID_DATA));
+        }
         std::error_code error;
-        std::filesystem::rename(source, detail::path_with_suffix(source, quarantine_suffix), error);
+        std::filesystem::rename(source, target, error);
         if (error) {
             return lighter::outcome_error(Error::storage("cannot quarantine catalog database family: " + error.message()));
         }
+    }
+    return {};
+}
+
+Result<void> prepare_catalog_rebuild(const std::filesystem::path &catalog, const std::filesystem::path &repair_marker,
+                                     const std::filesystem::path &rebuild_marker, bool require_quarantine) {
+    auto repair = read_repair_marker(repair_marker);
+    if (!repair) return lighter::outcome_error(std::move(repair).error());
+    auto repair_id = *std::move(repair);
+    if (require_quarantine && !repair_id) {
+        auto marked = ensure_repair_marker(repair_marker);
+        if (!marked) return lighter::outcome_error(std::move(marked).error());
+        repair_id = *marked;
+    }
+    if (!repair_id) return {};
+    if (auto quarantined = quarantine_catalog_family(catalog, *repair_id); !quarantined) {
+        return lighter::outcome_error(std::move(quarantined).error());
+    }
+    if (auto marked = detail::durable_replace_file(rebuild_marker, "1\n"); !marked) {
+        return lighter::outcome_error(Error::storage("cannot mark catalog rebuild incomplete: " + marked.error().message()));
+    }
+    if (auto completed = detail::durable_remove_file(repair_marker); !completed) {
+        return lighter::outcome_error(Error::storage("cannot complete catalog-family quarantine: " + completed.error().message()));
     }
     return {};
 }
@@ -315,6 +371,9 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
         return lighter::outcome_error(Error::storage("session catalog is a symlink, junction, or reparse point", ErrorCode::INVALID_DATA));
     if (*catalog_type != detail::PathType::ABSENT && *catalog_type != detail::PathType::REGULAR_FILE)
         return lighter::outcome_error(Error::storage("session catalog is not a regular file", ErrorCode::INVALID_DATA));
+    const auto repair_marker = StatePaths{state_root}.catalog_repair_marker();
+    auto repair = read_repair_marker(repair_marker);
+    if (!repair) return lighter::outcome_error(std::move(repair).error());
     const auto rebuild_marker = StatePaths{state_root}.catalog_rebuild_marker();
     auto marker_type = detail::inspect_path_no_follow(rebuild_marker);
     if (!marker_type) return lighter::outcome_error(std::move(marker_type).error());
@@ -323,15 +382,24 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
             Error::storage("catalog rebuild marker is a symlink, junction, or reparse point", ErrorCode::INVALID_DATA));
     if (*marker_type != detail::PathType::ABSENT && *marker_type != detail::PathType::REGULAR_FILE)
         return lighter::outcome_error(Error::storage("catalog rebuild marker is not a regular file", ErrorCode::INVALID_DATA));
+    if (*marker_type == detail::PathType::REGULAR_FILE) {
+        if (auto valid = validate_rebuild_marker(rebuild_marker); !valid) {
+            return lighter::outcome_error(std::move(valid).error());
+        }
+    }
     auto catalog_exists = *catalog_type == detail::PathType::REGULAR_FILE;
     auto rebuild_pending = *marker_type == detail::PathType::REGULAR_FILE;
-    const auto wait = catalog_exists && !rebuild_pending ? k_healthy_catalog_initialization_wait : std::chrono::milliseconds{};
+    auto repair_pending = repair->has_value();
+    const auto wait =
+        catalog_exists && !repair_pending && !rebuild_pending ? k_healthy_catalog_initialization_wait : std::chrono::milliseconds{};
     auto initialization_lease = detail::acquire_catalog_initialization_lease(state_root, wait);
     if (!initialization_lease) return lighter::outcome_error(std::move(initialization_lease).error());
     catalog_type = detail::inspect_path_no_follow(catalog_path);
     if (!catalog_type) return lighter::outcome_error(std::move(catalog_type).error());
     marker_type = detail::inspect_path_no_follow(rebuild_marker);
     if (!marker_type) return lighter::outcome_error(std::move(marker_type).error());
+    repair = read_repair_marker(repair_marker);
+    if (!repair) return lighter::outcome_error(std::move(repair).error());
     if (*catalog_type == detail::PathType::REPARSE_POINT || *marker_type == detail::PathType::REPARSE_POINT)
         return lighter::outcome_error(Error::storage("catalog initialization paths changed to a reparse point", ErrorCode::INVALID_DATA));
     if ((*catalog_type != detail::PathType::ABSENT && *catalog_type != detail::PathType::REGULAR_FILE) ||
@@ -339,29 +407,34 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
         return lighter::outcome_error(
             Error::storage("catalog initialization paths have an invalid filesystem type", ErrorCode::INVALID_DATA));
     }
+    if (*marker_type == detail::PathType::REGULAR_FILE) {
+        if (auto valid = validate_rebuild_marker(rebuild_marker); !valid) {
+            return lighter::outcome_error(std::move(valid).error());
+        }
+    }
     catalog_exists = *catalog_type == detail::PathType::REGULAR_FILE;
     rebuild_pending = *marker_type == detail::PathType::REGULAR_FILE;
+    repair_pending = repair->has_value();
     auto state = std::make_shared<State>();
     state->root = state_root;
     state->path = catalog_path;
-    auto needs_rebuild = !catalog_exists || rebuild_pending;
+    auto needs_rebuild = !catalog_exists || repair_pending || rebuild_pending;
     auto maintenance_lease = detail::acquire_catalog_lease(state_root, needs_rebuild);
     if (!maintenance_lease) return lighter::outcome_error(std::move(maintenance_lease).error());
     state->maintenance_lease = *std::move(maintenance_lease);
     state->rebuild_exclusive = needs_rebuild;
     if (needs_rebuild) state->initialization_lease = *std::move(initialization_lease);
-    const auto reset_catalog_family = [&]() -> Result<void> {
-        if (auto marked = ensure_rebuild_marker(rebuild_marker); !marked) {
-            return lighter::outcome_error(std::move(marked).error());
-        }
-        if (auto quarantined = quarantine_catalog_family(catalog_path); !quarantined) {
-            return lighter::outcome_error(std::move(quarantined).error());
+    const auto prepare_rebuild = [&](bool require_quarantine) -> Result<void> {
+        if (auto prepared = prepare_catalog_rebuild(catalog_path, repair_marker, rebuild_marker, require_quarantine); !prepared) {
+            return lighter::outcome_error(std::move(prepared).error());
         }
         needs_rebuild = true;
         return {};
     };
     if (needs_rebuild) {
-        if (auto reset = reset_catalog_family(); !reset) return lighter::outcome_error(std::move(reset).error());
+        if (auto prepared = prepare_rebuild(repair_pending || (!catalog_exists && !rebuild_pending)); !prepared) {
+            return lighter::outcome_error(std::move(prepared).error());
+        }
     }
     const auto open_database = [&]() -> Result<void> {
         if (auto valid = detail::validate_sqlite_paths_no_follow(state->path, needs_rebuild); !valid) {
@@ -396,7 +469,7 @@ Result<SessionCatalog> SessionCatalog::open(const std::filesystem::path &state_r
         state->maintenance_lease = *std::move(exclusive);
         state->rebuild_exclusive = true;
         state->initialization_lease = *std::move(initialization_lease);
-        if (auto reset = reset_catalog_family(); !reset) return lighter::outcome_error(std::move(reset).error());
+        if (auto prepared = prepare_rebuild(true); !prepared) return lighter::outcome_error(std::move(prepared).error());
         if (auto opened = open_database(); !opened) return lighter::outcome_error(std::move(opened).error());
         initialized = initialize(state->database, true);
         if (!initialized) return lighter::outcome_error(std::move(initialized).error());
@@ -418,25 +491,25 @@ Result<SessionCatalog> SessionCatalog::repair_corrupt(const std::filesystem::pat
         auto initialization = detail::acquire_catalog_initialization_lease(state_root);
         if (!initialization) return lighter::outcome_error(std::move(initialization).error());
         const auto catalog = state_root / "catalog.sqlite3";
+        const auto repair_marker = StatePaths{state_root}.catalog_repair_marker();
         const auto rebuild_marker = StatePaths{state_root}.catalog_rebuild_marker();
+        auto repair = read_repair_marker(repair_marker);
+        if (!repair) return lighter::outcome_error(std::move(repair).error());
         auto marker_type = detail::inspect_path_no_follow(rebuild_marker);
         if (!marker_type) return lighter::outcome_error(std::move(marker_type).error());
-        const auto repair_pending = *marker_type == detail::PathType::REGULAR_FILE;
+        const auto rebuild_pending = *marker_type == detail::PathType::REGULAR_FILE;
         if (*marker_type != detail::PathType::ABSENT) {
             if (auto valid = validate_rebuild_marker(rebuild_marker); !valid) {
                 return lighter::outcome_error(std::move(valid).error());
             }
         }
-        if (auto valid = detail::validate_sqlite_paths_no_follow(catalog, repair_pending); !valid) {
+        if (auto valid = detail::validate_sqlite_paths_no_follow(catalog, rebuild_pending || repair->has_value()); !valid) {
             return lighter::outcome_error(std::move(valid).error());
         }
         auto maintenance = detail::acquire_catalog_lease(state_root, true);
         if (!maintenance) return lighter::outcome_error(std::move(maintenance).error());
-        if (auto marked = detail::durable_replace_file(rebuild_marker, "1\n"); !marked) {
-            return lighter::outcome_error(Error::storage("cannot mark catalog repair incomplete: " + marked.error().message()));
-        }
-        if (auto quarantined = quarantine_catalog_family(catalog); !quarantined) {
-            return lighter::outcome_error(std::move(quarantined).error());
+        if (auto prepared = prepare_catalog_rebuild(catalog, repair_marker, rebuild_marker, !rebuild_pending); !prepared) {
+            return lighter::outcome_error(std::move(prepared).error());
         }
         return {};
     }();

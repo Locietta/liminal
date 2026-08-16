@@ -789,33 +789,79 @@ void test_incomplete_catalog_repair_is_resumed_before_replacement() {
     }
     const session::StatePaths paths{temporary.root};
     std::error_code error;
-    const auto old_main = session::detail::path_with_suffix(paths.catalog(), std::filesystem::path{".corrupt.fixture"});
+    const auto quarantine_id = session::generate_session_id();
+    const auto quarantine_suffix = std::filesystem::path{".corrupt." + session::to_string(quarantine_id)};
+    const auto old_main = session::detail::path_with_suffix(paths.catalog(), quarantine_suffix);
     const auto live_wal = session::detail::path_with_suffix(paths.catalog(), std::filesystem::path{"-wal"});
+    const auto old_wal = session::detail::path_with_suffix(live_wal, quarantine_suffix);
     std::filesystem::rename(paths.catalog(), old_main, error);
     require(!error, "failed to simulate an interrupted catalog main-file quarantine");
     std::ofstream(live_wal, std::ios::binary) << "orphaned old WAL";
     require(std::filesystem::is_regular_file(live_wal), "failed to leave an old live-name catalog sidecar");
-    std::ofstream(paths.catalog_rebuild_marker(), std::ios::binary) << "1\n";
-    require(std::filesystem::is_regular_file(paths.catalog_rebuild_marker()), "failed to record interrupted catalog repair fixture");
+    std::ofstream(paths.catalog_repair_marker(), std::ios::binary) << session::to_string(quarantine_id) << '\n';
+    require(std::filesystem::is_regular_file(paths.catalog_repair_marker()), "failed to record interrupted catalog repair fixture");
 
     auto resumed = open_storage(temporary.root);
     require(resumed.has_value(), "next opener did not resume interrupted catalog-family quarantine");
     auto page = resumed->catalog.page({.workspace_key = "workspace"});
-    const auto quarantine_prefix =
-        session::detail::path_with_suffix(paths.catalog().filename(), std::filesystem::path{"-wal.corrupt."}).native();
-    bool old_wal_quarantined = false;
-    for (const auto &entry : std::filesystem::directory_iterator(temporary.root)) {
-        if (!entry.path().filename().native().starts_with(quarantine_prefix)) continue;
-        std::ifstream input(entry.path(), std::ios::binary);
-        std::string contents;
-        std::getline(input, contents);
-        old_wal_quarantined = input && contents == "orphaned old WAL";
-        if (old_wal_quarantined) break;
-    }
+    std::ifstream input(old_wal, std::ios::binary);
+    std::string contents;
+    std::getline(input, contents);
+    const auto old_wal_quarantined = input && contents == "orphaned old WAL";
     require(page && page->sessions.size() == 1 && page->sessions.front().id == id &&
-                !std::filesystem::exists(paths.catalog_rebuild_marker()) && old_wal_quarantined &&
-                std::filesystem::is_regular_file(old_main),
+                !std::filesystem::exists(paths.catalog_repair_marker()) && !std::filesystem::exists(paths.catalog_rebuild_marker()) &&
+                old_wal_quarantined && std::filesystem::is_regular_file(old_main),
             "repair recovery created a replacement before quarantining the complete old catalog family");
+}
+
+void test_failed_rebuild_reuses_replacement_catalog() {
+    TemporaryState temporary;
+    session::SessionId id;
+    {
+        auto storage = open_storage(temporary.root);
+        auto published = storage ? publish(storage->repository, make_session("retry failed catalog rebuild")) :
+                                   Result<Published>{lighter::outcome_error(storage.error())};
+        require(published.has_value(), "failed to publish repeated-rebuild fixture");
+        id = published->value.id;
+    }
+
+    const session::StatePaths paths{temporary.root};
+    std::error_code error;
+    for (const auto &suffix : std::array<std::filesystem::path, 4>{"", "-journal", "-wal", "-shm"}) {
+        std::filesystem::remove(session::detail::path_with_suffix(paths.catalog(), suffix), error);
+        require(!error, "failed to remove catalog family before repeated-rebuild fixture");
+    }
+    std::ofstream(paths.catalog_rebuild_marker(), std::ios::binary) << "1\n";
+    require(std::filesystem::is_regular_file(paths.catalog_rebuild_marker()), "failed to mark repeated rebuild fixture");
+
+    auto *blocked = open_sqlite(paths.session_database(id));
+    execute(blocked, "PRAGMA journal_mode=DELETE", "failed to leave WAL mode for repeated-rebuild fixture");
+    execute(blocked, "BEGIN EXCLUSIVE", "failed to block authoritative projection reads");
+    const auto quarantine_count = [&] {
+        usize count = 0;
+        for (const auto &entry : std::filesystem::directory_iterator(temporary.root)) {
+            const auto name = entry.path().filename().generic_string();
+            if (name.starts_with("catalog.sqlite3") && name.contains(".corrupt.")) ++count;
+        }
+        return count;
+    };
+
+    auto first = session::SessionRepository::open(temporary.root);
+    auto first_catalog = first ? first->catalog() : Result<session::SessionCatalog>{lighter::outcome_error(first.error())};
+    require(first && !first_catalog && std::filesystem::exists(paths.catalog_rebuild_marker()) && quarantine_count() == 0,
+            "first failed rebuild did not preserve its replacement catalog");
+    auto second = session::SessionRepository::open(temporary.root);
+    auto second_catalog = second ? second->catalog() : Result<session::SessionCatalog>{lighter::outcome_error(second.error())};
+    require(second && !second_catalog && std::filesystem::exists(paths.catalog_rebuild_marker()) && quarantine_count() == 0,
+            "repeated failed rebuild accumulated replacement-catalog quarantines");
+
+    execute(blocked, "ROLLBACK", "failed to release authoritative projection fixture");
+    sqlite3_close(blocked);
+    auto recovered = open_storage(temporary.root);
+    auto projection = recovered ? recovered->catalog.find(id) :
+                                  Result<std::optional<session::CatalogProjection>>{lighter::outcome_error(recovered.error())};
+    require(recovered && projection && *projection && !std::filesystem::exists(paths.catalog_rebuild_marker()),
+            "catalog rebuild did not recover after projection inspection became available");
 }
 
 void test_concurrent_catalog_initialization_is_serialized() {
@@ -1861,6 +1907,7 @@ int main(int argc, char **argv) {
     test_catalog_ingestion_rejects_invalid_singleton_projections();
     test_missing_catalog_rebuild_includes_leased_sessions();
     test_incomplete_catalog_repair_is_resumed_before_replacement();
+    test_failed_rebuild_reuses_replacement_catalog();
     test_concurrent_catalog_initialization_is_serialized();
     test_catalog_initialization_contention_returns_authority_only();
     test_healthy_catalog_initialization_contention_is_bounded();

@@ -1420,19 +1420,40 @@ Result<CatalogReconciliation> cleanup_abandoned_staging(const StatePaths &paths)
     return result;
 }
 
-Result<bool> catalog_rebuild_pending(const StatePaths &paths) {
-    const auto marker = paths.catalog_rebuild_marker();
-    auto type = detail::inspect_path_no_follow(marker);
-    if (!type) return lighter::outcome_error(std::move(type).error());
-    if (*type == detail::PathType::ABSENT) return false;
-    if (*type == detail::PathType::REPARSE_POINT)
+Result<bool> catalog_recovery_pending(const StatePaths &paths) {
+    const auto rebuild_marker = paths.catalog_rebuild_marker();
+    auto rebuild_type = detail::inspect_path_no_follow(rebuild_marker);
+    if (!rebuild_type) return lighter::outcome_error(std::move(rebuild_type).error());
+    if (*rebuild_type == detail::PathType::REPARSE_POINT)
         return lighter::outcome_error(Error::storage("catalog rebuild marker is a symlink, junction, or reparse point"));
-    if (*type != detail::PathType::REGULAR_FILE)
+    if (*rebuild_type != detail::PathType::ABSENT && *rebuild_type != detail::PathType::REGULAR_FILE)
         return lighter::outcome_error(Error::storage("catalog rebuild marker is not a regular file"));
-    std::ifstream input(marker, std::ios::binary);
-    std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-    if (!input || contents != "1\n") return lighter::outcome_error(Error::storage("catalog rebuild marker has invalid format"));
-    return true;
+    if (*rebuild_type == detail::PathType::REGULAR_FILE) {
+        std::ifstream input(rebuild_marker, std::ios::binary);
+        std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        if (!input || contents != "1\n") return lighter::outcome_error(Error::storage("catalog rebuild marker has invalid format"));
+    }
+
+    const auto repair_marker = paths.catalog_repair_marker();
+    auto repair_type = detail::inspect_path_no_follow(repair_marker);
+    if (!repair_type) return lighter::outcome_error(std::move(repair_type).error());
+    if (*repair_type == detail::PathType::REPARSE_POINT)
+        return lighter::outcome_error(Error::storage("catalog repair marker is a symlink, junction, or reparse point"));
+    if (*repair_type != detail::PathType::ABSENT && *repair_type != detail::PathType::REGULAR_FILE)
+        return lighter::outcome_error(Error::storage("catalog repair marker is not a regular file"));
+    if (*repair_type == detail::PathType::REGULAR_FILE) {
+        std::ifstream input(repair_marker, std::ios::binary);
+        std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        if (!input || contents.size() != 37 || contents.back() != '\n') {
+            return lighter::outcome_error(Error::storage("catalog repair marker has invalid format"));
+        }
+        const auto text = std::string_view(contents).substr(0, contents.size() - 1);
+        auto id = parse_session_id(text);
+        if (!id || to_string(*id) != text) {
+            return lighter::outcome_error(Error::storage("catalog repair marker has invalid format"));
+        }
+    }
+    return *rebuild_type == detail::PathType::REGULAR_FILE || *repair_type == detail::PathType::REGULAR_FILE;
 }
 
 } // namespace
@@ -1453,13 +1474,13 @@ Result<SessionRepository> SessionRepository::open(std::filesystem::path state_ro
             repository->state->warnings.push_back("catalog unavailable: " + repository->state->catalog_error->message());
             return *std::move(repository);
         }
-        auto rebuild_pending = catalog_rebuild_pending(StatePaths{state_root});
-        if (!rebuild_pending) {
-            repository->state->catalog_error = rebuild_pending.error();
-            repository->state->warnings.push_back("catalog unavailable: " + rebuild_pending.error().message());
+        auto recovery_pending = catalog_recovery_pending(StatePaths{state_root});
+        if (!recovery_pending) {
+            repository->state->catalog_error = recovery_pending.error();
+            repository->state->warnings.push_back("catalog unavailable: " + recovery_pending.error().message());
             return *std::move(repository);
         }
-        if (*catalog_type == detail::PathType::ABSENT || *rebuild_pending) {
+        if (*catalog_type == detail::PathType::ABSENT || *recovery_pending) {
             repository->state->catalog_error = Error::storage("catalog rebuild was deferred for exact authoritative access");
             repository->state->warnings.push_back("catalog unavailable: " + repository->state->catalog_error->message());
             return *std::move(repository);
@@ -1507,9 +1528,9 @@ Result<void> SessionRepository::attach_catalog(SessionRepository &repository, Se
     repository.state->catalog_error.reset();
     repository.state->indexer =
         std::make_shared<CatalogIndexer>(repository.state->root, *repository.state->catalog, repository.state->storage_hook);
-    auto rebuild_pending = catalog_rebuild_pending(paths);
-    if (!rebuild_pending) return lighter::outcome_error(std::move(rebuild_pending).error());
-    if (*rebuild_pending) {
+    auto recovery_pending = catalog_recovery_pending(paths);
+    if (!recovery_pending) return lighter::outcome_error(std::move(recovery_pending).error());
+    if (*recovery_pending) {
         if (!repository.state->catalog->owns_rebuild_exclusivity()) {
             return lighter::outcome_error(Error::storage("catalog rebuild does not own exclusive maintenance"));
         }
