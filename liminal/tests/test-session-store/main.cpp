@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <latch>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -454,20 +455,21 @@ void test_blocked_catalog_projection_does_not_block_semantic_commit() {
         bool release_refresh = false;
         bool refresh_completed = false;
         bool second_commit_durable = false;
-    } handshake;
+    };
+    auto handshake = std::make_shared<Handshake>();
     StorageHookReset reset(storage->repository);
-    session::testing::set_storage_hook(storage->repository, [&](session::testing::StorageEvent event) {
-        std::unique_lock lock(handshake.mutex);
+    session::testing::set_storage_hook(storage->repository, [handshake](session::testing::StorageEvent event) {
+        std::unique_lock lock(handshake->mutex);
         if (event == session::testing::StorageEvent::CATALOG_INDEXER_BEFORE_REFRESH) {
-            handshake.refresh_blocked = true;
-            handshake.changed.notify_all();
-            handshake.changed.wait(lock, [&] { return handshake.release_refresh; });
-        } else if (event == session::testing::StorageEvent::AUTHORITATIVE_COMMIT_COMPLETED && handshake.refresh_blocked) {
-            handshake.second_commit_durable = true;
-            handshake.changed.notify_all();
+            handshake->refresh_blocked = true;
+            handshake->changed.notify_all();
+            handshake->changed.wait(lock, [&] { return handshake->release_refresh; });
+        } else if (event == session::testing::StorageEvent::AUTHORITATIVE_COMMIT_COMPLETED && handshake->refresh_blocked) {
+            handshake->second_commit_durable = true;
+            handshake->changed.notify_all();
         } else if (event == session::testing::StorageEvent::CATALOG_INDEXER_AFTER_REFRESH) {
-            handshake.refresh_completed = true;
-            handshake.changed.notify_all();
+            handshake->refresh_completed = true;
+            handshake->changed.notify_all();
         }
     });
 
@@ -477,8 +479,8 @@ void test_blocked_catalog_projection_does_not_block_semantic_commit() {
     require(published->writer.commit(session::make_delta(value, std::span(value.entries).subspan(first_tail))).has_value(),
             "failed to commit the projection-triggering mutation");
     {
-        std::unique_lock lock(handshake.mutex);
-        handshake.changed.wait(lock, [&] { return handshake.refresh_blocked; });
+        std::unique_lock lock(handshake->mutex);
+        handshake->changed.wait(lock, [&] { return handshake->refresh_blocked; });
     }
 
     value.set_model_preference("provider", "model", std::nullopt);
@@ -486,22 +488,22 @@ void test_blocked_catalog_projection_does_not_block_semantic_commit() {
     std::jthread second([&] { second_result = published->writer.commit(session::make_delta(value, {})); });
     {
         using namespace std::chrono_literals;
-        std::unique_lock lock(handshake.mutex);
-        require(handshake.changed.wait_for(lock, 5s, [&] { return handshake.second_commit_durable; }),
+        std::unique_lock lock(handshake->mutex);
+        require(handshake->changed.wait_for(lock, 5s, [&] { return handshake->second_commit_durable; }),
                 "blocked catalog projection retained the session invalidation mutex across catalog I/O");
     }
     require(scalar_i64(session::StatePaths{temporary.root}.session_database(value.id), "SELECT revision FROM session") == 3,
             "second semantic commit was not durable while catalog projection was blocked");
     {
-        std::scoped_lock lock(handshake.mutex);
-        handshake.release_refresh = true;
+        std::scoped_lock lock(handshake->mutex);
+        handshake->release_refresh = true;
     }
-    handshake.changed.notify_all();
+    handshake->changed.notify_all();
     second.join();
     require(second_result && *second_result, "second semantic commit failed after isolated catalog projection resumed");
     {
-        std::unique_lock lock(handshake.mutex);
-        handshake.changed.wait(lock, [&] { return handshake.refresh_completed; });
+        std::unique_lock lock(handshake->mutex);
+        handshake->changed.wait(lock, [&] { return handshake->refresh_completed; });
     }
 }
 
