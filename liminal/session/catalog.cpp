@@ -30,6 +30,14 @@ constexpr int k_catalog_schema_version = 1;
 constexpr auto k_healthy_catalog_initialization_wait = std::chrono::seconds(1);
 std::mutex catalog_open_mutex;
 
+std::string ascii_fold(std::string_view text) {
+    std::string folded(text);
+    for (auto &character : folded) {
+        if (character >= 'A' && character <= 'Z') character = static_cast<char>(character - 'A' + 'a');
+    }
+    return folded;
+}
+
 std::string path_utf8(const std::filesystem::path &path) {
     const auto value = path.generic_u8string();
     return {reinterpret_cast<const char *>(value.data()), value.size()};
@@ -581,30 +589,63 @@ Result<SessionSummary> SessionCatalog::latest(std::string_view workspace_key) co
 
 Result<SessionPage> SessionCatalog::page(const SessionPageQuery &request) const {
     lighter::check(request.limit > 0, "session catalog page size must be positive");
+    lighter::check(!(request.before && request.after), "session catalog page cannot continue in both directions");
     constexpr usize k_maximum_page_size = 50;
     const auto page_size = std::min(request.limit, k_maximum_page_size);
-    const auto continued = request.after.has_value();
-    const auto sql = continued ? R"sql(
-SELECT id,updated_at_ms,title,preview FROM sessions
-WHERE workspace_key=?1 AND (updated_at_ms,id)<(?2,?3)
-ORDER BY updated_at_ms DESC,id DESC LIMIT ?4
-)sql" :
-                                 R"sql(
-SELECT id,updated_at_ms,title,preview FROM sessions
-WHERE workspace_key=?1 ORDER BY updated_at_ms DESC,id DESC LIMIT ?2
-)sql";
+    const auto filtered = !request.query.empty();
+    constexpr auto id_text =
+        R"sql(lower(substr(hex(id),1,8)||'-'||substr(hex(id),9,4)||'-'||substr(hex(id),13,4)||'-'||substr(hex(id),17,4)||'-'||substr(hex(id),21,12)))sql";
+    const auto match_clause = [&](int parameter) {
+        const auto placeholder = "?" + std::to_string(parameter);
+        return " AND (instr(lower(coalesce(title,''))," + placeholder + ")>0 OR instr(lower(preview)," + placeholder + ")>0 OR instr(" +
+               id_text + "," + placeholder + ")>0)";
+    };
+    const auto folded = ascii_fold(request.query);
     std::scoped_lock lock(state->mutex);
+
+    std::optional<SessionPageCursor> anchor;
+    if (!request.before && !request.after && request.preferred_id) {
+        auto sql = std::string("SELECT updated_at_ms FROM sessions WHERE workspace_key=?1 AND id=?2");
+        if (filtered) sql += match_clause(3);
+        auto preferred = prepare(state->database, sql);
+        if (!preferred) return lighter::outcome_error(std::move(preferred).error());
+        sqlite3_bind_text(preferred->value, 1, request.workspace_key.data(), static_cast<int>(request.workspace_key.size()),
+                          SQLITE_TRANSIENT);
+        bind_id(preferred->value, 2, *request.preferred_id);
+        if (filtered) sqlite3_bind_text(preferred->value, 3, folded.data(), static_cast<int>(folded.size()), SQLITE_TRANSIENT);
+        const auto row = sqlite3_step(preferred->value);
+        if (row == SQLITE_ROW) {
+            anchor = SessionPageCursor{.updated_at_ms = sqlite3_column_int64(preferred->value, 0), .id = *request.preferred_id};
+        } else if (row != SQLITE_DONE) {
+            return lighter::outcome_error(sqlite_error(state->database, "cannot locate preferred session", row));
+        }
+    }
+
+    const auto cursor = request.before ? request.before : request.after ? request.after : anchor;
+    const bool backwards = request.before.has_value();
+    std::string sql = "SELECT id,updated_at_ms,title,preview FROM sessions WHERE workspace_key=?1";
+    int next_parameter = 2;
+    if (cursor) {
+        sql += " AND (updated_at_ms,id)";
+        sql += backwards ? ">" : anchor ? "<=" : "<";
+        sql += "(?" + std::to_string(next_parameter) + ",?" + std::to_string(next_parameter + 1) + ")";
+        next_parameter += 2;
+    }
+    if (filtered) sql += match_clause(next_parameter++);
+    sql += backwards ? " ORDER BY updated_at_ms ASC,id ASC" : " ORDER BY updated_at_ms DESC,id DESC";
+    sql += " LIMIT ?" + std::to_string(next_parameter);
+
     auto query = prepare(state->database, sql);
     if (!query) return lighter::outcome_error(std::move(query).error());
     sqlite3_bind_text(query->value, 1, request.workspace_key.data(), static_cast<int>(request.workspace_key.size()), SQLITE_TRANSIENT);
-    const auto limit = static_cast<sqlite3_int64>(page_size + 1);
-    if (request.after) {
-        sqlite3_bind_int64(query->value, 2, request.after->updated_at_ms);
-        bind_id(query->value, 3, request.after->id);
-        sqlite3_bind_int64(query->value, 4, limit);
-    } else {
-        sqlite3_bind_int64(query->value, 2, limit);
+    int bind_parameter = 2;
+    if (cursor) {
+        sqlite3_bind_int64(query->value, bind_parameter++, cursor->updated_at_ms);
+        bind_id(query->value, bind_parameter++, cursor->id);
     }
+    if (filtered) sqlite3_bind_text(query->value, bind_parameter++, folded.data(), static_cast<int>(folded.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(query->value, bind_parameter, static_cast<sqlite3_int64>(page_size + 1));
+
     SessionPage page;
     while (page.sessions.size() <= page_size) {
         const auto row = sqlite3_step(query->value);
@@ -617,10 +658,38 @@ WHERE workspace_key=?1 ORDER BY updated_at_ms DESC,id DESC LIMIT ?2
                                  .title = optional_text(query->value, 2),
                                  .preview = text(query->value, 3)});
     }
-    if (page.sessions.size() > page_size) {
+    const bool has_more = page.sessions.size() > page_size;
+    if (has_more) {
         page.sessions.pop_back();
+    }
+    if (backwards) {
+        std::ranges::reverse(page.sessions);
+        if (has_more) {
+            const auto &first = page.sessions.front();
+            page.preceding = SessionPageCursor{.updated_at_ms = first.updated_at_ms, .id = first.id};
+        }
+    } else if (has_more) {
         const auto &last = page.sessions.back();
         page.continuation = SessionPageCursor{.updated_at_ms = last.updated_at_ms, .id = last.id};
+    }
+
+    if (anchor) {
+        auto exists_sql = std::string("SELECT 1 FROM sessions WHERE workspace_key=?1 AND (updated_at_ms,id)>(?2,?3)");
+        if (filtered) exists_sql += match_clause(4);
+        exists_sql += " LIMIT 1";
+        auto preceding = prepare(state->database, exists_sql);
+        if (!preceding) return lighter::outcome_error(std::move(preceding).error());
+        sqlite3_bind_text(preceding->value, 1, request.workspace_key.data(), static_cast<int>(request.workspace_key.size()),
+                          SQLITE_TRANSIENT);
+        sqlite3_bind_int64(preceding->value, 2, anchor->updated_at_ms);
+        bind_id(preceding->value, 3, anchor->id);
+        if (filtered) sqlite3_bind_text(preceding->value, 4, folded.data(), static_cast<int>(folded.size()), SQLITE_TRANSIENT);
+        const auto row = sqlite3_step(preceding->value);
+        if (row == SQLITE_ROW) {
+            page.preceding = anchor;
+        } else if (row != SQLITE_DONE) {
+            return lighter::outcome_error(sqlite_error(state->database, "cannot continue session page backwards", row));
+        }
     }
     return page;
 }

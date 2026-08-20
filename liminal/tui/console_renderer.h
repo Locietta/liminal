@@ -30,10 +30,15 @@ struct ConsoleRenderer {
     lighter::Error show_selectable_list(SelectableList list);
     lighter::Error close_selectable_list();
     lighter::Error apply_selectable_list(SelectableListAction action, SelectableListEffect &effect);
+    lighter::Error edit_selectable_list_query(PickerQueryEdit edit, std::string_view text, SelectableListEffect &effect);
+    lighter::Error prepend_selectable_list_page(SelectableListPage page);
     lighter::Error append_selectable_list_page(SelectableListPage page);
+    lighter::Error replace_selectable_list_page(SelectableListPage page);
     lighter::Error fail_selectable_list_page(std::string detail);
+    lighter::Error fail_selectable_list_query(std::string detail);
     bool selectable_list_active() const noexcept;
     std::optional<std::string_view> selectable_list_selection() const noexcept;
+    std::string_view selectable_list_query() const noexcept;
 
     lighter::Error apply_picker_key(PickerKey key, PickerKeyResult &result);
     bool compact_surface_active() const noexcept;

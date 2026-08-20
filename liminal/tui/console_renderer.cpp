@@ -154,9 +154,27 @@ lighter::Error ConsoleRenderer::apply_selectable_list(SelectableListAction actio
     return redraw();
 }
 
+lighter::Error ConsoleRenderer::edit_selectable_list_query(PickerQueryEdit edit, std::string_view text, SelectableListEffect &effect) {
+    if (!selectable_list) return lighter::Error::k_invalid_argument;
+    effect = selectable_list->edit_query(edit, text);
+    return redraw();
+}
+
 lighter::Error ConsoleRenderer::append_selectable_list_page(SelectableListPage page) {
     if (!selectable_list) return lighter::Error::k_invalid_argument;
     selectable_list->append_page(std::move(page));
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::prepend_selectable_list_page(SelectableListPage page) {
+    if (!selectable_list) return lighter::Error::k_invalid_argument;
+    selectable_list->prepend_page(std::move(page));
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::replace_selectable_list_page(SelectableListPage page) {
+    if (!selectable_list) return lighter::Error::k_invalid_argument;
+    selectable_list->replace_page(std::move(page));
     return redraw();
 }
 
@@ -166,10 +184,20 @@ lighter::Error ConsoleRenderer::fail_selectable_list_page(std::string detail) {
     return redraw();
 }
 
+lighter::Error ConsoleRenderer::fail_selectable_list_query(std::string detail) {
+    if (!selectable_list) return lighter::Error::k_invalid_argument;
+    selectable_list->fail_query(std::move(detail));
+    return redraw();
+}
+
 bool ConsoleRenderer::selectable_list_active() const noexcept { return selectable_list.has_value(); }
 
 std::optional<std::string_view> ConsoleRenderer::selectable_list_selection() const noexcept {
     return selectable_list ? selectable_list->selected_id() : std::nullopt;
+}
+
+std::string_view ConsoleRenderer::selectable_list_query() const noexcept {
+    return selectable_list ? std::string_view(selectable_list->query) : std::string_view{};
 }
 
 lighter::Error ConsoleRenderer::apply_picker_key(PickerKey key, PickerKeyResult &result) {

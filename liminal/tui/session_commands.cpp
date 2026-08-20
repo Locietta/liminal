@@ -8,6 +8,7 @@
 
 #include <liminal/text.h>
 #include <liminal/tui/hydration.h>
+#include <liminal/tui/picker_query.h>
 
 namespace liminal::tui {
 
@@ -22,7 +23,7 @@ std::string relative_update_time(i64 updated_at_ms, i64 now_ms) {
 }
 
 SelectableListPage picker_page(const session::SessionPage &page, i64 now_ms) {
-    SelectableListPage result{.has_more = page.continuation.has_value()};
+    SelectableListPage result{.has_previous = page.preceding.has_value(), .has_more = page.continuation.has_value()};
     result.items.reserve(page.sessions.size());
     for (const auto &summary : page.sessions) {
         auto primary = summary.title.value_or(summary.preview.empty() ? "Untitled session" : summary.preview);
@@ -39,13 +40,40 @@ Result<void> open_session_picker(SelectableListDialog &dialog, ConsoleRenderer &
     auto first = sessions.page({.workspace_key = workspace_key, .limit = k_picker_page_size});
     if (!first) return lighter::outcome_error(std::move(first).error());
     const auto now_ms = session::unix_milliseconds_now();
-    auto cursor = first->continuation;
+    auto preceding = first->preceding;
+    auto continuation = first->continuation;
     SelectableList list(std::move(title), std::move(empty_message), picker_page(*first, now_ms));
-    SelectableListDialog::LoadPage load = [&sessions, workspace_key = std::move(workspace_key), cursor,
-                                           now_ms]() mutable -> Result<SelectableListPage> {
-        auto next = sessions.page({.workspace_key = workspace_key, .after = cursor, .limit = k_picker_page_size});
+    list.enable_query("No matching sessions in this workspace");
+    SelectableListDialog::LoadPage load = [&sessions, workspace_key = std::move(workspace_key), preceding, continuation,
+                                           loaded_query = std::string{},
+                                           now_ms](std::string_view query, SelectableListPageLoad load,
+                                                   std::optional<std::string_view> preferred_id) mutable -> Result<SelectableListPage> {
+        if (load != SelectableListPageLoad::REPLACE && query != loaded_query) {
+            return lighter::outcome_error(Error::protocol("session picker paging query changed unexpectedly"));
+        }
+        std::optional<session::SessionId> preferred;
+        if (load == SelectableListPageLoad::REPLACE && preferred_id) {
+            auto parsed = session::parse_session_id(*preferred_id);
+            if (!parsed) return lighter::outcome_error(Error::protocol("session picker selected an invalid session identity"));
+            preferred = *parsed;
+        }
+        session::SessionPageQuery request{.workspace_key = workspace_key,
+                                          .query = std::string(query),
+                                          .preferred_id = preferred,
+                                          .before = load == SelectableListPageLoad::PREVIOUS ? preceding : std::nullopt,
+                                          .after = load == SelectableListPageLoad::NEXT ? continuation : std::nullopt,
+                                          .limit = k_picker_page_size};
+        auto next = sessions.page(request);
         if (!next) return lighter::outcome_error(std::move(next).error());
-        cursor = next->continuation;
+        loaded_query = query;
+        if (load == SelectableListPageLoad::REPLACE) {
+            preceding = next->preceding;
+            continuation = next->continuation;
+        } else if (load == SelectableListPageLoad::PREVIOUS) {
+            preceding = next->preceding;
+        } else {
+            continuation = next->continuation;
+        }
         return picker_page(*next, now_ms);
     };
     if (auto error = dialog.begin(renderer, std::move(list), std::move(load))) {
@@ -91,37 +119,54 @@ std::string outcome_label(session::TaskOutcome outcome) {
     return "finished";
 }
 
-SelectableList history_list(const std::vector<session::ConversationCheckpoint> &checkpoints) {
+std::string checkpoint_description(const session::ConversationCheckpoint &checkpoint) {
+    auto result = "checkpoint #" + std::to_string(checkpoint.id.entry.value);
+    if (checkpoint.task_outcome) result += " · " + outcome_label(*checkpoint.task_outcome);
+    if (checkpoint.active) {
+        result += " · current append point";
+    } else if (checkpoint.on_active_branch) {
+        result += " · active ancestor";
+    } else {
+        result += " · preserved branch";
+    }
+    result += " · " + std::to_string(checkpoint.branch_leaf_count) + (checkpoint.branch_leaf_count == 1 ? " branch" : " branches");
+    for (const auto leaf : checkpoint.branch_leaf_examples) result += " #" + std::to_string(leaf.entry.value);
+    if (checkpoint.branch_leaf_count > checkpoint.branch_leaf_examples.size()) {
+        result += " +" + std::to_string(checkpoint.branch_leaf_count - checkpoint.branch_leaf_examples.size());
+    }
+    return result;
+}
+
+bool checkpoint_matches(const session::ConversationCheckpoint &checkpoint, std::string_view query) {
+    if (query.empty()) return true;
+    return ascii_case_insensitive_contains(checkpoint.label, query) ||
+           ascii_case_insensitive_contains(std::to_string(checkpoint.id.entry.value), query) ||
+           ascii_case_insensitive_contains(checkpoint_description(checkpoint), query);
+}
+
+SelectableListPage history_page_impl(const std::vector<session::ConversationCheckpoint> &checkpoints, std::string_view query) {
     SelectableListPage page;
     page.items.reserve(checkpoints.size());
     for (const auto &checkpoint : checkpoints) {
+        if (!checkpoint_matches(checkpoint, query)) continue;
         constexpr usize k_max_visible_depth = 8;
         const auto visible_depth = std::min(checkpoint.depth, k_max_visible_depth);
         auto primary = std::string(visible_depth * 2, ' ') + (checkpoint.depth > k_max_visible_depth ? "… " :
                                                               checkpoint.depth == 0                  ? "● " :
                                                                                                        "↳ ");
         primary += bounded_utf8(checkpoint.label, 72);
-        auto secondary = "checkpoint #" + std::to_string(checkpoint.id.entry.value);
-        if (checkpoint.task_outcome) secondary += " · " + outcome_label(*checkpoint.task_outcome);
-        if (checkpoint.active) {
-            secondary += " · current append point";
-        } else if (checkpoint.on_active_branch) {
-            secondary += " · active ancestor";
-        } else {
-            secondary += " · preserved branch";
-        }
-        secondary += checkpoint.branch_leaf_count == 1 ? " · branch" : " · branches";
-        for (const auto leaf : checkpoint.branch_leaf_examples) {
-            secondary += " #" + std::to_string(leaf.entry.value);
-        }
-        if (checkpoint.branch_leaf_count > checkpoint.branch_leaf_examples.size()) {
-            secondary += " +" + std::to_string(checkpoint.branch_leaf_count - checkpoint.branch_leaf_examples.size());
-        }
+        auto secondary = checkpoint_description(checkpoint);
         page.items.push_back(
             {.id = std::to_string(checkpoint.id.entry.value), .primary = std::move(primary), .secondary = std::move(secondary)});
     }
+    return page;
+}
+
+SelectableList history_list(const std::vector<session::ConversationCheckpoint> &checkpoints) {
+    auto page = history_page_impl(checkpoints, {});
     SelectableList list("Conversation history", "No completed conversation checkpoints", std::move(page));
     list.description = "Inspect safe completed boundaries; selecting one does not change history.";
+    list.enable_query("No matching conversation checkpoints");
     return list;
 }
 
@@ -216,6 +261,10 @@ lighter::Task<lighter::Error> publish_and_switch_to_fork(Agent &agent, ConsoleRe
 
 } // namespace
 
+SelectableListPage conversation_history_page(const std::vector<session::ConversationCheckpoint> &checkpoints, std::string_view query) {
+    return history_page_impl(checkpoints, query);
+}
+
 lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
                                              SelectableListDialog &dialog) {
     if (!sessions || !renderer.terminal || !agent.session.metadata.workspace) {
@@ -255,7 +304,11 @@ lighter::Task<lighter::Error> navigate_conversation(Agent &agent, application::S
     if (!sessions || !renderer.terminal) co_return renderer.status("Conversation history is unavailable in this session");
     auto checkpoints = agent.session.conversation_checkpoints();
     if (!checkpoints) co_return renderer.notice("[history error: " + checkpoints.error().message() + "]\n");
-    if (auto error = dialog.begin(renderer, history_list(*checkpoints))) co_return error;
+    SelectableListDialog::LoadPage load = [checkpoints = *checkpoints](std::string_view query, SelectableListPageLoad,
+                                                                       std::optional<std::string_view>) -> Result<SelectableListPage> {
+        return conversation_history_page(checkpoints, query);
+    };
+    if (auto error = dialog.begin(renderer, history_list(*checkpoints), std::move(load))) co_return error;
     auto selected = co_await dialog.next();
     if (!selected) co_return lighter::Error{};
     auto checkpoint = parse_checkpoint_choice(*selected);

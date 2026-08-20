@@ -2,6 +2,8 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include <lighter/async/async.h>
 
@@ -11,6 +13,8 @@
 #include <liminal/tui/selectable_list_dialog.h>
 
 namespace liminal::tui {
+
+SelectableListPage conversation_history_page(const std::vector<session::ConversationCheckpoint> &checkpoints, std::string_view query);
 
 lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
                                              SelectableListDialog &dialog);

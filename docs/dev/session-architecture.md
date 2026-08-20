@@ -50,7 +50,11 @@ Session discovery reads bounded, indexed catalog metadata without decoding entry
 
 Workspace catalogs are ordered newest first and traversed with stable keyset cursors rather than offsets. A catalog summary contains only bounded identification metadata; the full session ID remains its durable identity. An empty page is a successful discovery result, while failure to resolve an explicitly requested session is an error.
 
-Catalog navigation uses a reusable focused selection surface. Commands supply domain data and cursor policy, but do not own terminal navigation or modal input handling.
+The catalog paging request also carries an optional platform-neutral text query. An empty query uses the ordinary workspace/recency keyset query. A non-empty query filters inside SQLite across explicit title, bounded first-prompt preview, and the canonical full UUID while retaining the same workspace predicate, `updated_at_ms DESC, id DESC` order, bounded page size, and keyset continuation. Matching uses literal `instr` operations, so `%`, `_`, and similar characters have no wildcard meaning. ASCII letters are compared case-insensitively; non-ASCII title and preview bytes must match exactly.
+
+Replacement may include a preferred session ID. The catalog checks that exact ID under the same workspace and text predicates and, when it still matches, returns a bounded page beginning at that identity plus preceding and following keyset continuations. This keeps the preferred row selected without loading or walking every newer match; PageUp/Up can traverse newer pages and PageDown/Down can traverse older pages while every loaded page remains in global recency/ID order. A missing or nonmatching preferred ID falls back to the ordered first page. Every continuation belongs to one query, and changing or clearing the query discards both directions before establishing the replacement page.
+
+Catalog navigation uses a reusable focused selection surface. Commands supply domain data and cursor policy, but do not own terminal navigation or modal input handling. Search result replacement and page loading happen only at input/result transitions; frame projection never performs catalog work and the picker never eagerly loads the complete catalog.
 
 Conversation navigation uses the same focused selection surface and is available only while the agent is idle. Cancellation, projection failure, persistence failure, fork preparation failure, and model-resolution failure must leave the live agent and displayed transcript on the same session and branch.
 

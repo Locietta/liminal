@@ -1,6 +1,6 @@
-# TUI Command Registry and Compact Pickers
+# TUI Command Registry and Pickers
 
-Architecture notes for the slash-command registry, the compact command menu, and the compact `/model` picker. User-visible behavior is described in `docs/user/tui.md`.
+Architecture notes for the slash-command registry, compact command and model pickers, and filtered full-screen selection lists. User-visible behavior is described in `docs/user/tui.md`.
 
 ## Command registry
 
@@ -53,6 +53,32 @@ Esc priority: a compact surface closes first; a second Esc cancels the active ta
 
 The full-screen `SelectableListDialog` branch stays first in `apply_terminal_event`; a full-screen dialog and a compact surface are never active at the same time.
 
+## Shared picker query editing
+
+`picker_query.*` is the single query-editing primitive used by compact and full-screen pickers. It applies insertion, paste, grapheme deletion and movement, word deletion and movement, Home, and End to a UTF-8 byte cursor. Insertions discard C0 controls and Delete before changing the query, so terminal paste cannot create an invisible newline or tab. Its cell-aware query window keeps that cursor visible without splitting an extended grapheme cluster. Query text and cursor position are model state and therefore survive resize; frame projection only reads them.
+
+Picker matching folds ASCII `A`–`Z` only. Non-ASCII bytes are compared exactly. This deliberately avoids locale-dependent behavior and a Unicode case-folding dependency, but it means user-authored session titles and prompt labels with cased non-ASCII letters must use the same non-ASCII case to match.
+
+## Full-screen selectable-list filtering
+
+`SelectableList` remains the full-screen screen model for `/resume`, `/history`, and confirmation lists. Search-enabled lists add an owned `Search: <query>` row, query cursor, explicit result replacement transition, and query-specific empty state. Navigation and confirmation use the owned selected item ID; page and query replacement locate that identity in the new result set and otherwise select the first result deterministically. A page arriving without pending navigation preserves identity. A page requested by boundary Up, Down, PageUp, or PageDown completes that outstanding action exactly once after arrival.
+
+`SelectableListDialog` owns the transition boundary between input and domain work. Text-changing edits request a complete result replacement; cursor-only edits redraw without loading. Boundary navigation requests the preceding or next page when its keyset continuation exists. The injected loader receives the current query, transition direction, and preferred selected identity for replacement. No loader runs from `frame()`.
+
+The explicit states are:
+
+- Initial/query loading retains query and prior selection while showing `Loading…`.
+- Successful replacement discards every prior page and both continuation directions.
+- Empty results own no selection, so Enter is inert.
+- Query failure restores the prior usable query, cursor, pages, and selection, then shows a bounded error row.
+- Page failure preserves loaded pages and selection and permits a retry.
+- Esc cancels immediately, including while a load transition is active.
+- Resize only reprojects the owned state.
+
+`/history` filters the complete `conversation_checkpoints()` collection in memory at the input transition, before mapping matches to bounded visible rows. Its haystacks are the untruncated prompt label, checkpoint identity, task outcome, current/ancestor/preserved state text, total branch count, and representative leaf identities. Matching checkpoints retain their original tree order and stable checkpoint IDs.
+
+`/resume` uses the catalog query/paging boundary described in `session-architecture.md`; it never filters the pages currently held by `SelectableList`.
+
 ## Model picker flow
 
 `CompactPickerDialog` (`liminal/tui/compact_picker_dialog.h`) mirrors `SelectableListDialog`: `begin` opens the picker on the screen, `confirm`/`cancel` record a decision and close it, `next()` is the `Event`-gated awaitable consumed by `repl_body`.
@@ -67,4 +93,4 @@ Non-interactive (redirected stdio) `/model` keeps the historical transcript cata
 
 ## Testing
 
-Headless coverage lives in `liminal/tests/test-tui/main.cpp`: registry invariants, `/help`, `CompactPicker` filtering, menu activation boundary and dismissal policy, Tab/Enter/Up/Down/Esc semantics, hint lifecycle, model-picker flow (loading/error/query/highlight identity/resize), band shrink behavior, and the `CompactPickerDialog` decision protocol. `HeadlessSnapshot` exposes `command_menu_open`, `picker_query`, `picker_highlight_id`, `picker_visible_ids`, `picker_loading`, `picker_error`, and reports `focused_surface = "compact_picker"` while the model picker owns focus. PTY integration coverage: `test_command_menu_and_model_picker` in `tests/integration/test_liminal.py`.
+Headless coverage lives in `liminal/tests/test-tui/main.cpp`: registry invariants, `/help`, compact and full-screen query editing, menu activation boundary and dismissal policy, identity-preserving replacement/paging, loading/empty/error/cancellation/resize states, semantic history filtering, model-picker flow, band shrink behavior, and both dialog protocols. `HeadlessSnapshot` exposes the active picker's query, cursor, identity, visible result IDs, loading state, and error for semantic assertions. PTY integration coverage includes `test_command_menu_and_model_picker` and `test_full_screen_resume_query_edit_and_clear` in `tests/integration/test_liminal.py`.

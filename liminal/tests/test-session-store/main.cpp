@@ -213,6 +213,19 @@ VALUES(?1,1,?2,?3,?4,?5)
     sqlite3_close(database);
 }
 
+void set_catalog_text(const std::filesystem::path &path, session::SessionId id, std::string_view title, std::string_view preview) {
+    auto *database = open_sqlite(path);
+    sqlite3_stmt *update = nullptr;
+    require(sqlite3_prepare_v2(database, "UPDATE sessions SET title=?1,preview=?2 WHERE id=?3", -1, &update, nullptr) == SQLITE_OK,
+            "failed to prepare catalog text update");
+    sqlite3_bind_text(update, 1, title.data(), static_cast<int>(title.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(update, 2, preview.data(), static_cast<int>(preview.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_blob(update, 3, id.bytes.data(), static_cast<int>(id.bytes.size()), SQLITE_TRANSIENT);
+    require(sqlite3_step(update) == SQLITE_DONE && sqlite3_changes(database) == 1, "failed to update catalog text fixture");
+    sqlite3_finalize(update);
+    sqlite3_close(database);
+}
+
 void write_marker(const std::filesystem::path &root, session::SessionId id, u64 revision) {
     const session::StatePaths paths{root};
     std::ofstream marker(paths.pending_marker(id), std::ios::binary | std::ios::trunc);
@@ -1454,6 +1467,74 @@ ORDER BY updated_at_ms DESC,id DESC LIMIT ?4
             "catalog paging did not use the workspace/recency keyset index directly");
 }
 
+void test_catalog_complete_text_search() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open catalog search storage");
+    insert_catalog_rows(storage->catalog.path(), 1, 15, "workspace-a", 100, 100);
+    insert_catalog_rows(storage->catalog.path(), 100, 1, "workspace-b", 10'000);
+    set_catalog_text(storage->catalog.path(), deterministic_id(1), "Needle Title", "ordinary preview");
+    set_catalog_text(storage->catalog.path(), deterministic_id(2), "ordinary title", "Deep Preview Target");
+    set_catalog_text(storage->catalog.path(), deterministic_id(3), "literal %_[] value", "ordinary preview");
+    set_catalog_text(storage->catalog.path(), deterministic_id(100), "Needle Title", "other workspace");
+    for (u64 value = 5; value <= 12; ++value) {
+        set_catalog_text(storage->catalog.path(), deterministic_id(value), "Paged Match " + std::to_string(value), "ordinary preview");
+    }
+
+    auto title = storage->catalog.page({.workspace_key = "workspace-a", .query = "needle title", .limit = 3});
+    require(title && title->sessions.size() == 1 && title->sessions.front().id == deterministic_id(1),
+            "catalog title search was case-sensitive or limited to the first unfiltered page");
+    auto preview = storage->catalog.page({.workspace_key = "workspace-a", .query = "preview target", .limit = 3});
+    require(preview && preview->sessions.size() == 1 && preview->sessions.front().id == deterministic_id(2),
+            "catalog preview search did not use the complete workspace dataset");
+    const auto canonical = session::to_string(deterministic_id(2));
+    auto full_id = storage->catalog.page({.workspace_key = "workspace-a", .query = canonical, .limit = 3});
+    require(full_id && full_id->sessions.size() == 1 && full_id->sessions.front().id == deterministic_id(2),
+            "canonical session UUID was not searchable");
+    auto isolated = storage->catalog.page({.workspace_key = "workspace-b", .query = "needle title", .limit = 3});
+    require(isolated && isolated->sessions.size() == 1 && isolated->sessions.front().id == deterministic_id(100),
+            "catalog search crossed or lost its workspace boundary");
+    auto literal = storage->catalog.page({.workspace_key = "workspace-a", .query = "%_[", .limit = 3});
+    require(literal && literal->sessions.size() == 1 && literal->sessions.front().id == deterministic_id(3),
+            "catalog search gave wildcard semantics to literal punctuation");
+
+    auto first = storage->catalog.page({.workspace_key = "workspace-a", .query = "paged match", .limit = 3});
+    require(first && first->sessions.size() == 3 && first->continuation && first->sessions.front().id == deterministic_id(12),
+            "filtered catalog first page lost recency ordering or continuation");
+    auto second = storage->catalog.page({.workspace_key = "workspace-a", .query = "paged match", .after = first->continuation, .limit = 3});
+    auto third =
+        second ?
+            storage->catalog.page({.workspace_key = "workspace-a", .query = "paged match", .after = second->continuation, .limit = 3}) :
+            Result<session::SessionPage>{lighter::outcome_error(second.error())};
+    require(second && second->sessions.size() == 3 && second->continuation && third && third->sessions.size() == 2 &&
+                !third->continuation && third->sessions.back().id == deterministic_id(5),
+            "filtered catalog continuation skipped, duplicated, or truncated matches");
+
+    auto preferred =
+        storage->catalog.page({.workspace_key = "workspace-a", .query = "paged match", .preferred_id = deterministic_id(8), .limit = 3});
+    require(preferred && preferred->sessions.size() == 3 && preferred->sessions.front().id == deterministic_id(8) &&
+                preferred->sessions.back().id == deterministic_id(6) && preferred->preceding && preferred->continuation,
+            "preferred session lookup did not open a bounded, ordered page containing the matching identity");
+    auto preceding =
+        preferred ?
+            storage->catalog.page({.workspace_key = "workspace-a", .query = "paged match", .before = preferred->preceding, .limit = 3}) :
+            Result<session::SessionPage>{lighter::outcome_error(preferred.error())};
+    require(preceding && preceding->sessions.size() == 3 && preceding->sessions[0].id == deterministic_id(11) &&
+                preceding->sessions[1].id == deterministic_id(10) && preceding->sessions[2].id == deterministic_id(9) &&
+                preceding->preceding,
+            "backward catalog continuation lost ordering or skipped matches before a preferred identity");
+
+    auto other_workspace_preferred =
+        storage->catalog.page({.workspace_key = "workspace-b", .query = "needle title", .preferred_id = deterministic_id(1), .limit = 3});
+    require(other_workspace_preferred && other_workspace_preferred->sessions.size() == 1 &&
+                other_workspace_preferred->sessions.front().id == deterministic_id(100) && !other_workspace_preferred->preceding,
+            "preferred session lookup escaped workspace isolation instead of falling back to the ordered first page");
+
+    auto unfiltered = storage->catalog.page({.workspace_key = "workspace-a", .limit = 3});
+    require(unfiltered && unfiltered->sessions.front().id == deterministic_id(15),
+            "an empty catalog query did not preserve normal newest-first paging");
+}
+
 void test_recovery_and_transcript_hydration_survive_restart() {
     TemporaryState temporary;
     auto storage = open_storage(temporary.root);
@@ -2001,6 +2082,7 @@ int main(int argc, char **argv) {
     test_recency_rename_fork_and_discovery();
     test_restart_branching_preserves_history_and_cursor();
     test_catalog_keyset_paging_and_index_plan();
+    test_catalog_complete_text_search();
     test_recovery_and_transcript_hydration_survive_restart();
     test_persistence_queue_ordering_retry_and_flush_barriers();
     test_reopening_queue_tracks_asynchronous_catalog_recovery();

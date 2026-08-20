@@ -25,6 +25,7 @@
 #include <liminal/tui/external_editor.h>
 #include <liminal/tui/rich_text.h>
 #include <liminal/tui/selectable_list_dialog.h>
+#include <liminal/tui/session_commands.h>
 #include <liminal/tui/session_screen.h>
 #include <liminal/tui/surface.h>
 #include <liminal/tui/syntax_highlight.h>
@@ -1242,7 +1243,7 @@ void check_headless_selectable_list() {
     require(snapshot.selection_effect == "load_next_page" && snapshot.visible_text[2].contains("Loading"),
             "page loading must be an observable deterministic list state");
     require(session.apply({.type = "list_next_page", .text = "three\nfour"}).has_value() && session.inspect().selected_id == "three",
-            "a loaded page must establish a coherent first-row selection");
+            "page arrival must complete the outstanding Down navigation");
     require(session.apply({.type = "page_up"}).has_value() && session.inspect().selected_id == "one" &&
                 session.apply({.type = "page_down"}).has_value() && session.inspect().selected_id == "three",
             "PageUp and PageDown must navigate loaded pages coherently");
@@ -1276,6 +1277,142 @@ void check_headless_selectable_list() {
     snapshot = failed_page.inspect();
     require(snapshot.visible_text[2].contains("catalog failed") && snapshot.selected_id == "first",
             "page failure must render without losing the selected item identity");
+
+    tui::SelectableList paged("Paged", "Empty",
+                              {.items = {{.id = "one", .primary = "One"}, {.id = "two", .primary = "Two"}}, .has_more = true});
+    require(paged.apply(tui::SelectableListAction::DOWN) == tui::SelectableListEffect::NONE &&
+                paged.apply(tui::SelectableListAction::PAGE_DOWN) == tui::SelectableListEffect::LOAD_NEXT_PAGE,
+            "PageDown boundary fixture must request its next page");
+    paged.append_page({.items = {{.id = "three", .primary = "Three"}, {.id = "four", .primary = "Four"}}});
+    require(paged.selected_id() == "four", "page arrival must complete PageDown at the prior row offset");
+
+    tui::SelectableList backwards(
+        "Backwards", "Empty", {.items = {{.id = "three", .primary = "Three"}, {.id = "four", .primary = "Four"}}, .has_previous = true});
+    require(backwards.apply(tui::SelectableListAction::PAGE_UP) == tui::SelectableListEffect::LOAD_PREVIOUS_PAGE,
+            "PageUp must request a bounded preceding page when replacement starts around a preferred identity");
+    backwards.prepend_page({.items = {{.id = "one", .primary = "One"}, {.id = "two", .primary = "Two"}}});
+    require(backwards.selected_id() == "one", "preceding page arrival must complete the outstanding PageUp navigation");
+}
+
+void check_headless_selectable_list_query() {
+    tui::HeadlessSession loading(30, 8);
+    require(loading.apply({.type = "open_loading_list", .name = "Loading search"}).has_value(),
+            "initial searchable-list loading fixture must open");
+    auto loading_snapshot = loading.inspect();
+    require(loading_snapshot.picker_loading && !loading_snapshot.selected_id && loading_snapshot.visible_text[3].contains("Loading"),
+            "initial loading must retain the focused empty query and expose no accidental selection");
+    require(loading.apply({.type = "list_replace", .text = "first"}).has_value() && loading.inspect().selected_id == "first",
+            "initial result replacement must select the first stable identity deterministically");
+
+    tui::HeadlessSession session(18, 8);
+    require(
+        session.apply({.type = "open_list", .text = "one\ntwo", .name = "Searchable", .command = "No items", .amount = 1, .is_error = true})
+            .has_value(),
+        "searchable selectable-list fixture must open");
+    require(session.apply({.type = "down"}).has_value() && session.inspect().selected_id == "two",
+            "searchable list must establish a stable selected identity");
+    std::string pasted_query = "ab\n\t中cd👩‍💻ef";
+    pasted_query.push_back('\x7f');
+    require(session.apply({.type = "insert", .text = pasted_query}).has_value(), "full-screen query paste must apply");
+    auto snapshot = session.inspect();
+    require(snapshot.selection_effect == "replace_results" && snapshot.picker_loading && snapshot.picker_query == "ab中cd👩‍💻ef" &&
+                snapshot.selected_id == "two" && snapshot.visible_text[2].contains("Search:"),
+            "query replacement must retain query and selection while loading");
+    require(session.apply({.type = "list_replace", .text = "two"}).has_value(), "query result replacement must apply");
+    require(session.apply({.type = "home"}).has_value() && session.apply({.type = "right"}).has_value() &&
+                session.apply({.type = "right"}).has_value() && session.apply({.type = "right"}).has_value() &&
+                session.apply({.type = "right"}).has_value(),
+            "full-screen query grapheme movement must apply");
+    snapshot = session.inspect();
+    require(snapshot.picker_query_cursor == std::string("ab中c").size() && snapshot.cursor.visible,
+            "full-screen query cursor must move by grapheme boundaries");
+    require(session.apply({.type = "resize", .columns = 14, .rows = 7}).has_value(), "full-screen query resize must apply");
+    snapshot = session.inspect();
+    require(snapshot.picker_query == "ab中cd👩‍💻ef" && snapshot.picker_query_cursor == std::string("ab中c").size() &&
+                snapshot.selected_id == "two" && snapshot.cursor.visible && snapshot.visible_text[2].contains("Search:"),
+            "resize must preserve and cell-window the full-screen query, cursor, and identity");
+
+    require(session.apply({.type = "end"}).has_value() && session.apply({.type = "backspace_word"}).has_value(),
+            "query edit must start a replacement");
+    require(session.apply({.type = "list_query_error", .text = "catalog unavailable"}).has_value(), "query failure transition must apply");
+    snapshot = session.inspect();
+    require(snapshot.picker_query == "ab中cd👩‍💻ef" && snapshot.selected_id == "two" &&
+                snapshot.picker_error == "catalog unavailable" && snapshot.picker_visible_ids == std::vector<std::string>{"two"},
+            "query failure must restore the prior usable query, result set, and selection");
+
+    require(session.apply({.type = "close_list"}).has_value(), "failed query fixture must close");
+
+    tui::HeadlessSession clearing(30, 8);
+    require(
+        clearing.apply(
+                    {.type = "open_list", .text = "one\ntwo", .name = "Searchable", .command = "No items", .amount = 1, .is_error = true})
+                .has_value() &&
+            clearing.apply({.type = "down"}).has_value() && clearing.apply({.type = "insert", .text = "two"}).has_value() &&
+            clearing.apply({.type = "list_replace", .text = "two"}).has_value() && clearing.apply({.type = "backspace_word"}).has_value() &&
+            clearing.apply({.type = "list_replace", .text = "one\ntwo", .amount = 1}).has_value(),
+        "clearing the query must restore the unfiltered result transition");
+    snapshot = clearing.inspect();
+    require(snapshot.picker_query.empty() && snapshot.selected_id == "two" &&
+                snapshot.picker_visible_ids == std::vector<std::string>({"one", "two"}),
+            "clearing a query must restore normal order while preserving a matching identity");
+    require(clearing.apply({.type = "down"}).has_value() && clearing.apply({.type = "list_next_page", .text = "three"}).has_value() &&
+                clearing.inspect().selected_id == "three",
+            "appending an unfiltered page after clearing must complete boundary navigation");
+
+    require(clearing.apply({.type = "insert", .text = "missing"}).has_value() && clearing.apply({.type = "list_replace"}).has_value(),
+            "empty query result transition must apply");
+    snapshot = clearing.inspect();
+    require(!snapshot.selected_id && snapshot.visible_text[3].contains("No matches"),
+            "empty filtered results must clear selection and show the query-specific empty state");
+    require(clearing.apply({.type = "backspace_word"}).has_value() &&
+                clearing.apply({.type = "list_replace", .text = "one\ntwo", .amount = 1}).has_value() &&
+                clearing.inspect().selected_id == "one",
+            "restoring results after selection disappearance must choose the first identity deterministically");
+    require(clearing.apply({.type = "insert", .text = "x"}).has_value() && clearing.apply({.type = "escape"}).has_value() &&
+                clearing.inspect().selection_effect == "cancelled",
+            "Esc must cancel a full-screen picker immediately during a query transition");
+}
+
+void check_history_complete_text_filtering() {
+    const std::vector<session::ConversationCheckpoint> checkpoints = {
+        {.id = {.entry = {.value = 101}},
+         .depth = 0,
+         .label = "Deploy Alpha",
+         .task_outcome = session::TaskOutcome::COMPLETED,
+         .on_active_branch = true,
+         .branch_leaf_count = 3,
+         .branch_leaf_examples = {{.entry = {.value = 901}}, {.entry = {.value = 902}}}},
+        {.id = {.entry = {.value = 202}},
+         .depth = 1,
+         .label = "Investigate failure",
+         .task_outcome = session::TaskOutcome::FAILED,
+         .active = true,
+         .on_active_branch = true,
+         .branch_leaf_count = 1,
+         .branch_leaf_examples = {{.entry = {.value = 202}}}},
+        {.id = {.entry = {.value = 303}},
+         .depth = 1,
+         .label = "Preserved Résumé",
+         .task_outcome = session::TaskOutcome::CANCELLED,
+         .branch_leaf_count = 1,
+         .branch_leaf_examples = {{.entry = {.value = 303}}}},
+    };
+    const auto ids = [&](std::string_view query) {
+        std::vector<std::string> result;
+        for (const auto &item : tui::conversation_history_page(checkpoints, query).items) result.push_back(item.id);
+        return result;
+    };
+    require(ids("deploy alpha") == std::vector<std::string>{"101"}, "history label matching failed");
+    require(ids("202") == std::vector<std::string>{"202"}, "history full checkpoint ID matching failed");
+    require(ids("failed") == std::vector<std::string>{"202"}, "history outcome matching failed");
+    require(ids("current append point") == std::vector<std::string>{"202"}, "history active-state matching failed");
+    require(ids("active ancestor") == std::vector<std::string>{"101"}, "history ancestor-state matching failed");
+    require(ids("preserved branch") == std::vector<std::string>{"303"}, "history preserved-state matching failed");
+    require(ids("#902") == std::vector<std::string>{"101"}, "history representative leaf-ID matching failed");
+    require(ids("3 branches") == std::vector<std::string>{"101"}, "history branch-count description matching failed");
+    require(ids("résumé") == std::vector<std::string>{"303"} && ids("RÉsumé").empty(),
+            "history matching must fold ASCII while matching non-ASCII bytes exactly");
+    require(ids("") == std::vector<std::string>({"101", "202", "303"}), "history filtering changed the original tree order");
 }
 
 void check_model_picker_headless_flow() {
@@ -1478,13 +1615,40 @@ void check_selectable_dialog_uses_generic_page_errors() {
     tui::SelectableListDialog dialog;
     tui::SelectableList list("Choose item", "No items",
                              tui::SelectableListPage{.items = {{.id = "first", .primary = "First"}}, .has_more = true});
-    auto begun = dialog.begin(renderer, std::move(list),
-                              []() -> Result<tui::SelectableListPage> { return lighter::outcome_error(Error::storage("catalog failed")); });
+    auto begun =
+        dialog.begin(renderer, std::move(list),
+                     [](std::string_view, tui::SelectableListPageLoad, std::optional<std::string_view>) -> Result<tui::SelectableListPage> {
+                         return lighter::outcome_error(Error::storage("catalog failed"));
+                     });
     require(!begun, "selectable dialog fixture failed to open");
     require(!dialog.apply(tui::SelectableListAction::PAGE_DOWN), "selectable dialog page failure did not render");
     require(renderer.selectable_list &&
                 frame_text(renderer.selectable_list->frame(60, 8)).contains("Cannot load next page: catalog failed"),
             "reusable selectable dialog used domain-specific page error wording");
+}
+
+void check_selectable_dialog_passes_preferred_identity() {
+    tui::ConsoleRenderer renderer;
+    tui::SelectableListDialog dialog;
+    tui::SelectableList list("Choose item", "No items",
+                             tui::SelectableListPage{.items = {{.id = "one", .primary = "One"}, {.id = "two", .primary = "Two"}}});
+    list.enable_query("No matches");
+    std::optional<std::string> preferred;
+    auto begun =
+        dialog.begin(renderer, std::move(list),
+                     [&preferred](std::string_view query, tui::SelectableListPageLoad load,
+                                  std::optional<std::string_view> preferred_id) -> Result<tui::SelectableListPage> {
+                         require(query == "broad" && load == tui::SelectableListPageLoad::REPLACE,
+                                 "query replacement must identify its catalog transition");
+                         if (preferred_id) preferred = *preferred_id;
+                         return tui::SelectableListPage{.items = {{.id = "two", .primary = "Two"}, {.id = "three", .primary = "Three"}},
+                                                        .has_previous = true,
+                                                        .has_more = true};
+                     });
+    require(!begun && !dialog.apply(tui::SelectableListAction::DOWN), "preferred-identity dialog fixture failed to select its second row");
+    require(!dialog.edit_query(tui::PickerQueryEdit::INSERT, "broad"), "preferred-identity replacement failed");
+    require(preferred == "two" && renderer.selectable_list_selection() == "two",
+            "replacement must pass and retain the selected stable identity even when the catalog opens away from its first page");
 }
 
 void check_headless_resize_and_markup_stress() {
@@ -1582,11 +1746,14 @@ i32 run_all(std::string_view executable) {
     check_mouse_selection();
     check_headless_virtual_time_and_snapshots();
     check_headless_selectable_list();
+    check_headless_selectable_list_query();
+    check_history_complete_text_filtering();
     check_model_picker_headless_flow();
     check_model_picker_rows_disambiguate_providers();
     check_model_picker_shrinks_before_transcript_reserve();
     check_compact_picker_dialog_flow();
     check_selectable_dialog_uses_generic_page_errors();
+    check_selectable_dialog_passes_preferred_identity();
     check_headless_resize_and_markup_stress();
     return 0;
 }

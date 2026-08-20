@@ -7,6 +7,7 @@
 
 #include <lighter/types.hpp>
 
+#include <liminal/tui/picker_query.h>
 #include <liminal/tui/surface.h>
 
 namespace liminal::tui {
@@ -25,22 +26,6 @@ struct CompactPickerItem {
 enum struct CompactPickerMatch {
     PREFIX,
     SUBSTRING,
-};
-
-/// Editing operations on a picker-owned query. INSERT carries text; every
-/// other operation acts at the query cursor.
-enum struct PickerQueryEdit {
-    INSERT,
-    BACKSPACE,
-    ERASE,
-    BACKSPACE_WORD,
-    ERASE_WORD,
-    LEFT,
-    RIGHT,
-    WORD_LEFT,
-    WORD_RIGHT,
-    HOME,
-    END,
 };
 
 /// Bounded contextual selection state rendered as a band above the composer.

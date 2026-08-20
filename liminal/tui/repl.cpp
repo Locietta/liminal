@@ -203,7 +203,12 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
                                     i32 &held_mouse_buttons) {
     if (dialog.active()) {
         if (event.kind == TerminalEventKind::RESIZE) return renderer.resize(event.size);
+        if (event.kind == TerminalEventKind::TEXT || event.kind == TerminalEventKind::PASTE) {
+            return dialog.edit_query(PickerQueryEdit::INSERT, event.text);
+        }
         if (event.kind != TerminalEventKind::KEY || !event.pressed) return {};
+        const bool control = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::CONTROL);
+        const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
         switch (event.key) {
             case TerminalKey::ESCAPE: return dialog.apply(SelectableListAction::CANCEL);
             case TerminalKey::ENTER: return dialog.apply(SelectableListAction::CONFIRM);
@@ -211,6 +216,15 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             case TerminalKey::ARROW_DOWN: return dialog.apply(SelectableListAction::DOWN);
             case TerminalKey::PAGE_UP: return dialog.apply(SelectableListAction::PAGE_UP);
             case TerminalKey::PAGE_DOWN: return dialog.apply(SelectableListAction::PAGE_DOWN);
+            case TerminalKey::BACKSPACE: return dialog.edit_query(control ? PickerQueryEdit::BACKSPACE_WORD : PickerQueryEdit::BACKSPACE);
+            case TerminalKey::DELETE_KEY: return dialog.edit_query(control ? PickerQueryEdit::ERASE_WORD : PickerQueryEdit::ERASE);
+            case TerminalKey::ARROW_LEFT: return dialog.edit_query(control ? PickerQueryEdit::WORD_LEFT : PickerQueryEdit::LEFT);
+            case TerminalKey::ARROW_RIGHT: return dialog.edit_query(control ? PickerQueryEdit::WORD_RIGHT : PickerQueryEdit::RIGHT);
+            case TerminalKey::HOME: return dialog.edit_query(PickerQueryEdit::HOME);
+            case TerminalKey::END: return dialog.edit_query(PickerQueryEdit::END);
+            case TerminalKey::CHARACTER:
+                if (!event.text.empty() && (!control || alt_gr)) return dialog.edit_query(PickerQueryEdit::INSERT, event.text);
+                return {};
             default: return {};
         }
     }

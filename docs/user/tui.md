@@ -92,14 +92,16 @@ Drag selection highlights whole screen cells and persists after you release the 
 
 Session catalog commands are available while the agent is idle:
 
-- `/resume` opens recent sessions for the current workspace. Up and Down move one row, PageUp and PageDown move between catalog pages, Enter confirms, and Esc cancels without changing the current session.
+- `/resume` opens recent sessions for the current workspace. Its focused `Search:` row searches the complete workspace catalog by explicit title, first-prompt preview, or canonical full session UUID—even when a match is beyond the pages already shown. Up and Down move one row, PageUp and PageDown move between catalog pages, Enter confirms, and Esc cancels immediately without changing the current session.
 - `/name <title>` names the current session. `/name --clear` returns it to the first-prompt preview.
+
+In the `/resume` and `/history` search rows, printable text and paste insert at the cursor; pasted control characters such as trailing newlines and tabs are ignored. Backspace/Delete remove one grapheme, Ctrl+Backspace/Ctrl+Delete remove a word, Left/Right move by grapheme, Ctrl+Left/Ctrl+Right move by word, and Home/End move to the query boundaries. Clearing the query restores the ordinary ordering and paging. Matching ignores ASCII letter case but compares non-ASCII text exactly, including user-authored titles and prompt text.
 
 Liminal fully prepares a selected resume target before replacing the current transcript. If the current session still has unsaved history after a final save attempt, Liminal asks before switching and explains that the unsaved tail will not be resumable and that external tool effects are not undone. Choosing to stay leaves the current session unchanged.
 
 ## Conversation history
 
-`/history` is available while the agent is idle. It opens a tree of completed conversation checkpoints. Rows identify the current append point, its active ancestors, preserved branches, and stable checkpoint-based branch IDs. Up and Down move between rows, Enter selects, and Esc cancels.
+`/history` is available while the agent is idle. It opens a tree of completed conversation checkpoints. Rows identify the current append point, its active ancestors, preserved branches, and stable checkpoint-based branch IDs. Its `Search:` row filters the complete checkpoint tree by the untruncated prompt label, full checkpoint ID, task outcome, checkpoint state, branch count, and representative checkpoint/leaf IDs. Matching rows retain their original tree order. Up and Down move between rows, Enter selects, and Esc cancels immediately.
 
 After selecting a checkpoint, choose one of these actions:
 

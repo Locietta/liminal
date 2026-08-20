@@ -99,7 +99,9 @@ std::string_view name(SessionState state) {
 std::string_view name(SelectableListEffect effect) {
     switch (effect) {
         case SelectableListEffect::NONE: return "none";
+        case SelectableListEffect::LOAD_PREVIOUS_PAGE: return "load_previous_page";
         case SelectableListEffect::LOAD_NEXT_PAGE: return "load_next_page";
+        case SelectableListEffect::REPLACE_RESULTS: return "replace_results";
         case SelectableListEffect::CONFIRMED: return "confirmed";
         case SelectableListEffect::CANCELLED: return "cancelled";
     }
@@ -180,47 +182,65 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     ++action_count;
 
     if (action.type == "insert") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::INSERT, action.text);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::INSERT, action.text);
         else
             screen.insert(action.text);
     } else if (action.type == "backspace") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::BACKSPACE);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::BACKSPACE);
         else
             screen.backspace();
     } else if (action.type == "delete") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::ERASE);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::ERASE);
         else
             screen.erase();
     } else if (action.type == "backspace_word") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::BACKSPACE_WORD);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::BACKSPACE_WORD);
         else
             screen.backspace_word();
     } else if (action.type == "delete_word") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::ERASE_WORD);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::ERASE_WORD);
         else
             screen.erase_word();
     } else if (action.type == "left") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::LEFT);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::LEFT);
         else
             screen.move_left();
     } else if (action.type == "right") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::RIGHT);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::RIGHT);
         else
             screen.move_right();
     } else if (action.type == "word_left") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::WORD_LEFT);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::WORD_LEFT);
         else
             screen.move_word_left();
     } else if (action.type == "word_right") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::WORD_RIGHT);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::WORD_RIGHT);
         else
             screen.move_word_right();
@@ -237,12 +257,16 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "tab") {
         if (!selectable_list && screen.apply_picker_key(PickerKey::TAB) == PickerKeyResult::PASS) screen.insert("\t");
     } else if (action.type == "home") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::HOME);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::HOME);
         else
             screen.move_home();
     } else if (action.type == "end") {
-        if (screen.model_picker_active())
+        if (selectable_list)
+            selection_effect = selectable_list->edit_query(PickerQueryEdit::END);
+        else if (screen.model_picker_active())
             screen.picker_query_edit(PickerQueryEdit::END);
         else
             screen.move_end();
@@ -314,14 +338,33 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "open_list") {
         selectable_list.emplace(action.name.empty() ? "Select" : action.name, action.command.empty() ? "No items" : action.command,
                                 selectable_page(action.text, action.amount != 0));
+        if (action.is_error) selectable_list->enable_query("No matches");
         selection_effect = SelectableListEffect::NONE;
+    } else if (action.type == "open_loading_list") {
+        selectable_list.emplace(action.name.empty() ? "Select" : action.name, action.command.empty() ? "No items" : action.command,
+                                SelectableListPage{});
+        selectable_list->enable_query("No matches");
+        selectable_list->begin_query_load();
+        selection_effect = SelectableListEffect::REPLACE_RESULTS;
     } else if (action.type == "list_next_page") {
         if (!selectable_list || !selectable_list->waiting_for_page) return std::unexpected("selectable list is not loading a page");
         selectable_list->append_page(selectable_page(action.text, action.amount != 0));
         selection_effect = SelectableListEffect::NONE;
+    } else if (action.type == "list_previous_page") {
+        if (!selectable_list || !selectable_list->waiting_for_page) return std::unexpected("selectable list is not loading a page");
+        selectable_list->prepend_page(selectable_page(action.text, action.amount != 0));
+        selection_effect = SelectableListEffect::NONE;
+    } else if (action.type == "list_replace") {
+        if (!selectable_list || !selectable_list->waiting_for_query) return std::unexpected("selectable list is not replacing results");
+        selectable_list->replace_page(selectable_page(action.text, action.amount != 0));
+        selection_effect = SelectableListEffect::NONE;
     } else if (action.type == "list_page_error") {
         if (!selectable_list || !selectable_list->waiting_for_page) return std::unexpected("selectable list is not loading a page");
         selectable_list->fail_page(action.text);
+        selection_effect = SelectableListEffect::NONE;
+    } else if (action.type == "list_query_error") {
+        if (!selectable_list || !selectable_list->waiting_for_query) return std::unexpected("selectable list is not replacing results");
+        selectable_list->fail_query(action.text);
         selection_effect = SelectableListEffect::NONE;
     } else if (action.type == "close_list") {
         selectable_list.reset();
@@ -401,6 +444,15 @@ HeadlessSnapshot HeadlessSession::inspect() const {
         for (const auto index : active->filtered) snapshot.picker_visible_ids.push_back(active->items[index].id);
         snapshot.picker_loading = active->loading;
         snapshot.picker_error = active->error;
+    } else if (selectable_list && selectable_list->query_enabled) {
+        snapshot.picker_query = selectable_list->query;
+        snapshot.picker_query_cursor = selectable_list->query_cursor;
+        if (selectable_list->selected_id()) snapshot.picker_highlight_id = std::string(*selectable_list->selected_id());
+        for (const auto &page : selectable_list->pages) {
+            for (const auto &item : page.items) snapshot.picker_visible_ids.push_back(item.id);
+        }
+        snapshot.picker_loading = selectable_list->waiting_for_page || selectable_list->waiting_for_query;
+        snapshot.picker_error = selectable_list->query_error ? selectable_list->query_error : selectable_list->page_error;
     }
     for (const auto &block : screen.transcript.blocks) {
         snapshot.blocks.push_back({.id = block.id,

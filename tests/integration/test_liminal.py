@@ -1076,6 +1076,99 @@ def test_command_menu_and_model_picker(tmp_path):
         os.close(slave)
 
 
+def test_full_screen_resume_query_edit_and_clear(openai_mock, tmp_path):
+    """The full-screen resume picker edits, clears, restores, and cancels its query."""
+    base_url, _ = openai_mock
+    env = terminal_test_environment(
+        tmp_path, base_url=base_url, api_key=mock_openai.API_KEY
+    )
+    seeded = subprocess.run(
+        [str(BINARY)],
+        input="seed the resume picker\n/quit\n",
+        env=env,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=TIMEOUT,
+        check=False,
+    )
+    assert seeded.returncode == 0, seeded.stderr
+
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "catalog.sqlite3") as database:
+        database.execute("UPDATE sessions SET title='Picker Needle'")
+
+    if os.name == "nt":
+        from windows_pty import ConPtyProcess
+
+        process = ConPtyProcess([BINARY], cwd=REPO_ROOT, env=env, columns=80, rows=24)
+        output = bytearray()
+        try:
+            read_conpty_until(process, output, PROMPT_MARKER, 10)
+            process.write(b"/resume\r")
+            read_conpty_until(process, output, b"Resume session", 5)
+            read_conpty_until(process, output, b"Search:", 5)
+            process.write(b"\x1b[200~Picker Needle\n\x1b[201~")
+            read_conpty_until_fresh(process, output, b"Picker Needle", 5)
+            process.write(b"\x7f" * len("Picker Needle"))
+            process.write(b"missing")
+            read_conpty_until_fresh(process, output, b"No matching sessions", 5)
+            process.write(b"\x7f" * len("missing"))
+            read_conpty_until_fresh(process, output, b"Picker Needle", 5)
+            process.write(b"\x1b")
+            read_conpty_until_fresh(process, output, PROMPT_MARKER, 5)
+            process.write(b"/quit\r")
+            assert process.wait(10) == 0
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.close()
+        return
+
+    import fcntl
+    import pty
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    process = subprocess.Popen(
+        [str(BINARY)],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+        cwd=REPO_ROOT,
+        close_fds=True,
+    )
+    output = bytearray()
+    try:
+        read_pty_until(master, output, PROMPT_MARKER, 10)
+        os.write(master, b"/resume\r")
+        read_pty_until(master, output, b"Resume session", 5)
+        read_pty_until(master, output, b"Search:", 5)
+        os.write(master, b"\x1b[200~Picker Needle\n\x1b[201~")
+        read_pty_until_fresh(master, output, b"Picker Needle", 5)
+        os.write(master, b"\x7f" * len("Picker Needle"))
+        os.write(master, b"missing")
+        read_pty_until_fresh(master, output, b"No matching sessions", 5)
+        os.write(master, b"\x7f" * len("missing"))
+        read_pty_until_fresh(master, output, b"Picker Needle", 5)
+        os.write(master, b"\x1b")
+        read_pty_until_fresh(master, output, PROMPT_MARKER, 5)
+        os.write(master, b"/quit\r")
+        assert process.wait(timeout=10) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        os.close(master)
+        os.close(slave)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX PTY stream-routing test")
 def test_redirected_stdout_keeps_interactive_tui_on_stderr(tmp_path):
     """A redirected data stream must not disable terminal input or emit VT."""

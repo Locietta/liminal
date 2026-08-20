@@ -917,15 +917,7 @@ void SessionScreen::picker_fail(std::string detail) {
 
 void SessionScreen::picker_query_edit(PickerQueryEdit edit, std::string_view text) {
     if (!picker) return;
-    if (edit == PickerQueryEdit::INSERT) {
-        std::string printable;
-        for (const char character : text) {
-            if (static_cast<unsigned char>(character) >= 0x20) printable += character;
-        }
-        picker->edit_query(edit, printable);
-        return;
-    }
-    picker->edit_query(edit);
+    picker->edit_query(edit, text);
 }
 
 void SessionScreen::mark_editing() {

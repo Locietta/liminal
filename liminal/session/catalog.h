@@ -37,12 +37,16 @@ struct SessionPageCursor {
 
 struct SessionPageQuery {
     std::string workspace_key;
+    std::string query;
+    std::optional<SessionId> preferred_id;
+    std::optional<SessionPageCursor> before;
     std::optional<SessionPageCursor> after;
     usize limit = 50;
 };
 
 struct SessionPage {
     std::vector<SessionSummary> sessions;
+    std::optional<SessionPageCursor> preceding;
     std::optional<SessionPageCursor> continuation;
 };
 
