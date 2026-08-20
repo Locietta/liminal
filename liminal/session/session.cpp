@@ -45,6 +45,11 @@ std::string to_string(SessionId id) {
     return boost::uuids::to_string(uuid);
 }
 
+std::string session_preview(std::string_view text) {
+    constexpr usize k_preview_limit = 240;
+    return bounded_utf8(text, k_preview_limit);
+}
+
 i64 unix_milliseconds_now() noexcept {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
@@ -81,10 +86,7 @@ EntryId Session::append(EntryPayload payload) {
 TaskId Session::start_task(std::string text, std::optional<i64> admission_time_ms) {
     const TaskId task_id{.value = next_task_id++};
     metadata.updated_at_ms = std::max(metadata.updated_at_ms, admission_time_ms.value_or(unix_milliseconds_now()));
-    if (metadata.preview.empty()) {
-        constexpr usize k_preview_limit = 240;
-        metadata.preview = bounded_utf8(text, k_preview_limit);
-    }
+    if (metadata.preview.empty()) metadata.preview = session_preview(text);
     append(TaskStarted{.id = task_id, .text = std::move(text)});
     return task_id;
 }

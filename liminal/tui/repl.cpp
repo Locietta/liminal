@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cstdlib>
 #include <cstdio>
 #include <deque>
 #include <optional>
@@ -29,6 +28,7 @@
 #include <liminal/tui/compact_picker_dialog.h>
 #include <liminal/tui/external_editor.h>
 #include <liminal/tui/model_picker.h>
+#include <liminal/tui/platform_paths.h>
 #include <liminal/tui/selectable_list_dialog.h>
 #include <liminal/tui/session_commands.h>
 #include <liminal/session/persistence.h>
@@ -67,7 +67,6 @@ struct SessionFailure {
 SessionFooter session_footer(const Agent &agent) {
     const auto *persistence = agent.session.persistence_queue();
     SessionFooter footer{
-        .workspace_path = agent.tools->working_directory.string(),
         .tokens_used = agent.session.tokens_used(),
         .not_saving = persistence && persistence->status().degraded,
     };
@@ -81,6 +80,15 @@ SessionFooter session_footer(const Agent &agent) {
     const auto remaining = std::clamp(*manifest->usage.remaining_input_tokens, i64{0}, budget);
     footer.context_left_percent = static_cast<u32>(remaining * 100 / budget);
     return footer;
+}
+
+SessionHeader session_header(const Agent &agent, std::string workspace_path, std::optional<std::string> home_directory) {
+    return {
+        .workspace_path = std::move(workspace_path),
+        .home_directory = std::move(home_directory),
+        .explicit_title = agent.session.metadata.title,
+        .prompt_preview = agent.session.metadata.preview,
+    };
 }
 
 struct PromptQueue {
@@ -893,6 +901,18 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
 
 Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &models, application::SessionCoordinator *sessions,
                    std::vector<Block> initial_transcript, std::vector<std::string> startup_notices) {
+    auto workspace_path = native_path_utf8(agent.tools->working_directory);
+    if (!workspace_path) {
+        std::fprintf(stderr, "cannot encode workspace path: %s\n", std::string(workspace_path.error().message()).c_str());
+        co_return 1;
+    }
+    auto home_directory = user_home_directory_utf8();
+    if (!home_directory) {
+        std::fprintf(stderr, "cannot resolve user home directory: %s\n", std::string(home_directory.error().message()).c_str());
+        co_return 1;
+    }
+    auto initial_header = session_header(agent, *std::move(workspace_path), *std::move(home_directory));
+
     TerminalSession terminal;
     Pipe pipe;
     const bool input_attached = TerminalSession::attached(0);
@@ -961,7 +981,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
 #endif
 
     if (exit_code == 0) {
-        if (auto error = renderer.banner(agent.model.entry.id, agent.model.reasoning_effort, session_footer(agent))) {
+        if (auto error = renderer.banner(agent.model.entry.id, agent.model.reasoning_effort, initial_header, session_footer(agent))) {
             failure.record("cannot render banner", error, control);
             exit_code = 1;
         } else if (interactive) {

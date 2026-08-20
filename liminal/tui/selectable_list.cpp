@@ -52,6 +52,8 @@ void SelectableList::enable_query(std::string message, std::string label) {
     query_label = std::move(label);
 }
 
+void SelectableList::set_contextual_header(HeaderContent header) { contextual_header = std::move(header); }
+
 void SelectableList::begin_query_load() {
     contract_assert(query_enabled && !waiting_for_page && !waiting_for_query);
     previous_query = query;
@@ -237,7 +239,7 @@ Frame SelectableList::frame(i32 columns, i32 rows) const {
     contract_assert(columns > 0 && rows > 0);
     lighter::check(columns > 0 && rows > 0, "selectable list requires a positive surface size");
     Frame result{.surface = Surface(columns, rows)};
-    result.surface.write(0, 0, title, Style::EMPHASIS);
+    result.surface.write(0, 0, contextual_header ? present_header(*contextual_header, columns) : title, Style::EMPHASIS);
     if (rows == 1) return result;
     i32 first_row = rows > 3 ? 2 : 1;
     if (!description.empty()) result.surface.write(1, 0, description, Style::MUTED);

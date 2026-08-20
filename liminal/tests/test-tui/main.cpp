@@ -16,13 +16,16 @@
 #include <lighter/encoding/utf8.h>
 
 #include <liminal/event.h>
+#include <liminal/session/session.h>
 #include <liminal/tui/clipboard.h>
 #include <liminal/tui/command.h>
 #include <liminal/tui/compact_picker.h>
 #include <liminal/tui/compact_picker_dialog.h>
 #include <liminal/tui/model_picker.h>
+#include <liminal/tui/platform_paths.h>
 #include <liminal/tui/headless.h>
 #include <liminal/tui/external_editor.h>
+#include <liminal/tui/header_presentation.h>
 #include <liminal/tui/rich_text.h>
 #include <liminal/tui/selectable_list_dialog.h>
 #include <liminal/tui/session_commands.h>
@@ -173,10 +176,9 @@ void check_surface_cells_and_encoding() {
                 encoded_diff.contains("\x1b[0;1;38;2;116;199;236m@"),
             "diff styles must use fixed truecolor so brightness never depends on terminal ANSI definitions");
 
-    tui::Frame footer_palette{.surface = tui::Surface(4, 1)};
+    tui::Frame footer_palette{.surface = tui::Surface(3, 1)};
     constexpr tui::Style footer_styles[] = {
         tui::Style::FOOTER_MODEL,
-        tui::Style::FOOTER_WORKSPACE,
         tui::Style::FOOTER_CONTEXT,
         tui::Style::FOOTER_TOKENS,
     };
@@ -184,9 +186,9 @@ void check_surface_cells_and_encoding() {
         footer_palette.surface.write(0, static_cast<i32>(index), "F", footer_styles[index]);
     }
     const auto encoded_footer = tui::encode_frame(footer_palette);
-    require(encoded_footer.contains("\x1b[0;22;38;2;249;226;175mF") && encoded_footer.contains("\x1b[0;22;38;2;166;227;161mF") &&
-                encoded_footer.contains("\x1b[0;22;38;2;250;179;135mF") && encoded_footer.contains("\x1b[0;22;38;2;137;180;250mF"),
-            "footer metadata fields must encode four distinct high-luminance colors");
+    require(encoded_footer.contains("\x1b[0;22;38;2;249;226;175mF") && encoded_footer.contains("\x1b[0;22;38;2;250;179;135mF") &&
+                encoded_footer.contains("\x1b[0;22;38;2;137;180;250mF"),
+            "footer metadata fields must encode three distinct high-luminance colors");
 
     tui::Frame shimmer_palette{.surface = tui::Surface(2, 1)};
     shimmer_palette.surface.write(0, 0, "S", tui::Style::WORKING_BASE);
@@ -222,6 +224,164 @@ void check_surface_cells_and_encoding() {
     require(!tui::encode_frame(forged).contains("X\x1b[2J"), "the frame encoder must defend against directly forged cell text");
     require(tui::sanitize_terminal_text("line\n\x1b[2J", true) == "line\n\xef\xbf\xbd[2J",
             "plain output must preserve layout while replacing terminal controls");
+}
+
+void check_header_identity_and_path_presentation() {
+    tui::SessionHeader identity{.workspace_path = "/workspace", .explicit_title = "Explicit title", .prompt_preview = "Preview"};
+    require(tui::resolve_session_title(identity) == "Explicit title", "an explicit name must win over the prompt preview");
+    identity.explicit_title.reset();
+    require(tui::resolve_session_title(identity) == "Preview", "the first prompt preview must identify an unnamed session");
+    identity.prompt_preview.clear();
+    require(tui::resolve_session_title(identity) == "New session", "an empty session must use the stable fallback title");
+    identity.prompt_preview = "  first line\nsecond\tpart\r\nthird\x1b[2J  ";
+    require(tui::resolve_session_title(identity) == "first line second part third�[2J",
+            "preview projection must collapse layout whitespace and expose terminal controls safely");
+
+    const auto windows = std::string("D:\\.Project\\liminal\\src");
+    require(tui::present_workspace_path("D:\\", std::nullopt, 80) == "D:\\", "a Windows drive root must remain intact");
+    require(tui::present_workspace_path(windows, std::nullopt, 80) == windows, "a fitting Windows drive path must remain full");
+    require(tui::present_workspace_path(windows, std::nullopt, tui::text_width("D:\\.P\\l\\src")) == "D:\\.P\\l\\src",
+            "a Windows drive path must use fish-like hidden and intermediate components");
+    require(tui::present_workspace_path(windows, std::nullopt, tui::text_width("D:\\…\\src")) == "D:\\…\\src",
+            "final truncation must preserve the drive root and final component when they fit");
+    require(tui::present_workspace_path(windows, std::nullopt, 0).empty(), "a zero path budget must produce no cells");
+    require(tui::present_workspace_path(windows, std::nullopt, 1) == "…", "an impossibly narrow drive path must clip deterministically");
+
+    const auto posix = std::string("/home/alice/projects/liminal");
+    const auto posix_home = std::optional<std::string>("/home/alice");
+    require(tui::present_workspace_path("/", std::nullopt, 80) == "/", "a POSIX filesystem root must remain intact");
+    require(tui::present_workspace_path(posix, posix_home, 80) == "~/projects/liminal",
+            "a POSIX home descendant must use a tilde in its full representation");
+    require(tui::present_workspace_path(posix, posix_home, tui::text_width("~/p/liminal")) == "~/p/liminal",
+            "a home-relative POSIX path must retain slash separators when fish-shortened");
+    require(tui::present_workspace_path("/home/alice", posix_home, 80) == "~", "the exact home directory must project to a tilde");
+    require(tui::present_workspace_path("/home/alice2/project", posix_home, 80) == "/home/alice2/project",
+            "home containment must compare complete path components");
+    require(tui::present_workspace_path("/tmp/a\\b/project", std::nullopt, 80) == "/tmp/a\\b/project",
+            "an absolute POSIX path must retain a backslash inside a legal component");
+    require(tui::present_workspace_path("/tmp/project/a\\b", std::nullopt, tui::text_width("/t/p/a\\b")) == "/t/p/a\\b",
+            "fish shortening must keep a final POSIX component containing a backslash and retain slash separators");
+    require(tui::present_workspace_path("/home/a\\b/project", std::optional<std::string>("/home/a\\b"), 80) == "~/project",
+            "POSIX home containment must treat a backslash as component data");
+    require(tui::present_workspace_path("/very/long/liminal", std::nullopt, tui::text_width("/…/liminal")) == "/…/liminal",
+            "a truncated POSIX path must preserve its root and fitting final component");
+
+    const auto windows_home = std::optional<std::string>("C:\\Users\\Alice");
+    require(tui::present_workspace_path("c:\\users\\alice\\Project\\liminal", windows_home, 80) == "~\\Project\\liminal",
+            "Windows home containment must be component-aware and ASCII case-insensitive");
+    require(tui::present_workspace_path("C:/Users/Alice/Project/liminal", std::optional<std::string>("c:/users/alice"),
+                                        tui::text_width("~/P/liminal")) == "~/P/liminal",
+            "drive paths written with conventional forward slashes must preserve those separators");
+
+    const auto unicode_path = std::string("C:\\éclair\\.项目\\路径\\👩‍💻-app");
+    const auto unicode_fish = std::string("C:\\é\\.项\\路\\👩‍💻-app");
+    require(tui::present_workspace_path(unicode_path, std::nullopt, tui::text_width(unicode_fish)) == unicode_fish,
+            "fish shortening must retain combining, hidden-wide, wide, and emoji ZWJ graphemes intact");
+    const auto unicode_truncated = tui::present_workspace_path(unicode_path, std::nullopt, 10);
+    require(unicode_truncated == "C:\\👩‍💻-app" && tui::text_width(unicode_truncated) <= 10 &&
+                lighter::encoding::utf8::is_valid(unicode_truncated),
+            "cell truncation must preserve a fitting final emoji component as complete grapheme clusters");
+
+    tui::HeadlessSession session(80, 10);
+    auto ok = [&](const tui::HeadlessAction &action) { require(session.apply(action).has_value(), "headless header action must apply"); };
+    ok({.type = "set_header", .text = "/home/alice/projects/liminal", .preview = "First prompt", .home_directory = "/home/alice"});
+    auto snapshot = session.inspect();
+    require(snapshot.workspace_path == "/home/alice/projects/liminal" && snapshot.session_title == "First prompt" &&
+                snapshot.visible_text.front() == "liminal · ~/projects/liminal · First prompt",
+            "the normal headless session must retain semantic identity and render its contextual header");
+
+    ok({.type = "set_session_title", .preview = "First prompt", .title = "Named session"});
+    snapshot = session.inspect();
+    require(snapshot.session_title == "Named session" && snapshot.visible_text.front().ends_with(" · Named session"),
+            "an explicit rename must refresh the visible header immediately");
+    ok({.type = "set_session_title", .preview = "First prompt"});
+    require(session.inspect().visible_text.front().ends_with(" · First prompt"),
+            "clearing an explicit name must restore the preview immediately");
+    ok({.type = "set_header", .text = "D:\\other\\workspace", .preview = "Switched preview", .title = "Switched session"});
+    snapshot = session.inspect();
+    require(snapshot.workspace_path == "D:\\other\\workspace" && snapshot.session_title == "Switched session" &&
+                snapshot.visible_text.front() == "liminal · D:\\other\\workspace · Switched session",
+            "replacing semantic session identity must refresh both workspace and title");
+
+    const auto narrow_emoji_header =
+        tui::present_header({.identity = "liminal",
+                             .session = {.workspace_path = "/workspace", .explicit_title = "👩‍💻 develops with élan"},
+                             .include_session_title = true},
+                            25);
+    require(tui::text_width(narrow_emoji_header) <= 25 && lighter::encoding::utf8::is_valid(narrow_emoji_header) &&
+                !narrow_emoji_header.ends_with("‍"),
+            "narrow title degradation must stay cell-bounded and never split a combining or ZWJ grapheme");
+
+    tui::HeadlessSession first_prompt(60, 8);
+    require(first_prompt.apply({.type = "set_header", .text = "D:\\work"}).has_value(), "new-session identity must apply");
+    require(first_prompt.inspect().visible_text.front().ends_with(" · New session"), "a new screen must show the fallback title");
+    require(first_prompt.apply({.type = "submit", .text = "multiline\npreview\ttext"}).has_value(), "first prompt must submit");
+    require(first_prompt.inspect().visible_text.front().ends_with(" · multiline preview text"),
+            "the first submitted prompt must establish the header preview without waiting for another frame cycle");
+
+    const auto long_prompt = std::string(239, 'a') + "👩‍💻" + std::string(4096, 'z');
+    tui::HeadlessSession bounded_preview(80, 8);
+    require(bounded_preview.apply({.type = "set_header", .text = "/workspace"}).has_value(), "bounded-preview identity must apply");
+    require(bounded_preview.apply({.type = "submit", .text = long_prompt}).has_value(), "a large first prompt must submit");
+    const auto durable_preview = session::session_preview(long_prompt);
+    require(bounded_preview.screen.header.prompt_preview == durable_preview && durable_preview.size() == 239,
+            "live and durable first-prompt state must use the identical 240-byte UTF-8 boundary");
+
+    const auto unicode_native =
+#ifdef _WIN32
+        std::filesystem::path(u8"C:\\用户\\项目");
+    constexpr std::string_view unicode_native_text = "C:\\用户\\项目";
+#else
+        std::filesystem::path(u8"/tmp/用户/项目");
+    constexpr std::string_view unicode_native_text = "/tmp/用户/项目";
+#endif
+    const auto encoded_native = tui::native_path_utf8(unicode_native);
+    require(encoded_native && *encoded_native == unicode_native_text && lighter::encoding::utf8::is_valid(*encoded_native),
+            "native non-ASCII paths must cross the presentation boundary as valid UTF-8");
+    const auto encoded_home = tui::user_home_directory_utf8();
+    require(encoded_home && (!*encoded_home || lighter::encoding::utf8::is_valid(**encoded_home)),
+            "the optional native home directory must cross the presentation boundary as valid UTF-8");
+
+    tui::ConsoleRenderer state_only_renderer;
+    state_only_renderer.redraw_pending = false;
+    state_only_renderer.set_session_title("Persisted title", "Preview");
+    require(!state_only_renderer.redraw_pending && state_only_renderer.screen.header.explicit_title == "Persisted title",
+            "session title synchronization must mutate screen state without creating a pre-persistence redraw");
+
+    tui::HeadlessSession resume(80, 10);
+    resume.selectable_list.emplace("unused", "No sessions", tui::SelectableListPage{});
+    resume.selectable_list->set_contextual_header(
+        {.identity = "Resume Session", .session = {.workspace_path = posix, .home_directory = posix_home}});
+    require(resume.inspect().visible_text.front() == "Resume Session · ~/projects/liminal",
+            "the resume list must render its workspace-aware contextual header");
+
+    tui::HeadlessSession history(80, 10);
+    history.selectable_list.emplace("unused", "No checkpoints", tui::SelectableListPage{});
+    history.selectable_list->set_contextual_header(
+        {.identity = "Conversation History",
+         .session = {.workspace_path = posix, .home_directory = posix_home, .explicit_title = "Named session"},
+         .include_session_title = true});
+    require(history.inspect().visible_text.front() == "Conversation History · ~/projects/liminal · Named session",
+            "the conversation-history list must render workspace and session identity");
+
+    tui::HeadlessSession browsing(36, 8);
+    require(browsing.apply({.type = "set_header", .text = posix, .preview = "Resize title", .home_directory = posix_home}).has_value(),
+            "browsing identity must apply");
+    for (i32 index = 0; index < 10; ++index) {
+        require(browsing.apply({.type = "notice", .text = "line-" + std::to_string(index)}).has_value(),
+                "browsing fixture must append transcript rows");
+    }
+    require(browsing.apply({.type = "page_up"}).has_value(), "browsing fixture must leave the tail");
+    const auto anchor = browsing.inspect().anchor;
+    require(anchor.has_value(), "PageUp must establish a semantic anchor before resize");
+    require(browsing.apply({.type = "resize", .columns = 24, .rows = 8}).has_value(), "browsing resize must apply");
+    const auto resized = browsing.inspect();
+    require(resized.anchor == anchor && tui::text_width(resized.visible_text.front()) <= resized.columns,
+            "header reprojection on resize must preserve the browsing anchor and visible-cell bounds");
+    require(browsing.apply({.type = "follow_tail"}).has_value(), "the fixture must return to tail following");
+    const auto tail_anchor = browsing.inspect().anchor;
+    require(!tail_anchor && browsing.apply({.type = "resize", .columns = 48, .rows = 8}).has_value() && !browsing.inspect().anchor,
+            "tail-following resize must remain at the tail while refreshing the header");
 }
 
 void check_composer_editing() {
@@ -299,21 +459,23 @@ void check_multiline_navigation_history_and_projection() {
     tui::SessionScreen visual;
     visual.resize({40, 10});
     visual.set_model("test-model", std::optional<std::string>("high"));
-    visual.set_footer({.workspace_path = "D:\\code\\liminal", .context_left_percent = 54, .tokens_used = 1'184'000});
+    visual.set_header({.workspace_path = "D:\\code\\liminal"});
+    visual.set_footer({.context_left_percent = 54, .tokens_used = 1'184'000});
     const auto empty = visual.frame();
     const auto row_uses_style = [&empty](i32 row, tui::Style style) {
         const auto begin = empty.surface.cells.begin() + static_cast<isize>(row * empty.surface.columns);
         return std::ranges::all_of(begin, begin + empty.surface.columns, [style](const tui::Cell &cell) { return cell.style == style; });
     };
-    require(empty.surface.row_text(0) == "liminal", "the header must keep product identity separate from input metadata");
+    require(empty.surface.row_text(0) == "liminal · D:\\code\\liminal · New session",
+            "the header must combine product, workspace, and resolved session title");
     require(empty.surface.row_text(6).empty() && empty.surface.row_text(7) == "›" && empty.surface.row_text(8).empty() &&
                 row_uses_style(6, tui::Style::COMPOSER) && row_uses_style(7, tui::Style::COMPOSER) &&
                 row_uses_style(8, tui::Style::COMPOSER),
             "an empty composer must render as a padded three-row input surface");
     require(empty.cursor.row == 7 && empty.cursor.column == 2, "the composer cursor must begin after its concise prompt marker");
-    require(empty.surface.row_text(9) == "test-model high · D:\\code\\liminal · Cont" &&
+    require(empty.surface.row_text(9) == "test-model high · Context 54% left · 1.1" &&
                 empty.surface.cells[static_cast<usize>(9 * empty.surface.columns)].style == tui::Style::FOOTER_MODEL,
-            "the footer must place model, workspace, context, and usage metadata below the composer");
+            "the footer must place model, context, and usage metadata below the composer");
 
     visual.resize({80, 10});
     const auto wide_footer = visual.frame();
@@ -324,11 +486,12 @@ void check_multiline_navigation_history_and_projection() {
         if (byte_offset == std::string::npos) return false;
         return wide_footer.surface.cells[footer_row + static_cast<usize>(tui::text_width(row.substr(0, byte_offset)))].style == style;
     };
-    require(wide_footer.surface.row_text(9) == "test-model high · D:\\code\\liminal · Context 54% left · 1.18M used",
-            "the footer must format all four session metadata items compactly");
-    require(footer_style("test-model high", tui::Style::FOOTER_MODEL) && footer_style("D:\\code\\liminal", tui::Style::FOOTER_WORKSPACE) &&
-                footer_style("Context 54% left", tui::Style::FOOTER_CONTEXT) && footer_style("1.18M used", tui::Style::FOOTER_TOKENS),
+    require(wide_footer.surface.row_text(9) == "test-model high · Context 54% left · 1.18M used",
+            "the footer must format the remaining three session metadata items compactly");
+    require(footer_style("test-model high", tui::Style::FOOTER_MODEL) && footer_style("Context 54% left", tui::Style::FOOTER_CONTEXT) &&
+                footer_style("1.18M used", tui::Style::FOOTER_TOKENS),
             "each footer metadata item must use its own semantic color");
+    require(!wide_footer.surface.row_text(9).contains("D:\\code\\liminal"), "the workspace must no longer have a footer rendering path");
 
     visual.footer.not_saving = true;
     visual.resize({100, 10});
@@ -1011,7 +1174,7 @@ void check_scroll_resize_state() {
 
     const auto tail = screen.frame();
     require(frame_text(tail).contains("line-8"), "following viewport must show transcript tail");
-    require(tail.surface.row_text(0) == "liminal", "the header must retain concise product identity");
+    require(tail.surface.row_text(0).starts_with("liminal ·"), "the responsive header must retain recognizable product identity");
 
     screen.move_up();
     require(!screen.anchor.has_value(), "Up at a composer boundary must not scroll the transcript");
@@ -1729,6 +1892,7 @@ void check_headless_resize_and_markup_stress() {
 
 i32 run_all(std::string_view executable) {
     check_surface_cells_and_encoding();
+    check_header_identity_and_path_presentation();
     check_composer_editing();
     check_multiline_navigation_history_and_projection();
     check_rich_output_and_concurrent_tools();

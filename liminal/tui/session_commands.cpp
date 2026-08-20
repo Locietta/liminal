@@ -43,6 +43,7 @@ Result<void> open_session_picker(SelectableListDialog &dialog, ConsoleRenderer &
     auto preceding = first->preceding;
     auto continuation = first->continuation;
     SelectableList list(std::move(title), std::move(empty_message), picker_page(*first, now_ms));
+    list.set_contextual_header({.identity = "Resume Session", .session = renderer.screen.header});
     list.enable_query("No matching sessions in this workspace");
     SelectableListDialog::LoadPage load = [&sessions, workspace_key = std::move(workspace_key), preceding, continuation,
                                            loaded_query = std::string{},
@@ -162,9 +163,10 @@ SelectableListPage history_page_impl(const std::vector<session::ConversationChec
     return page;
 }
 
-SelectableList history_list(const std::vector<session::ConversationCheckpoint> &checkpoints) {
+SelectableList history_list(const std::vector<session::ConversationCheckpoint> &checkpoints, const SessionHeader &header) {
     auto page = history_page_impl(checkpoints, {});
     SelectableList list("Conversation history", "No completed conversation checkpoints", std::move(page));
+    list.set_contextual_header({.identity = "Conversation History", .session = header, .include_session_title = true});
     list.description = "Inspect safe completed boundaries; selecting one does not change history.";
     list.enable_query("No matching conversation checkpoints");
     return list;
@@ -212,6 +214,7 @@ lighter::Task<lighter::Error> finish_switch(Agent &agent, ConsoleRenderer &rende
     auto prepared = std::move(switching).take_target();
     if (auto error = renderer.load_transcript(std::move(prepared.transcript))) co_return error;
     agent.replace_session(std::move(prepared.model), std::move(prepared.session));
+    renderer.set_session_title(agent.session.metadata.title, agent.session.metadata.preview);
     if (auto error = renderer.render(ModelSelected{.name = agent.model.entry.id, .effort = agent.model.reasoning_effort})) co_return error;
     for (const auto &notice : prepared.notices) {
         if (auto error = renderer.notice(notice)) co_return error;
@@ -247,6 +250,7 @@ lighter::Task<lighter::Error> publish_and_switch_to_fork(Agent &agent, ConsoleRe
     auto prepared = *std::move(published);
     if (auto error = renderer.load_transcript(std::move(prepared.transcript))) co_return error;
     agent.replace_session(std::move(prepared.model), std::move(prepared.session));
+    renderer.set_session_title(agent.session.metadata.title, agent.session.metadata.preview);
     if (auto error = renderer.render(ModelSelected{.name = agent.model.entry.id, .effort = agent.model.reasoning_effort})) co_return error;
     for (const auto &notice : prepared.notices) {
         if (auto error = renderer.notice(notice)) co_return error;
@@ -292,6 +296,7 @@ lighter::Error name_current_session(Agent &agent, ConsoleRenderer &renderer, std
     agent.session.set_title(std::move(title));
     auto *queue = agent.session.persistence_queue();
     auto saved = queue ? queue->flush() : Result<void>{};
+    renderer.set_session_title(agent.session.metadata.title, agent.session.metadata.preview);
     if (saved && queue && queue->status().catalog_degraded) {
         return renderer.notice("[Session name updated; catalog refresh pending: " + queue->status().catalog_detail + "]\n");
     }
@@ -308,7 +313,7 @@ lighter::Task<lighter::Error> navigate_conversation(Agent &agent, application::S
                                                                        std::optional<std::string_view>) -> Result<SelectableListPage> {
         return conversation_history_page(checkpoints, query);
     };
-    if (auto error = dialog.begin(renderer, history_list(*checkpoints), std::move(load))) co_return error;
+    if (auto error = dialog.begin(renderer, history_list(*checkpoints, renderer.screen.header), std::move(load))) co_return error;
     auto selected = co_await dialog.next();
     if (!selected) co_return lighter::Error{};
     auto checkpoint = parse_checkpoint_choice(*selected);

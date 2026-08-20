@@ -13,6 +13,7 @@
 
 #include <liminal/event.h>
 #include <liminal/tui/compact_picker.h>
+#include <liminal/tui/header_presentation.h>
 #include <liminal/tui/surface.h>
 #include <liminal/tui/transcript.h>
 
@@ -111,7 +112,6 @@ struct CachedBlockLayout {
 };
 
 struct SessionFooter {
-    std::string workspace_path = ".";
     std::optional<u32> context_left_percent;
     u64 tokens_used = 0;
     bool not_saving = false;
@@ -158,6 +158,8 @@ struct SessionScreen {
 
     void resize(lighter::TerminalSize next) noexcept;
     void set_model(std::string_view name, const std::optional<std::string> &effort);
+    void set_header(SessionHeader next);
+    void set_session_title(std::optional<std::string> explicit_title, std::string prompt_preview);
     void set_footer(SessionFooter next);
     void show_status(std::string text);
     void apply(const Event &event);
@@ -226,6 +228,7 @@ struct SessionScreen {
     PromptHistory prompt_history;
     std::string model;
     std::optional<std::string> effort;
+    SessionHeader header;
     SessionFooter footer;
     std::optional<std::string> transient_status;
     CommandMenu command_menu;

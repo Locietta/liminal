@@ -9,6 +9,7 @@
 
 #include <liminal/tui/surface.h>
 #include <liminal/tui/picker_query.h>
+#include <liminal/tui/header_presentation.h>
 
 namespace liminal::tui {
 
@@ -58,6 +59,7 @@ struct SelectableList {
     SelectableList(std::string title, std::string empty_message, SelectableListPage first_page);
 
     void enable_query(std::string no_match_message, std::string label = "Search");
+    void set_contextual_header(HeaderContent header);
     void begin_query_load();
     SelectableListEffect apply(SelectableListAction action);
     SelectableListEffect edit_query(PickerQueryEdit edit, std::string_view text = {});
@@ -70,6 +72,7 @@ struct SelectableList {
     Frame frame(i32 columns, i32 rows) const;
 
     std::string title;
+    std::optional<HeaderContent> contextual_header;
     std::string description;
     std::string empty_message;
     std::string no_match_message;

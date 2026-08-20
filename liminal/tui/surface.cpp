@@ -55,7 +55,6 @@ std::string_view style_sequence(Style style) {
         case Style::WORKING_BRIGHT: return "\x1b[0;22;38;2;186;194;222m";
         case Style::WORKING_PEAK: return "\x1b[0;22;38;2;205;214;244m";
         case Style::FOOTER_MODEL: return "\x1b[0;22;38;2;249;226;175m";
-        case Style::FOOTER_WORKSPACE: return "\x1b[0;22;38;2;166;227;161m";
         case Style::FOOTER_CONTEXT: return "\x1b[0;22;38;2;250;179;135m";
         case Style::FOOTER_TOKENS: return "\x1b[0;22;38;2;137;180;250m";
     }

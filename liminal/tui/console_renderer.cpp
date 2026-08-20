@@ -73,12 +73,14 @@ lighter::Error ConsoleRenderer::render(const Event &event) {
     return render_plain(event);
 }
 
-lighter::Error ConsoleRenderer::banner(std::string_view model, const std::optional<std::string> &effort, const SessionFooter &footer) {
+lighter::Error ConsoleRenderer::banner(std::string_view model, const std::optional<std::string> &effort, const SessionHeader &header,
+                                       const SessionFooter &footer) {
     if (terminal) {
         auto current_size = terminal->size();
         if (!current_size) return current_size.error();
         screen.resize(*current_size);
         screen.set_model(model, effort);
+        screen.set_header(header);
         screen.set_footer(footer);
         if (auto error = redraw()) return error;
         if (!mirror_plain_output) return {};
@@ -88,6 +90,10 @@ lighter::Error ConsoleRenderer::banner(std::string_view model, const std::option
         selection += "@" + plain_text(*effort);
     }
     return write_stdout("liminal - model: " + selection + " (tools run unsandboxed with your privileges)\n");
+}
+
+void ConsoleRenderer::set_session_title(std::optional<std::string> explicit_title, std::string prompt_preview) {
+    screen.set_session_title(std::move(explicit_title), std::move(prompt_preview));
 }
 
 lighter::Error ConsoleRenderer::prompt(std::string_view model, const std::optional<std::string> &effort, const SessionFooter &footer) {

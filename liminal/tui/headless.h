@@ -21,7 +21,10 @@ struct HeadlessAction {
     std::string call_id;
     std::string name;
     std::string command;
+    std::string preview;
     std::optional<std::string> effort;
+    std::optional<std::string> home_directory;
+    std::optional<std::string> title;
     i32 columns = 0;
     i32 rows = 0;
     i32 amount = 0;
@@ -43,6 +46,8 @@ struct SnapshotBlock {
 struct SnapshotAnchor {
     u64 block_id = 0;
     usize source_offset = 0;
+
+    friend bool operator==(const SnapshotAnchor &, const SnapshotAnchor &) = default;
 };
 
 struct SnapshotCursor {
@@ -70,6 +75,8 @@ struct HeadlessSnapshot {
     i32 columns = 0;
     i32 rows = 0;
     std::string model;
+    std::string workspace_path;
+    std::string session_title;
     std::string semantic_state;
     std::string focused_surface = "session";
     std::string selection_effect = "none";

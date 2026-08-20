@@ -45,7 +45,6 @@ enum struct Style {
     WORKING_BRIGHT,
     WORKING_PEAK,
     FOOTER_MODEL,
-    FOOTER_WORKSPACE,
     FOOTER_CONTEXT,
     FOOTER_TOKENS,
 };

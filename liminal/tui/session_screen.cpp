@@ -13,6 +13,7 @@
 
 #include <liminal/tui/command.h>
 #include <liminal/tui/rich_text.h>
+#include <liminal/session/session.h>
 #include <liminal/tui/syntax_highlight.h>
 
 namespace liminal::tui {
@@ -692,6 +693,13 @@ void SessionScreen::set_model(std::string_view name, const std::optional<std::st
     effort = next_effort;
 }
 
+void SessionScreen::set_header(SessionHeader next) { header = std::move(next); }
+
+void SessionScreen::set_session_title(std::optional<std::string> explicit_title, std::string prompt_preview) {
+    header.explicit_title = std::move(explicit_title);
+    header.prompt_preview = std::move(prompt_preview);
+}
+
 void SessionScreen::set_footer(SessionFooter next) { footer = std::move(next); }
 
 void SessionScreen::show_status(std::string text) { transient_status = std::move(text); }
@@ -710,6 +718,8 @@ void SessionScreen::apply(const Event &event) {
     }
     if (const auto *selected = std::get_if<ModelSelected>(&event)) set_model(selected->name, selected->effort);
     if (std::holds_alternative<PromptSubmitted>(event)) {
+        const auto &submitted = std::get<PromptSubmitted>(event);
+        if (header.prompt_preview.empty()) header.prompt_preview = session::session_preview(submitted.text);
         completed_task_elapsed.reset();
         state = SessionState::WAITING;
     }
@@ -1163,7 +1173,9 @@ Frame SessionScreen::frame() const {
     const auto composer = composer_layout(*this, projected_composer);
     const auto prompt_row = size.rows - (has_footer ? 1 : 0) - composer.rows();
     if (header) {
-        result.surface.write(0, 0, "liminal", Style::EMPHASIS);
+        result.surface.write(0, 0,
+                             present_header({.identity = "liminal", .session = this->header, .include_session_title = true}, size.columns),
+                             Style::EMPHASIS);
     }
 
     const auto rows = visible_rows(*this);
@@ -1193,8 +1205,6 @@ Frame SessionScreen::frame() const {
             result.surface.write(size.rows - 1, 0, status_text, status_style);
         } else {
             auto column = result.surface.write(size.rows - 1, 0, model_selection(*this), Style::FOOTER_MODEL);
-            column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
-            column = result.surface.write(size.rows - 1, column, footer.workspace_path, Style::FOOTER_WORKSPACE);
             column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
             const auto context = footer.context_left_percent ? "Context " + std::to_string(*footer.context_left_percent) + "% left" :
                                                                std::string("Context n/a");

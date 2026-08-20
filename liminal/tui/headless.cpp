@@ -76,7 +76,6 @@ std::string_view name(Style style) {
         case Style::WORKING_BRIGHT: return "working_bright";
         case Style::WORKING_PEAK: return "working_peak";
         case Style::FOOTER_MODEL: return "footer_model";
-        case Style::FOOTER_WORKSPACE: return "footer_workspace";
         case Style::FOOTER_CONTEXT: return "footer_context";
         case Style::FOOTER_TOKENS: return "footer_tokens";
     }
@@ -176,7 +175,9 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     if (action_count >= k_max_actions) return std::unexpected("session action limit exceeded");
     if (action.text.size() > k_max_text_bytes) return std::unexpected("action text limit exceeded");
     const auto action_bytes = action.text.size() + action.call_id.size() + action.name.size() + action.command.size() +
-                              (action.effort ? action.effort->size() : usize{0});
+                              action.preview.size() + (action.effort ? action.effort->size() : usize{0}) +
+                              (action.home_directory ? action.home_directory->size() : usize{0}) +
+                              (action.title ? action.title->size() : usize{0});
     if (text_bytes + action_bytes > k_max_session_text_bytes) return std::unexpected("session text limit exceeded");
     text_bytes += action_bytes;
     ++action_count;
@@ -335,6 +336,13 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
         screen.resize({.columns = action.columns, .rows = action.rows});
     } else if (action.type == "set_model") {
         screen.apply(ModelSelected{.name = action.name, .effort = action.effort});
+    } else if (action.type == "set_header") {
+        screen.set_header({.workspace_path = action.text,
+                           .home_directory = action.home_directory,
+                           .explicit_title = action.title,
+                           .prompt_preview = action.preview});
+    } else if (action.type == "set_session_title") {
+        screen.set_session_title(action.title, action.preview);
     } else if (action.type == "open_list") {
         selectable_list.emplace(action.name.empty() ? "Select" : action.name, action.command.empty() ? "No items" : action.command,
                                 selectable_page(action.text, action.amount != 0));
@@ -420,6 +428,8 @@ HeadlessSnapshot HeadlessSession::inspect() const {
                               .columns = screen.size.columns,
                               .rows = screen.size.rows,
                               .model = screen.model,
+                              .workspace_path = screen.header.workspace_path,
+                              .session_title = resolve_session_title(screen.header),
                               .semantic_state = std::string(name(screen.state)),
                               .focused_surface = selectable_list              ? "selectable_list" :
                                                  screen.model_picker_active() ? "compact_picker" :

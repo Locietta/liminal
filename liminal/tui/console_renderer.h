@@ -22,8 +22,10 @@ struct ConsoleRenderer {
 
     lighter::Error write(std::string_view text);
     lighter::Error render(const Event &event);
-    lighter::Error banner(std::string_view model, const std::optional<std::string> &effort, const SessionFooter &footer);
+    lighter::Error banner(std::string_view model, const std::optional<std::string> &effort, const SessionHeader &header,
+                          const SessionFooter &footer);
     lighter::Error prompt(std::string_view model, const std::optional<std::string> &effort, const SessionFooter &footer);
+    void set_session_title(std::optional<std::string> explicit_title, std::string prompt_preview);
     lighter::Error notice(std::string_view text);
     lighter::Error load_transcript(std::vector<Block> blocks);
     lighter::Error status(std::string_view text);

@@ -1109,7 +1109,7 @@ def test_full_screen_resume_query_edit_and_clear(openai_mock, tmp_path):
         try:
             read_conpty_until(process, output, PROMPT_MARKER, 10)
             process.write(b"/resume\r")
-            read_conpty_until(process, output, b"Resume session", 5)
+            read_conpty_until(process, output, b"Resume Session", 5)
             read_conpty_until(process, output, b"Search:", 5)
             process.write(b"\x1b[200~Picker Needle\n\x1b[201~")
             read_conpty_until_fresh(process, output, b"Picker Needle", 5)
@@ -1148,7 +1148,7 @@ def test_full_screen_resume_query_edit_and_clear(openai_mock, tmp_path):
     try:
         read_pty_until(master, output, PROMPT_MARKER, 10)
         os.write(master, b"/resume\r")
-        read_pty_until(master, output, b"Resume session", 5)
+        read_pty_until(master, output, b"Resume Session", 5)
         read_pty_until(master, output, b"Search:", 5)
         os.write(master, b"\x1b[200~Picker Needle\n\x1b[201~")
         read_pty_until_fresh(master, output, b"Picker Needle", 5)

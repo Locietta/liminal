@@ -6,13 +6,24 @@ Assistant replies use a soft, normal-weight neutral foreground. Markdown heading
 
 Prompts and replies render without `you:` or `assistant:` prefixes. Prompt color, reply typography, ordering, and tool/status rows keep turns visually distinct without redundant role labels.
 
+## Header identity
+
+The normal header shows `liminal · <workspace path> · <session title>`. An explicit `/name` title is used first, followed by a single-line
+preview of the first prompt, then `New session`. Names and previews are made terminal-safe and shortened by complete displayed graphemes, so
+multiline text, combining marks, wide characters, and joined emoji cannot corrupt or overflow the row.
+
+The workspace is shown in full when it fits. Longer paths use fish-like shortening: intermediate components become their first grapheme,
+hidden components retain their leading dot, and the final component remains whole whenever space permits. Tighter widths truncate safely by
+terminal cells. Drive/filesystem roots and the path's slash style are preserved. If the workspace is the user's home directory or beneath it,
+the matching home prefix is shown as `~`.
+
 ## Turn activity
 
-While a turn is active, `• Working…` follows the newest output directly in the transcript, with one blank line after it separating turn activity from the prompt composer. A soft highlight shimmers across the label while its elapsed timer remains muted. When the turn completes, the line becomes a persistent muted `Finished (3s)` summary until the next turn begins and keeps the same trailing separation. It scrolls away naturally while browsing history. Scrolling does not replace the footer's model, workspace, context, and token metadata. Very short terminals drop the blank separator before hiding the activity itself.
+While a turn is active, `• Working…` follows the newest output directly in the transcript, with one blank line after it separating turn activity from the prompt composer. A soft highlight shimmers across the label while its elapsed timer remains muted. When the turn completes, the line becomes a persistent muted `Finished (3s)` summary until the next turn begins and keeps the same trailing separation. It scrolls away naturally while browsing history. Scrolling does not replace the footer's model, context, and token metadata. Very short terminals drop the blank separator before hiding the activity itself.
 
 ## Prompt composer
 
-The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline text aligns with the draft instead of the marker and remains vertically windowed around the cursor when it grows. The footer beneath the composer shows the selected model and effort, workspace path, remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan; browsing and external-editor states replace it when they need attention. On short terminals, decorative padding is removed before transcript or editing space.
+The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline text aligns with the draft instead of the marker and remains vertically windowed around the cursor when it grows. The footer beneath the composer shows the selected model and effort, remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan; browsing and external-editor states replace it when they need attention. On short terminals, decorative padding is removed before transcript or editing space.
 
 ## Slash commands
 
@@ -92,7 +103,7 @@ Drag selection highlights whole screen cells and persists after you release the 
 
 Session catalog commands are available while the agent is idle:
 
-- `/resume` opens recent sessions for the current workspace. Its focused `Search:` row searches the complete workspace catalog by explicit title, first-prompt preview, or canonical full session UUID—even when a match is beyond the pages already shown. Up and Down move one row, PageUp and PageDown move between catalog pages, Enter confirms, and Esc cancels immediately without changing the current session.
+- `/resume` opens recent sessions for the current workspace under `Resume Session · <workspace path>`. Its focused `Search:` row searches the complete workspace catalog by explicit title, first-prompt preview, or canonical full session UUID—even when a match is beyond the pages already shown. Up and Down move one row, PageUp and PageDown move between catalog pages, Enter confirms, and Esc cancels immediately without changing the current session.
 - `/name <title>` names the current session. `/name --clear` returns it to the first-prompt preview.
 
 In the `/resume` and `/history` search rows, printable text and paste insert at the cursor; pasted control characters such as trailing newlines and tabs are ignored. Backspace/Delete remove one grapheme, Ctrl+Backspace/Ctrl+Delete remove a word, Left/Right move by grapheme, Ctrl+Left/Ctrl+Right move by word, and Home/End move to the query boundaries. Clearing the query restores the ordinary ordering and paging. Matching ignores ASCII letter case but compares non-ASCII text exactly, including user-authored titles and prompt text.
@@ -101,7 +112,11 @@ Liminal fully prepares a selected resume target before replacing the current tra
 
 ## Conversation history
 
-`/history` is available while the agent is idle. It opens a tree of completed conversation checkpoints. Rows identify the current append point, its active ancestors, preserved branches, and stable checkpoint-based branch IDs. Its `Search:` row filters the complete checkpoint tree by the untruncated prompt label, full checkpoint ID, task outcome, checkpoint state, branch count, and representative checkpoint/leaf IDs. Matching rows retain their original tree order. Up and Down move between rows, Enter selects, and Esc cancels immediately.
+`/history` is available while the agent is idle. It opens a tree of completed conversation checkpoints under
+`Conversation History · <workspace path> · <session title>`. Rows identify the current append point, its active ancestors, preserved branches,
+and stable checkpoint-based branch IDs. Its `Search:` row filters the complete checkpoint tree by the untruncated prompt label, full checkpoint
+ID, task outcome, checkpoint state, branch count, and representative checkpoint/leaf IDs. Matching rows retain their original tree order. Up
+and Down move between rows, Enter selects, and Esc cancels immediately.
 
 After selecting a checkpoint, choose one of these actions:
 

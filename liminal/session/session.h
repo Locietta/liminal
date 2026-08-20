@@ -29,6 +29,8 @@ struct SessionId {
 SessionId generate_session_id();
 Result<SessionId> parse_session_id(std::string_view text);
 std::string to_string(SessionId id);
+/// Applies the canonical durable first-prompt preview bound.
+std::string session_preview(std::string_view text);
 
 struct EntryId {
     u64 value = 0;
