@@ -77,6 +77,13 @@ struct HeadlessSnapshot {
     std::optional<std::string> effort;
     std::string composer_text;
     usize composer_cursor = 0;
+    bool command_menu_open = false;
+    std::string picker_query;
+    usize picker_query_cursor = 0;
+    std::optional<std::string> picker_highlight_id;
+    std::vector<std::string> picker_visible_ids;
+    bool picker_loading = false;
+    std::optional<std::string> picker_error;
     std::optional<SnapshotAnchor> anchor;
     std::vector<SnapshotBlock> blocks;
     std::vector<std::string> visible_text;

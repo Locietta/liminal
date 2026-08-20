@@ -1,6 +1,7 @@
 #include "surface.h"
 
 #include <algorithm>
+#include <cctype>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -217,6 +218,60 @@ usize next_grapheme_boundary(std::string_view text, usize offset) noexcept {
     if (start == text.size()) return start;
     const auto grapheme = next_grapheme(text, start);
     return start + grapheme.size;
+}
+
+namespace {
+
+bool space_grapheme(std::string_view value) noexcept {
+    return value == "\n" || value == "\r" || value == "\t" || value == " " ||
+           (value.size() == 1 && std::isspace(static_cast<unsigned char>(value.front())) != 0);
+}
+
+bool word_grapheme(std::string_view value) noexcept {
+    if (value.size() != 1) return !space_grapheme(value);
+    const auto character = static_cast<unsigned char>(value.front());
+    return std::isalnum(character) != 0 || character == '_';
+}
+
+} // namespace
+
+usize previous_word_boundary(std::string_view text, usize cursor) noexcept {
+    auto offset = cursor;
+    while (offset > 0) {
+        const auto previous = previous_grapheme_boundary(text, offset);
+        if (!space_grapheme(text.substr(previous, offset - previous))) break;
+        offset = previous;
+    }
+    if (offset == 0) return 0;
+    auto previous = previous_grapheme_boundary(text, offset);
+    const bool word = word_grapheme(text.substr(previous, offset - previous));
+    while (offset > 0) {
+        previous = previous_grapheme_boundary(text, offset);
+        const auto value = text.substr(previous, offset - previous);
+        if (space_grapheme(value) || word_grapheme(value) != word) break;
+        offset = previous;
+    }
+    return offset;
+}
+
+usize next_word_boundary(std::string_view text, usize cursor) noexcept {
+    auto offset = cursor;
+    while (offset < text.size()) {
+        const auto grapheme = next_grapheme(text, offset);
+        const auto value = text.substr(offset, grapheme.size);
+        if (!space_grapheme(value)) break;
+        offset += grapheme.size;
+    }
+    if (offset == text.size()) return offset;
+    auto grapheme = next_grapheme(text, offset);
+    const bool word = word_grapheme(text.substr(offset, grapheme.size));
+    while (offset < text.size()) {
+        grapheme = next_grapheme(text, offset);
+        const auto value = text.substr(offset, grapheme.size);
+        if (space_grapheme(value) || word_grapheme(value) != word) break;
+        offset += grapheme.size;
+    }
+    return offset;
 }
 
 i32 text_width(std::string_view text) noexcept {

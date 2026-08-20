@@ -172,6 +172,46 @@ std::optional<std::string_view> ConsoleRenderer::selectable_list_selection() con
     return selectable_list ? selectable_list->selected_id() : std::nullopt;
 }
 
+lighter::Error ConsoleRenderer::apply_picker_key(PickerKey key, PickerKeyResult &result) {
+    result = screen.apply_picker_key(key);
+    if (result == PickerKeyResult::PASS) return {};
+    return redraw();
+}
+
+bool ConsoleRenderer::compact_surface_active() const noexcept { return screen.compact_surface_active(); }
+
+bool ConsoleRenderer::model_picker_active() const noexcept { return screen.model_picker_active(); }
+
+lighter::Error ConsoleRenderer::open_picker(CompactPicker picker) {
+    screen.open_picker(std::move(picker));
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::close_picker() {
+    screen.close_picker();
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::picker_set_items(std::vector<CompactPickerItem> items) {
+    screen.picker_set_items(std::move(items));
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::picker_fail(std::string detail) {
+    screen.picker_fail(std::move(detail));
+    return redraw();
+}
+
+lighter::Error ConsoleRenderer::picker_query_edit(PickerQueryEdit edit, std::string_view text) {
+    screen.picker_query_edit(edit, text);
+    return redraw();
+}
+
+std::optional<std::string> ConsoleRenderer::picker_selection() const {
+    if (!screen.picker || !screen.picker->highlighted_id()) return std::nullopt;
+    return std::string(*screen.picker->highlighted_id());
+}
+
 lighter::Error ConsoleRenderer::insert(std::string_view text) {
     screen.insert(text);
     return redraw();

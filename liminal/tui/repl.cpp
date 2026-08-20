@@ -26,7 +26,9 @@
 #include <liminal/tui/console_renderer.h>
 #include <liminal/tui/clipboard.h>
 #include <liminal/tui/command.h>
+#include <liminal/tui/compact_picker_dialog.h>
 #include <liminal/tui/external_editor.h>
+#include <liminal/tui/model_picker.h>
 #include <liminal/tui/selectable_list_dialog.h>
 #include <liminal/tui/session_commands.h>
 #include <liminal/session/persistence.h>
@@ -197,7 +199,8 @@ struct PromptReader {
 
 lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, ConsoleRenderer &renderer, PromptQueue &prompts,
                                     ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
-                                    SelectableListDialog &dialog, TaskControl &task_control, i32 &held_mouse_buttons) {
+                                    SelectableListDialog &dialog, CompactPickerDialog &model_picker, TaskControl &task_control,
+                                    i32 &held_mouse_buttons) {
     if (dialog.active()) {
         if (event.kind == TerminalEventKind::RESIZE) return renderer.resize(event.size);
         if (event.kind != TerminalEventKind::KEY || !event.pressed) return {};
@@ -211,6 +214,40 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             default: return {};
         }
     }
+    if (model_picker.active()) {
+        if (event.kind == TerminalEventKind::RESIZE) return renderer.resize(event.size);
+        if (event.kind == TerminalEventKind::TEXT || event.kind == TerminalEventKind::PASTE) {
+            return renderer.picker_query_edit(PickerQueryEdit::INSERT, event.text);
+        }
+        if (event.kind != TerminalEventKind::KEY || !event.pressed) return {};
+        const bool control = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::CONTROL);
+        const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
+        PickerKeyResult routed{};
+        switch (event.key) {
+            case TerminalKey::ESCAPE:
+                // While the picker waits for a catalog refresh it is the
+                // pending task's only surface, so one Esc cancels both.
+                if (task_control.active_task) task_control.active_task->cancel();
+                return model_picker.cancel();
+            case TerminalKey::ENTER: return model_picker.confirm();
+            case TerminalKey::ARROW_UP: return renderer.apply_picker_key(PickerKey::UP, routed);
+            case TerminalKey::ARROW_DOWN: return renderer.apply_picker_key(PickerKey::DOWN, routed);
+            case TerminalKey::BACKSPACE:
+                return renderer.picker_query_edit(control ? PickerQueryEdit::BACKSPACE_WORD : PickerQueryEdit::BACKSPACE);
+            case TerminalKey::DELETE_KEY: return renderer.picker_query_edit(control ? PickerQueryEdit::ERASE_WORD : PickerQueryEdit::ERASE);
+            case TerminalKey::ARROW_LEFT: return renderer.picker_query_edit(control ? PickerQueryEdit::WORD_LEFT : PickerQueryEdit::LEFT);
+            case TerminalKey::ARROW_RIGHT:
+                return renderer.picker_query_edit(control ? PickerQueryEdit::WORD_RIGHT : PickerQueryEdit::RIGHT);
+            case TerminalKey::HOME: return renderer.picker_query_edit(PickerQueryEdit::HOME);
+            case TerminalKey::END: return renderer.picker_query_edit(PickerQueryEdit::END);
+            case TerminalKey::CHARACTER:
+                if (!event.text.empty() && (!control || alt_gr)) {
+                    return renderer.picker_query_edit(PickerQueryEdit::INSERT, event.text);
+                }
+                return {};
+            default: return {};
+        }
+    }
     switch (event.kind) {
         case TerminalEventKind::TEXT:
         case TerminalEventKind::PASTE: return renderer.insert(event.text);
@@ -219,7 +256,18 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             const bool control = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::CONTROL);
             const bool shift = lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::SHIFT);
             const bool alt_gr = control && lighter::has_modifier(event.modifiers, lighter::TerminalModifiers::ALT);
+            // A compact surface consumes navigation and confirmation keys
+            // first; HANDLED swallows the key, SUBMIT and PASS fall through to
+            // the normal path below.
+            const auto route_compact = [&renderer](PickerKey key, lighter::Error &error) {
+                if (!renderer.compact_surface_active()) return false;
+                PickerKeyResult routed{};
+                error = renderer.apply_picker_key(key, routed);
+                return error ? true : routed == PickerKeyResult::HANDLED;
+            };
+            lighter::Error routing_error;
             if (event.key == TerminalKey::ESCAPE) {
+                if (route_compact(PickerKey::ESCAPE, routing_error)) return routing_error;
                 if (task_control.active_task) task_control.active_task->cancel();
                 return {};
             }
@@ -233,16 +281,28 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             }
             if (event.key == TerminalKey::ENTER) {
                 if (shift) return renderer.insert("\n");
+                if (route_compact(PickerKey::ENTER, routing_error)) return routing_error;
                 prompts.push(finish_prompt(renderer.take_prompt()));
                 return renderer.redraw();
             }
             if (event.key == TerminalKey::BACKSPACE) return control ? renderer.backspace_word() : renderer.backspace();
-            if (event.key == TerminalKey::TAB) return renderer.insert("\t");
+            if (event.key == TerminalKey::TAB) {
+                if (route_compact(PickerKey::TAB, routing_error)) return routing_error;
+                return renderer.insert("\t");
+            }
             if (event.key == TerminalKey::DELETE_KEY) return control ? renderer.erase_word() : renderer.erase();
             if (event.key == TerminalKey::ARROW_LEFT) return control ? renderer.move_word_left() : renderer.move_left();
             if (event.key == TerminalKey::ARROW_RIGHT) return control ? renderer.move_word_right() : renderer.move_right();
-            if (event.key == TerminalKey::ARROW_UP) return control ? renderer.previous_prompt() : renderer.move_up();
-            if (event.key == TerminalKey::ARROW_DOWN) return control ? renderer.next_prompt() : renderer.move_down();
+            if (event.key == TerminalKey::ARROW_UP) {
+                if (control) return renderer.previous_prompt();
+                if (route_compact(PickerKey::UP, routing_error)) return routing_error;
+                return renderer.move_up();
+            }
+            if (event.key == TerminalKey::ARROW_DOWN) {
+                if (control) return renderer.next_prompt();
+                if (route_compact(PickerKey::DOWN, routing_error)) return routing_error;
+                return renderer.move_down();
+            }
             if (event.key == TerminalKey::HOME) return control ? renderer.move_document_home() : renderer.move_home();
             if (event.key == TerminalKey::END) return control ? renderer.move_document_end() : renderer.move_end();
             if (event.key == TerminalKey::PAGE_UP || event.key == TerminalKey::PAGE_DOWN) {
@@ -283,7 +343,8 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
 
 Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &renderer, PromptQueue &prompts,
                               ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
-                              SelectableListDialog &dialog, TaskControl &control, SessionFailure &failure) {
+                              SelectableListDialog &dialog, CompactPickerDialog &model_picker, TaskControl &control,
+                              SessionFailure &failure) {
     i32 held_mouse_buttons = 0;
     while (true) {
         auto event = co_await terminal.next_event();
@@ -292,8 +353,8 @@ Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &render
             co_return 1;
         }
         if (event->kind == TerminalEventKind::CLOSED) co_return 0;
-        if (auto error = apply_terminal_event(*event, renderer, prompts, editor_requests, copy_requests, selection_copies, dialog, control,
-                                              held_mouse_buttons)) {
+        if (auto error = apply_terminal_event(*event, renderer, prompts, editor_requests, copy_requests, selection_copies, dialog,
+                                              model_picker, control, held_mouse_buttons)) {
             failure.record("cannot render terminal input", error, control);
             co_return 1;
         }
@@ -512,7 +573,8 @@ Task<lighter::Outcome<T, E, lighter::Cancellation>> guard_task(Task<T, E> work, 
 }
 
 Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &renderer, TaskControl &control, model::Catalog &models,
-                    application::SessionCoordinator *sessions, SelectableListDialog &dialog, SessionFailure &failure) {
+                    application::SessionCoordinator *sessions, SelectableListDialog &dialog, CompactPickerDialog &model_picker,
+                    SessionFailure &failure) {
     lighter::Error render_error;
     EventSink events = [&renderer, &render_error, &control](const Event &event) {
         if (render_error) return;
@@ -680,20 +742,70 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                     saving_notice_visible = false;
                     continue;
                 }
-                case CommandKind::MODEL: {
-                    auto refreshed = co_await guard_task(models.refresh(), control);
-                    if (refreshed.is_cancelled()) {
-                        if (!rendered(renderer.notice("[model refresh cancelled; selection unchanged]\n"), "cannot render model status"))
+                case CommandKind::HELP: {
+                    auto arguments = require_no_arguments(command_line.name, command_line.arguments);
+                    if (!arguments) {
+                        if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"),
+                                      "cannot render command error"))
                             co_return 1;
                         continue;
                     }
-                    if (refreshed.has_error()) {
+                    if (!rendered(renderer.notice(describe_commands()), "cannot render command reference")) co_return 1;
+                    continue;
+                }
+                case CommandKind::MODEL: {
+                    const bool use_picker = command_line.arguments.empty() && renderer.terminal != nullptr;
+                    if (use_picker) {
+                        CompactPicker picker{.query_label = "Model", .empty_message = "No matching model"};
+                        picker.loading = true;
+                        if (!rendered(model_picker.begin(renderer, std::move(picker)), "cannot open model picker")) co_return 1;
+                    }
+                    auto refreshed = co_await guard_task(models.refresh(), control);
+                    if (refreshed.is_cancelled()) {
+                        if (model_picker.active() && !rendered(model_picker.cancel(), "cannot close model picker")) co_return 1;
+                        // Cancelling the picker is silent: the closed surface is
+                        // the acknowledgement and the transcript stays untouched.
+                        if (!use_picker &&
+                            !rendered(renderer.notice("[model refresh cancelled; selection unchanged]\n"), "cannot render model status"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (refreshed.has_error() && !use_picker) {
                         if (!rendered(renderer.notice("[model error: " + refreshed.error().message() + "]\n"), "cannot render model error"))
                             co_return 1;
                         continue;
                     }
-                    for (const auto &warning : refreshed->warnings) {
-                        if (!rendered(renderer.notice("[model warning: " + warning + "]\n"), "cannot render model warning")) co_return 1;
+                    if (refreshed.has_value()) {
+                        for (const auto &warning : refreshed->warnings) {
+                            if (!rendered(renderer.notice("[model warning: " + warning + "]\n"), "cannot render model warning"))
+                                co_return 1;
+                        }
+                    }
+
+                    if (use_picker) {
+                        if (model_picker.active()) {
+                            if (refreshed.has_error() &&
+                                !rendered(model_picker.fail("Cannot refresh models: " + refreshed.error().message()),
+                                          "cannot render model picker error"))
+                                co_return 1;
+                            if (!rendered(model_picker.set_items(model_picker_items(models.entries(), agent.model.entry.provider,
+                                                                                    agent.model.entry.id, agent.model.reasoning_effort)),
+                                          "cannot populate model picker"))
+                                co_return 1;
+                        }
+                        auto selected = co_await model_picker.next();
+                        if (!selected) continue;
+                        auto next = models.select(*selected);
+                        if (!next) {
+                            if (!rendered(renderer.notice("[model error: " + next.error().message() + "]\n"), "cannot render model error"))
+                                co_return 1;
+                            continue;
+                        }
+                        agent.select_model(*std::move(next));
+                        if (!rendered(renderer.render(ModelSelected{.name = agent.model.entry.id, .effort = agent.model.reasoning_effort}),
+                                      "cannot render model selection"))
+                            co_return 1;
+                        continue;
                     }
 
                     const auto selector = std::string_view(command_line.arguments);
@@ -844,14 +956,15 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             CopyRequests copy_requests;
             SelectionCopies selection_copies;
             SelectableListDialog dialog;
+            CompactPickerDialog model_picker;
             PromptReader reader{.prompts = &prompts};
             lighter::Event render_requested;
             renderer.set_redraw_scheduler([&render_requested] { render_requested.set(); });
 #ifndef _WIN32
-            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, failure),
+            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, model_picker, failure),
                                           signal_monitor(interrupts, renderer, control, failure, &selection_copies),
                                           terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies,
-                                                              dialog, control, failure),
+                                                              dialog, model_picker, control, failure),
                                           render_monitor(render_requested, renderer, control, failure),
                                           external_editor_loop(editor_requests, terminal, renderer, control, failure),
                                           copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
@@ -868,10 +981,10 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             if (raced.index() == 7) exit_code = std::get<7>(raced);
             if (raced.index() == 8) exit_code = std::get<8>(raced);
 #else
-            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, failure),
+            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, model_picker, failure),
                                           signal_monitor(interrupts, renderer, control, failure, &selection_copies),
                                           terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies,
-                                                              dialog, control, failure),
+                                                              dialog, model_picker, control, failure),
                                           render_monitor(render_requested, renderer, control, failure),
                                           external_editor_loop(editor_requests, terminal, renderer, control, failure),
                                           copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
@@ -890,7 +1003,8 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
         } else {
             PromptReader reader{.input = &pipe};
             SelectableListDialog dialog;
-            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, failure),
+            CompactPickerDialog model_picker;
+            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, model_picker, failure),
                                           signal_monitor(interrupts, renderer, control, failure));
             exit_code = raced.index() == 0 ? std::get<0>(raced) : std::get<1>(raced);
         }

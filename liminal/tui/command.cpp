@@ -1,7 +1,10 @@
 #include "command.h"
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <cctype>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -19,7 +22,63 @@ std::string_view trim(std::string_view text) {
     return text;
 }
 
+constexpr std::array<std::string_view, 1> k_quit_aliases{"exit"};
+
+constexpr std::array<CommandSpec, 9> k_command_registry{{
+    {.kind = CommandKind::HELP, .name = "help", .synopsis = "", .description = "list every command"},
+    {.kind = CommandKind::MODEL, .name = "model", .synopsis = "[selector]", .description = "select the agent model"},
+    {.kind = CommandKind::CONTEXT, .name = "context", .synopsis = "", .description = "show what occupies the model context"},
+    {.kind = CommandKind::COMPACT, .name = "compact", .synopsis = "[instructions]", .description = "compact the conversation history"},
+    {.kind = CommandKind::COPY, .name = "copy", .synopsis = "[reply number]", .description = "copy an assistant reply to the clipboard"},
+    {.kind = CommandKind::NAME, .name = "name", .synopsis = "<title> | --clear", .description = "set or clear the session title"},
+    {.kind = CommandKind::RESUME,
+     .name = "resume",
+     .synopsis = "",
+     .description = "switch to another session in this workspace",
+     .idle_only = true},
+    {.kind = CommandKind::HISTORY, .name = "history", .synopsis = "", .description = "browse conversation checkpoints", .idle_only = true},
+    {.kind = CommandKind::QUIT, .name = "quit", .aliases = k_quit_aliases, .synopsis = "", .description = "leave liminal"},
+}};
+
 } // namespace
+
+std::span<const CommandSpec> command_registry() noexcept { return k_command_registry; }
+
+const CommandSpec *find_command(std::string_view name) noexcept {
+    for (const auto &spec : k_command_registry) {
+        if (spec.name == name) return &spec;
+        if (std::ranges::contains(spec.aliases, name)) return &spec;
+    }
+    return nullptr;
+}
+
+std::string describe_commands() {
+    lighter::types::usize name_column = 0;
+    for (const auto &spec : k_command_registry) {
+        auto width = spec.name.size() + 1;
+        if (!spec.synopsis.empty()) width += spec.synopsis.size() + 1;
+        name_column = std::max(name_column, width);
+    }
+
+    std::string text = "commands:\n";
+    for (const auto &spec : k_command_registry) {
+        std::string entry = "  /" + std::string(spec.name);
+        if (!spec.synopsis.empty()) {
+            entry += ' ';
+            entry += spec.synopsis;
+        }
+        entry.append(name_column + 4 - (entry.size() - 2), ' ');
+        entry += spec.description;
+        for (const auto &alias : spec.aliases) {
+            entry += " (also /" + std::string(alias) + ")";
+        }
+        if (spec.idle_only) entry += " (idle only)";
+        text += entry;
+        text += '\n';
+    }
+    text += "type // to send a prompt that starts with /\n";
+    return text;
+}
 
 Result<ReplInput> parse_repl_input(std::string text) {
     if (text.starts_with("//")) {
@@ -42,14 +101,7 @@ Result<ReplInput> parse_repl_input(std::string text) {
 }
 
 Result<CommandKind> resolve_command(std::string_view name) {
-    if (name == "quit" || name == "exit") return CommandKind::QUIT;
-    if (name == "copy") return CommandKind::COPY;
-    if (name == "context") return CommandKind::CONTEXT;
-    if (name == "compact") return CommandKind::COMPACT;
-    if (name == "model") return CommandKind::MODEL;
-    if (name == "resume") return CommandKind::RESUME;
-    if (name == "name") return CommandKind::NAME;
-    if (name == "history") return CommandKind::HISTORY;
+    if (const auto *spec = find_command(name)) return spec->kind;
     return lighter::outcome_error(Error::command("unknown command '/" + std::string(name) + "'"));
 }
 

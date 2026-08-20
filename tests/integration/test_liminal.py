@@ -257,8 +257,10 @@ def check_conpty_terminal_session(tmp_path, base_url, mock_state):
         assert output.count(b"\x1b[?1049h") == 1
         assert output.count(b"\x1b[?1049l") == 0
 
-        process.write(b"\x7f" * len("edited externally") + b"/model\r")
-        read_conpty_until(process, output, b"select with /model", 5)
+        process.write(b"\x7f" * len("edited externally") + b"/help\r")
+        read_conpty_until(process, output, b"type // to send", 5)
+        process.write(b"/model no-such\r")
+        read_conpty_until(process, output, b"model error", 5)
 
         process.write(b"\x1b[1;5A")
         read_conpty_until(process, output, PROMPT_MARKER + b" /model", 5)
@@ -269,10 +271,10 @@ def check_conpty_terminal_session(tmp_path, base_url, mock_state):
         read_conpty_until_fresh(process, output, PROMPT_MARKER + b" /model", 5)
         process.write(b"\x1b[B")
         read_conpty_until_fresh(process, output, PROMPT_MARKER, 5)
-        process.write(b"\x1b[<64;1;1M")
-        read_conpty_until_fresh(process, output, b"extra-model-6", 5)
-        process.write(b"\x1b[<65;1;1M")
-        read_conpty_until_fresh(process, output, b"select with /model", 5)
+        process.write(b"\x1b[<64;1;1M" * 12)
+        read_conpty_until_fresh(process, output, b"commands:", 5)
+        process.write(b"\x1b[<65;1;1M" * 12)
+        read_conpty_until_fresh(process, output, b"model error", 5)
 
         process.write(b"\x1b[200~a\nb\x1b[201~")
         read_conpty_until(process, output, PROMPT_MARKER + b" a", 5)
@@ -892,16 +894,10 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
         assert output.count(b"\x1b[?1049h") == 2
         assert output.count(b"\x1b[?1049l") == 1
 
-        os.write(master, b"\x7f" * len("edited externally") + b"/model\r")
-        deadline = time.monotonic() + 5
-        while b"select with /model" not in output:
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, (
-                f"model catalog did not enter the viewport: {output!r}"
-            )
-            readable, _, _ = select.select([master], [], [], remaining)
-            assert readable, f"model catalog did not enter the viewport: {output!r}"
-            output.extend(os.read(master, 4096))
+        os.write(master, b"\x7f" * len("edited externally") + b"/help\r")
+        read_pty_until(master, output, b"type // to send", 5)
+        os.write(master, b"/model no-such\r")
+        read_pty_until(master, output, b"model error", 5)
 
         os.write(master, b"\x1b[1;5A")
         read_pty_until(master, output, PROMPT_MARKER + b" /model", 5)
@@ -912,10 +908,10 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
         read_pty_until_fresh(master, output, PROMPT_MARKER + b" /model", 5)
         os.write(master, b"\x1b[B")
         read_pty_until_fresh(master, output, PROMPT_MARKER, 5)
-        os.write(master, b"\x1b[<64;1;1M")
-        read_pty_until_fresh(master, output, b"extra-model-6", 5)
-        os.write(master, b"\x1b[<65;1;1M")
-        read_pty_until_fresh(master, output, b"select with /model", 5)
+        os.write(master, b"\x1b[<64;1;1M" * 12)
+        read_pty_until_fresh(master, output, b"commands:", 5)
+        os.write(master, b"\x1b[<65;1;1M" * 12)
+        read_pty_until_fresh(master, output, b"model error", 5)
 
         os.write(master, b"\x1b[200~a\nb\x1b[201~")
         read_pty_until(master, output, PROMPT_MARKER + b" a", 5)
@@ -1000,6 +996,79 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
         assert termios.tcgetattr(slave) == original
     finally:
         mock_state["stream_release"].set()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        os.close(master)
+        os.close(slave)
+
+
+def test_command_menu_and_model_picker(tmp_path):
+    """The compact command menu completes commands and /model selects through
+    the compact picker without printing the catalog into the transcript."""
+    env = terminal_test_environment(tmp_path, model_count=13)
+
+    if os.name == "nt":
+        from windows_pty import ConPtyProcess
+
+        process = ConPtyProcess([BINARY], cwd=REPO_ROOT, env=env, columns=80, rows=24)
+        output = bytearray()
+        try:
+            read_conpty_until(process, output, PROMPT_MARKER, 10)
+            read_conpty_until(process, output, b"Ask Liminal anything", 5)
+            process.write(b"/")
+            read_conpty_until(process, output, b"list every command", 5)
+            process.write(b"mo")
+            read_conpty_until_fresh(process, output, b"select the agent model", 5)
+            process.write(b"\t\r")
+            read_conpty_until(process, output, b"Model:", 5)
+            process.write(b"extra-model-6")
+            read_conpty_until_fresh(process, output, b"terminal-test/extra-model-6", 5)
+            process.write(b"\r")
+            read_conpty_until_fresh(process, output, b"extra-model-6", 5)
+            assert b"select with /model" not in output
+            process.write(b"/quit\r")
+            assert process.wait(10) == 0
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.close()
+        return
+
+    import fcntl
+    import pty
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    process = subprocess.Popen(
+        [str(BINARY)],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+        cwd=REPO_ROOT,
+        close_fds=True,
+    )
+    output = bytearray()
+    try:
+        read_pty_until(master, output, PROMPT_MARKER, 10)
+        read_pty_until(master, output, b"Ask Liminal anything", 5)
+        os.write(master, b"/")
+        read_pty_until(master, output, b"list every command", 5)
+        os.write(master, b"mo")
+        read_pty_until_fresh(master, output, b"select the agent model", 5)
+        os.write(master, b"\t\r")
+        read_pty_until(master, output, b"Model:", 5)
+        os.write(master, b"extra-model-6")
+        read_pty_until_fresh(master, output, b"terminal-test/extra-model-6", 5)
+        os.write(master, b"\r")
+        read_pty_until_fresh(master, output, b"extra-model-6", 5)
+        assert b"select with /model" not in output
+        os.write(master, b"/quit\r")
+        assert process.wait(timeout=10) == 0
+    finally:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)

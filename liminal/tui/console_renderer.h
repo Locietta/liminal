@@ -35,6 +35,16 @@ struct ConsoleRenderer {
     bool selectable_list_active() const noexcept;
     std::optional<std::string_view> selectable_list_selection() const noexcept;
 
+    lighter::Error apply_picker_key(PickerKey key, PickerKeyResult &result);
+    bool compact_surface_active() const noexcept;
+    bool model_picker_active() const noexcept;
+    lighter::Error open_picker(CompactPicker picker);
+    lighter::Error close_picker();
+    lighter::Error picker_set_items(std::vector<CompactPickerItem> items);
+    lighter::Error picker_fail(std::string detail);
+    lighter::Error picker_query_edit(PickerQueryEdit edit, std::string_view text = {});
+    std::optional<std::string> picker_selection() const;
+
     lighter::Error insert(std::string_view text);
     lighter::Error backspace();
     lighter::Error erase();

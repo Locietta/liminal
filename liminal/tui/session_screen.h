@@ -12,6 +12,7 @@
 #include <lighter/types.hpp>
 
 #include <liminal/event.h>
+#include <liminal/tui/compact_picker.h>
 #include <liminal/tui/surface.h>
 #include <liminal/tui/transcript.h>
 
@@ -126,6 +127,30 @@ enum struct SessionState {
     FAILED,
 };
 
+enum struct PickerKey {
+    UP,
+    DOWN,
+    TAB,
+    ENTER,
+    ESCAPE,
+};
+
+enum struct PickerKeyResult {
+    HANDLED,
+    SUBMIT,
+    PASS,
+};
+
+/// Composer-driven slash-command completion. Openness is derived from the
+/// draft and cursor position; only Esc dismissal is explicit state, and it
+/// clears as soon as the command token changes or stops being one.
+struct CommandMenu {
+    CompactPicker picker{.match = CompactPickerMatch::PREFIX, .empty_message = "No matching command"};
+    bool open = false;
+    bool populated = false;
+    std::optional<std::string> dismissed_token;
+};
+
 /// Application-owned TUI state. Transcript and composer source data are
 /// independent of terminal width; Frame is a disposable projection.
 struct SessionScreen {
@@ -160,6 +185,20 @@ struct SessionScreen {
     void clear_prompt();
     std::string take_prompt();
 
+    /// Routes a navigation or confirmation key to the active compact surface.
+    /// PASS means no compact surface consumed the key; SUBMIT asks the caller
+    /// to run its normal submission path.
+    PickerKeyResult apply_picker_key(PickerKey key);
+    bool compact_surface_active() const noexcept;
+    bool model_picker_active() const noexcept;
+    void open_picker(CompactPicker next);
+    void close_picker() noexcept;
+    void picker_set_items(std::vector<CompactPickerItem> items);
+    void picker_fail(std::string detail);
+    /// Applies a query edit to the owned-query picker; inserted text is
+    /// stripped of control characters before it reaches the query.
+    void picker_query_edit(PickerQueryEdit edit, std::string_view text = {});
+
     void scroll(i32 rows);
     void page(i32 direction);
     void follow_tail() noexcept;
@@ -189,6 +228,8 @@ struct SessionScreen {
     std::optional<std::string> effort;
     SessionFooter footer;
     std::optional<std::string> transient_status;
+    CommandMenu command_menu;
+    std::optional<CompactPicker> picker;
     std::optional<ViewportAnchor> anchor;
     std::optional<SelectionState> selection;
     bool external_editor_active = false;
@@ -199,7 +240,11 @@ struct SessionScreen {
     mutable LayoutDiagnostics diagnostics;
 
 private:
-    void mark_editing() noexcept;
+    void mark_editing();
+    void sync_command_menu();
+    std::optional<std::string_view> command_token() const noexcept;
+    void complete_highlighted_command();
+    i32 compact_band_rows(i32 base_viewport) const noexcept;
 
     MonotonicNow monotonic_now;
 };

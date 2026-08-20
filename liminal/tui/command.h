@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -35,7 +36,29 @@ enum struct CommandKind {
     RESUME,
     NAME,
     HISTORY,
+    HELP,
 };
+
+/// Presentation and resolution metadata for one slash command. The registry is
+/// the single authority for names, aliases, and user-facing descriptions;
+/// execution stays with the dispatcher.
+struct CommandSpec {
+    CommandKind kind;
+    std::string_view name;
+    std::span<const std::string_view> aliases;
+    std::string_view synopsis;
+    std::string_view description;
+    bool idle_only = false;
+};
+
+/// Every executable slash command, exactly once, in presentation order.
+std::span<const CommandSpec> command_registry() noexcept;
+
+/// Finds a command by exact canonical name or alias; nullptr when unknown.
+const CommandSpec *find_command(std::string_view name) noexcept;
+
+/// Renders the durable registry-backed command reference used by /help.
+std::string describe_commands();
 
 /// Resolves exact command names and their centrally registered aliases.
 Result<CommandKind> resolve_command(std::string_view name);

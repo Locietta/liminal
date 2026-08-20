@@ -106,6 +106,26 @@ std::string_view name(SelectableListEffect effect) {
     return "none";
 }
 
+std::vector<CompactPickerItem> compact_picker_items(std::string_view text) {
+    std::vector<CompactPickerItem> items;
+    while (!text.empty()) {
+        const auto end = text.find('\n');
+        auto row = text.substr(0, end);
+        if (!row.empty()) {
+            CompactPickerItem item;
+            item.current = row.starts_with('*');
+            if (item.current) row.remove_prefix(1);
+            item.id = std::string(row);
+            item.primary = std::string(row);
+            item.haystacks.push_back(item.id);
+            items.push_back(std::move(item));
+        }
+        if (end == std::string_view::npos) break;
+        text.remove_prefix(end + 1);
+    }
+    return items;
+}
+
 SelectableListPage selectable_page(std::string_view text, bool has_more) {
     SelectableListPage page{.has_more = has_more};
     while (!text.empty()) {
@@ -160,37 +180,72 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     ++action_count;
 
     if (action.type == "insert") {
-        screen.insert(action.text);
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::INSERT, action.text);
+        else
+            screen.insert(action.text);
     } else if (action.type == "backspace") {
-        screen.backspace();
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::BACKSPACE);
+        else
+            screen.backspace();
     } else if (action.type == "delete") {
-        screen.erase();
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::ERASE);
+        else
+            screen.erase();
     } else if (action.type == "backspace_word") {
-        screen.backspace_word();
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::BACKSPACE_WORD);
+        else
+            screen.backspace_word();
     } else if (action.type == "delete_word") {
-        screen.erase_word();
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::ERASE_WORD);
+        else
+            screen.erase_word();
     } else if (action.type == "left") {
-        screen.move_left();
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::LEFT);
+        else
+            screen.move_left();
     } else if (action.type == "right") {
-        screen.move_right();
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::RIGHT);
+        else
+            screen.move_right();
     } else if (action.type == "word_left") {
-        screen.move_word_left();
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::WORD_LEFT);
+        else
+            screen.move_word_left();
     } else if (action.type == "word_right") {
-        screen.move_word_right();
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::WORD_RIGHT);
+        else
+            screen.move_word_right();
     } else if (action.type == "up") {
         if (selectable_list)
             selection_effect = selectable_list->apply(SelectableListAction::UP);
-        else
+        else if (screen.apply_picker_key(PickerKey::UP) == PickerKeyResult::PASS)
             screen.move_up();
     } else if (action.type == "down") {
         if (selectable_list)
             selection_effect = selectable_list->apply(SelectableListAction::DOWN);
-        else
+        else if (screen.apply_picker_key(PickerKey::DOWN) == PickerKeyResult::PASS)
             screen.move_down();
+    } else if (action.type == "tab") {
+        if (!selectable_list && screen.apply_picker_key(PickerKey::TAB) == PickerKeyResult::PASS) screen.insert("\t");
     } else if (action.type == "home") {
-        screen.move_home();
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::HOME);
+        else
+            screen.move_home();
     } else if (action.type == "end") {
-        screen.move_end();
+        if (screen.model_picker_active())
+            screen.picker_query_edit(PickerQueryEdit::END);
+        else
+            screen.move_end();
     } else if (action.type == "document_home") {
         screen.move_document_home();
     } else if (action.type == "document_end") {
@@ -200,7 +255,7 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "submit") {
         if (selectable_list) {
             selection_effect = selectable_list->apply(SelectableListAction::CONFIRM);
-        } else {
+        } else if (screen.apply_picker_key(PickerKey::ENTER) != PickerKeyResult::HANDLED) {
             auto prompt = screen.take_prompt();
             if (!action.text.empty()) {
                 prompt = action.text;
@@ -209,7 +264,12 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
             screen.apply(PromptSubmitted{.text = std::move(prompt)});
         }
     } else if (action.type == "escape") {
-        if (selectable_list) selection_effect = selectable_list->apply(SelectableListAction::CANCEL);
+        if (selectable_list)
+            selection_effect = selectable_list->apply(SelectableListAction::CANCEL);
+        else if (screen.model_picker_active())
+            screen.close_picker();
+        else
+            screen.apply_picker_key(PickerKey::ESCAPE);
     } else if (action.type == "assistant_delta") {
         screen.apply(AssistantTextDelta{.item_id = action.item_id, .text = action.text});
     } else if (action.type == "assistant_message_completed") {
@@ -266,6 +326,20 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     } else if (action.type == "close_list") {
         selectable_list.reset();
         selection_effect = SelectableListEffect::NONE;
+    } else if (action.type == "open_model_picker") {
+        CompactPicker picker{.query_label = action.name.empty() ? "Model" : action.name,
+                             .empty_message = action.command.empty() ? "No matching model" : action.command};
+        picker.loading = action.amount != 0;
+        picker.set_items(compact_picker_items(action.text));
+        screen.open_picker(std::move(picker));
+    } else if (action.type == "picker_items") {
+        if (!screen.model_picker_active()) return std::unexpected("no compact picker is open");
+        screen.picker_set_items(compact_picker_items(action.text));
+    } else if (action.type == "picker_error") {
+        if (!screen.model_picker_active()) return std::unexpected("no compact picker is open");
+        screen.picker_fail(action.text);
+    } else if (action.type == "close_picker") {
+        screen.close_picker();
     } else if (action.type == "advance_time") {
         if (action.milliseconds < 0) return std::unexpected("virtual time cannot move backwards");
         now_ms += action.milliseconds;
@@ -304,7 +378,9 @@ HeadlessSnapshot HeadlessSession::inspect() const {
                               .rows = screen.size.rows,
                               .model = screen.model,
                               .semantic_state = std::string(name(screen.state)),
-                              .focused_surface = selectable_list ? "selectable_list" : "session",
+                              .focused_surface = selectable_list              ? "selectable_list" :
+                                                 screen.model_picker_active() ? "compact_picker" :
+                                                                                "session",
                               .selection_effect = std::string(name(selection_effect)),
                               .selected_id = selectable_list && selectable_list->selected_id() ?
                                                  std::optional<std::string>(*selectable_list->selected_id()) :
@@ -317,6 +393,15 @@ HeadlessSnapshot HeadlessSession::inspect() const {
                               .ansi_operations = {}};
     for (const auto &operation : ansi_operations) snapshot.ansi_operations.push_back(visible_ansi(operation));
     if (screen.anchor) snapshot.anchor = {.block_id = screen.anchor->block_id, .source_offset = screen.anchor->source_offset};
+    snapshot.command_menu_open = screen.command_menu.open;
+    if (const auto *active = screen.picker ? &*screen.picker : (screen.command_menu.open ? &screen.command_menu.picker : nullptr)) {
+        snapshot.picker_query = active->query;
+        snapshot.picker_query_cursor = active->query_cursor;
+        if (active->highlighted_id()) snapshot.picker_highlight_id = std::string(*active->highlighted_id());
+        for (const auto index : active->filtered) snapshot.picker_visible_ids.push_back(active->items[index].id);
+        snapshot.picker_loading = active->loading;
+        snapshot.picker_error = active->error;
+    }
     for (const auto &block : screen.transcript.blocks) {
         snapshot.blocks.push_back({.id = block.id,
                                    .kind = std::string(name(block.kind)),

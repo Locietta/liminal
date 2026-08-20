@@ -14,6 +14,23 @@ While a turn is active, `• Working…` follows the newest output directly in t
 
 The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline text aligns with the draft instead of the marker and remains vertically windowed around the cursor when it grows. The footer beneath the composer shows the selected model and effort, workspace path, remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan; browsing and external-editor states replace it when they need attention. On short terminals, decorative padding is removed before transcript or editing space.
 
+## Slash commands
+
+A new empty session shows a single muted hint — `Ask Liminal anything. Type / for commands.` — that disappears as soon as the session has any content.
+
+Typing `/` at the start of the composer opens a compact command menu directly above the composer. It lists each command with its argument synopsis and a short description, filtered by prefix as you type; idle-only commands stay listed and are marked `(idle only)`. The menu only follows the command name: it closes when the cursor moves into the arguments, and a prompt that merely contains a slash later in its text never opens it. A draft starting with `//` is sent as an ordinary prompt beginning with `/`.
+
+While the menu is open:
+
+- Up / Down move the highlighted command.
+- Tab completes the highlighted command name and keeps the menu open.
+- Enter on an incomplete name completes it without executing; Enter on an exact command name (or alias) sends it as usual.
+- Esc closes the menu without changing the draft; editing the command name reopens it.
+
+`/help` prints a durable command reference into the transcript, listing every command with its arguments, aliases, and availability.
+
+`/model` opens a compact model picker above the composer instead of printing the catalog. It shows one row per model and reasoning effort (plus an `@off` row for models with reasoning support), marks the current selection, and searches provider, model ID, display name, and effort labels as you type into its own query line, which supports the usual cursor, word, and deletion keys. Enter applies the highlighted model immediately; Esc cancels and leaves the current model unchanged. `/model <selector>` still selects directly. See `providers-and-models.md` for selector syntax.
+
 ## External prompt editor
 
 Press Ctrl+G to open the current draft in the command configured by `VISUAL`. If `VISUAL` is not set, Liminal uses `EDITOR`. Save and close the editor to return the edited text to the composer; the draft is not sent automatically.
@@ -56,7 +73,8 @@ The action and exact path or command stay bright, while completion metadata and 
 
 | Shortcut             | Action                                                                                     |
 | -------------------- | ------------------------------------------------------------------------------------------ |
-| Enter                | Send the current prompt                                                                    |
+| Enter                | Send the current prompt; complete an incomplete highlighted command in the command menu    |
+| Tab                  | Complete the highlighted command when the command menu is open; otherwise insert a tab     |
 | Ctrl+J / Shift+Enter | Insert a newline                                                                           |
 | Ctrl+G               | Edit the current draft in `VISUAL` or `EDITOR`                                             |
 | Up / Down            | Move within a multiline draft, then recall prompts at its boundaries                       |
@@ -64,7 +82,7 @@ The action and exact path or command stay bright, while completion metadata and 
 | PageUp / PageDown    | Scroll the transcript by one viewport                                                      |
 | Mouse wheel          | Scroll the transcript                                                                      |
 | Mouse drag           | Select visible text                                                                        |
-| Esc                  | Cancel the active turn while preserving the current draft                                  |
+| Esc                  | Close an open menu or picker first; otherwise cancel the active turn, preserving the draft |
 | Ctrl+C               | Copy the selection when one is active; otherwise clear the draft, cancel the turn, or exit |
 | Ctrl+O               | Copy the selection when one is active; otherwise copy the latest reply                     |
 

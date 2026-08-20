@@ -148,8 +148,14 @@ The command surface is model-centric:
 /model codex/gpt-5.6-sol@high
 ```
 
-`/model` reloads provider configuration, performs opted-in discovery, and lists the combined
-catalog. `/model <id>` selects an unambiguous model. Use `<provider>/<id>` when two providers expose
+`/model` reloads provider configuration, performs opted-in discovery, and opens a compact searchable
+picker above the composer with one row per model and reasoning effort, including an `@off` row for
+models with reasoning support. Typing filters the catalog by provider, model ID, display name, or
+effort label (case-insensitive for ASCII), and the query line supports normal cursor editing; Enter
+applies the highlighted row immediately and Esc leaves the current model unchanged. In
+non-interactive (redirected) sessions, `/model` prints the combined catalog instead.
+
+`/model <id>` selects an unambiguous model directly. Use `<provider>/<id>` when two providers expose
 the same ID. Append `@<effort>` to select a declared reasoning effort; `@off` clears an explicit
 effort.
 

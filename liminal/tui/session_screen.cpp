@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include <liminal/tui/command.h>
 #include <liminal/tui/rich_text.h>
 #include <liminal/tui/syntax_highlight.h>
 
@@ -37,6 +38,12 @@ struct BlockPresentation {
 using StyledLine = std::vector<StyledSpan>;
 
 constexpr auto k_command_elapsed_threshold = std::chrono::seconds(10);
+
+// The transcript keeps this many rows before composer padding or a compact
+// band may grow into it.
+constexpr i32 k_transcript_reserve = 4;
+
+constexpr std::string_view k_empty_session_hint = "Ask Liminal anything. Type / for commands.";
 
 constexpr auto k_working_elapsed_threshold = std::chrono::seconds(3);
 constexpr auto k_shimmer_period = std::chrono::seconds(2);
@@ -398,56 +405,6 @@ usize offset_at_column(std::string_view text, usize first, usize last, i32 colum
     return offset;
 }
 
-bool space_grapheme(std::string_view value) {
-    return value == "\n" || value == "\r" || value == "\t" || value == " " ||
-           (value.size() == 1 && std::isspace(static_cast<unsigned char>(value.front())) != 0);
-}
-
-bool word_grapheme(std::string_view value) {
-    if (value.size() != 1) return !space_grapheme(value);
-    const auto character = static_cast<unsigned char>(value.front());
-    return std::isalnum(character) != 0 || character == '_';
-}
-
-usize previous_word_boundary(std::string_view text, usize cursor) {
-    auto offset = cursor;
-    while (offset > 0) {
-        const auto previous = previous_grapheme_boundary(text, offset);
-        if (!space_grapheme(text.substr(previous, offset - previous))) break;
-        offset = previous;
-    }
-    if (offset == 0) return 0;
-    auto previous = previous_grapheme_boundary(text, offset);
-    const bool word = word_grapheme(text.substr(previous, offset - previous));
-    while (offset > 0) {
-        previous = previous_grapheme_boundary(text, offset);
-        const auto value = text.substr(previous, offset - previous);
-        if (space_grapheme(value) || word_grapheme(value) != word) break;
-        offset = previous;
-    }
-    return offset;
-}
-
-usize next_word_boundary(std::string_view text, usize cursor) {
-    auto offset = cursor;
-    while (offset < text.size()) {
-        const auto grapheme = next_grapheme(text, offset);
-        const auto value = text.substr(offset, grapheme.size);
-        if (!space_grapheme(value)) break;
-        offset += grapheme.size;
-    }
-    if (offset == text.size()) return offset;
-    auto grapheme = next_grapheme(text, offset);
-    const bool word = word_grapheme(text.substr(offset, grapheme.size));
-    while (offset < text.size()) {
-        grapheme = next_grapheme(text, offset);
-        const auto value = text.substr(offset, grapheme.size);
-        if (space_grapheme(value) || word_grapheme(value) != word) break;
-        offset += grapheme.size;
-    }
-    return offset;
-}
-
 struct ComposerProjection {
     std::vector<std::string> rows;
     i32 cursor_row = 0;
@@ -523,7 +480,6 @@ ComposerLayout composer_layout(const SessionScreen &screen, const ComposerProjec
     const auto available = std::max(screen.size.rows - header - footer, 1);
     const auto growth_limit = std::max(std::min(screen.size.rows / 3, 8), 1);
     ComposerLayout result{.content_rows = std::min({static_cast<i32>(projection.rows.size()), growth_limit, available})};
-    constexpr i32 k_transcript_reserve = 4;
     const auto padding = std::clamp(available - result.content_rows - k_transcript_reserve, 0, 2);
     result.top_padding = padding == 2 ? 1 : 0;
     result.bottom_padding = padding >= 1 ? 1 : 0;
@@ -900,15 +856,148 @@ std::string SessionScreen::take_prompt() {
     transient_status.reset();
     auto prompt = composer.take();
     prompt_history.record(prompt);
+    sync_command_menu();
     return prompt;
 }
 
-void SessionScreen::mark_editing() noexcept {
+PickerKeyResult SessionScreen::apply_picker_key(PickerKey key) {
+    if (picker) {
+        switch (key) {
+            case PickerKey::UP: picker->move(-1); return PickerKeyResult::HANDLED;
+            case PickerKey::DOWN: picker->move(1); return PickerKeyResult::HANDLED;
+            case PickerKey::TAB: return PickerKeyResult::HANDLED;
+            // Confirmation and cancellation semantics belong to the picker's
+            // dialog controller; the screen only guards normal submission.
+            case PickerKey::ENTER:
+            case PickerKey::ESCAPE: return PickerKeyResult::HANDLED;
+        }
+        return PickerKeyResult::HANDLED;
+    }
+    if (!command_menu.open) return PickerKeyResult::PASS;
+    switch (key) {
+        case PickerKey::UP: command_menu.picker.move(-1); return PickerKeyResult::HANDLED;
+        case PickerKey::DOWN: command_menu.picker.move(1); return PickerKeyResult::HANDLED;
+        case PickerKey::TAB: complete_highlighted_command(); return PickerKeyResult::HANDLED;
+        case PickerKey::ENTER: {
+            const auto token = command_token();
+            if (token && find_command(*token) != nullptr) return PickerKeyResult::SUBMIT;
+            if (command_menu.picker.filtered.empty()) return PickerKeyResult::SUBMIT;
+            complete_highlighted_command();
+            return PickerKeyResult::HANDLED;
+        }
+        case PickerKey::ESCAPE: {
+            const auto token = command_token();
+            command_menu.dismissed_token = token ? std::optional<std::string>(std::string(*token)) : std::nullopt;
+            command_menu.open = false;
+            return PickerKeyResult::HANDLED;
+        }
+    }
+    return PickerKeyResult::PASS;
+}
+
+bool SessionScreen::compact_surface_active() const noexcept { return picker.has_value() || command_menu.open; }
+
+bool SessionScreen::model_picker_active() const noexcept { return picker.has_value(); }
+
+void SessionScreen::open_picker(CompactPicker next) { picker = std::move(next); }
+
+void SessionScreen::close_picker() noexcept { picker.reset(); }
+
+void SessionScreen::picker_set_items(std::vector<CompactPickerItem> items) {
+    if (!picker) return;
+    picker->loading = false;
+    picker->set_items(std::move(items));
+}
+
+void SessionScreen::picker_fail(std::string detail) {
+    if (!picker) return;
+    picker->loading = false;
+    picker->error = std::move(detail);
+}
+
+void SessionScreen::picker_query_edit(PickerQueryEdit edit, std::string_view text) {
+    if (!picker) return;
+    if (edit == PickerQueryEdit::INSERT) {
+        std::string printable;
+        for (const char character : text) {
+            if (static_cast<unsigned char>(character) >= 0x20) printable += character;
+        }
+        picker->edit_query(edit, printable);
+        return;
+    }
+    picker->edit_query(edit);
+}
+
+void SessionScreen::mark_editing() {
     transient_status.reset();
     clear_selection();
     if (state != SessionState::WAITING && state != SessionState::STREAMING && state != SessionState::RUNNING_TOOLS) {
         state = SessionState::EDITING;
     }
+    sync_command_menu();
+}
+
+std::optional<std::string_view> SessionScreen::command_token() const noexcept {
+    const std::string_view text(composer.text);
+    if (!text.starts_with('/') || text.starts_with("//")) return std::nullopt;
+    const auto token_end = text.find_first_of(" \t\r\n\f\v", 1);
+    return text.substr(1, token_end == std::string_view::npos ? std::string_view::npos : token_end - 1);
+}
+
+void SessionScreen::sync_command_menu() {
+    const auto token = command_token();
+    if (!token) {
+        command_menu.open = false;
+        command_menu.dismissed_token.reset();
+        return;
+    }
+    if (composer.cursor < 1 || composer.cursor > 1 + token->size()) {
+        command_menu.open = false;
+        return;
+    }
+    if (command_menu.dismissed_token && *command_menu.dismissed_token == *token) {
+        command_menu.open = false;
+        return;
+    }
+    command_menu.dismissed_token.reset();
+    if (!command_menu.populated) {
+        std::vector<CompactPickerItem> items;
+        for (const auto &spec : command_registry()) {
+            CompactPickerItem item{
+                .id = std::string(spec.name),
+                .primary = "/" + std::string(spec.name),
+                .annotation = std::string(spec.synopsis),
+                .description = std::string(spec.description),
+            };
+            if (spec.idle_only) item.description += " (idle only)";
+            item.haystacks.emplace_back(spec.name);
+            for (const auto &alias : spec.aliases) item.haystacks.emplace_back(alias);
+            items.push_back(std::move(item));
+        }
+        command_menu.picker.set_items(std::move(items));
+        command_menu.populated = true;
+    }
+    command_menu.picker.set_query(*token);
+    command_menu.open = true;
+}
+
+void SessionScreen::complete_highlighted_command() {
+    const auto *item = command_menu.picker.highlighted_item();
+    if (!item) return;
+    const auto token = command_token();
+    if (!token) return;
+    prompt_history.edited();
+    composer.text.replace(1, token->size(), item->id);
+    composer.cursor = 1 + item->id.size();
+    composer.preferred_column.reset();
+    mark_editing();
+}
+
+i32 SessionScreen::compact_band_rows(i32 base_viewport) const noexcept {
+    const auto *active = picker ? &*picker : (command_menu.open ? &command_menu.picker : nullptr);
+    if (!active) return 0;
+    const auto budget = std::max(base_viewport - k_transcript_reserve, 0);
+    return std::clamp(active->desired_rows(picker.has_value()), 0, budget);
 }
 
 std::vector<LayoutRow> SessionScreen::layout_block(const Block &block) const {
@@ -1042,7 +1131,8 @@ i32 SessionScreen::viewport_rows() const {
     const auto projection = project_composer(*this);
     const auto header = size.rows >= 2 ? 1 : 0;
     const auto footer = size.rows >= 3 ? 1 : 0;
-    return std::max(size.rows - header - footer - composer_layout(*this, projection).rows(), 0);
+    const auto base = std::max(size.rows - header - footer - composer_layout(*this, projection).rows(), 0);
+    return std::max(base - compact_band_rows(base), 0);
 }
 
 bool SessionScreen::working() const noexcept {
@@ -1095,6 +1185,9 @@ Frame SessionScreen::frame() const {
         i32 column = 0;
         for (const auto &span : row.spans) column = result.surface.write(target_row, column, span.text, span.style);
     }
+    if (transcript.blocks.empty() && state == SessionState::EDITING && !compact_surface_active() && viewport_rows() > 0) {
+        result.surface.write(header ? 1 : 0, 0, k_empty_session_hint, Style::MUTED);
+    }
 
     if (has_footer) {
         std::string status_text;
@@ -1136,6 +1229,14 @@ Frame SessionScreen::frame() const {
         .column = std::clamp(projected_composer.cursor_column, 0, size.columns - 1),
         .visible = true,
     };
+
+    const auto base_viewport = std::max(size.rows - (header ? 1 : 0) - (has_footer ? 1 : 0) - composer.rows(), 0);
+    const auto band = compact_band_rows(base_viewport);
+    if (band > 0) {
+        const auto *active = picker ? &*picker : &command_menu.picker;
+        const auto band_cursor = active->project(result.surface, prompt_row - band, band, picker.has_value());
+        if (band_cursor) result.cursor = *band_cursor;
+    }
 
     if (selection && selection->anchor != selection->focus) {
         const auto [first, last] = std::minmax(selection->anchor, selection->focus);

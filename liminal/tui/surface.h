@@ -109,6 +109,11 @@ GraphemeSpan next_grapheme(std::string_view text, usize offset = 0) noexcept;
 usize previous_grapheme_boundary(std::string_view text, usize offset) noexcept;
 usize next_grapheme_boundary(std::string_view text, usize offset) noexcept;
 
+/// Word boundaries used by cursor word-movement and word-deletion: skip
+/// adjacent whitespace, then one run of word or non-word graphemes.
+usize previous_word_boundary(std::string_view text, usize cursor) noexcept;
+usize next_word_boundary(std::string_view text, usize cursor) noexcept;
+
 /// Exact Unicode 17 terminal-cell width. String measurement is performed per
 /// extended grapheme cluster so emoji and joined sequences are not overcounted.
 i32 cell_width(char32_t codepoint) noexcept;

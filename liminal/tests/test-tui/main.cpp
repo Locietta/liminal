@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -16,6 +18,9 @@
 #include <liminal/event.h>
 #include <liminal/tui/clipboard.h>
 #include <liminal/tui/command.h>
+#include <liminal/tui/compact_picker.h>
+#include <liminal/tui/compact_picker_dialog.h>
+#include <liminal/tui/model_picker.h>
 #include <liminal/tui/headless.h>
 #include <liminal/tui/external_editor.h>
 #include <liminal/tui/rich_text.h>
@@ -660,6 +665,31 @@ void check_command_parsing_and_status() {
     require(tui::require_no_arguments("quit", " ") && !tui::require_no_arguments("quit", "now"),
             "argument-free commands must reject unexpected arguments");
 
+    const auto registry = tui::command_registry();
+    std::set<tui::CommandKind> kinds;
+    std::set<std::string_view, std::less<>> names;
+    for (const auto &spec : registry) {
+        kinds.insert(spec.kind);
+        require(names.insert(spec.name).second, "canonical command names must be unique in the registry");
+        for (const auto &alias : spec.aliases) {
+            require(names.insert(alias).second, "command aliases must not collide with other registry names");
+        }
+        require(!spec.description.empty(), "every registry entry must describe itself");
+        for (const auto &name_or_alias : names) {
+            require(std::ranges::none_of(name_or_alias, [](char c) { return std::isupper(static_cast<unsigned char>(c)) != 0; }),
+                    "registry names must stay lowercase");
+        }
+        auto resolved = tui::resolve_command(spec.name);
+        require(resolved && *resolved == spec.kind, "every registry entry must resolve to its own kind");
+    }
+    require(kinds.size() == registry.size(), "every executable command kind must appear exactly once in the registry");
+    require(!names.contains("archive") && !names.contains("unarchive"), "removed archive commands must stay absent from the registry");
+    const auto *help = tui::find_command("help");
+    require(help != nullptr && help->kind == tui::CommandKind::HELP, "/help must be registered");
+    require(tui::find_command("exit") == tui::find_command("quit") && tui::find_command("exit") != nullptr,
+            "aliases must find the same registry entry as the canonical name");
+    require(tui::find_command("copycat") == nullptr, "unknown names must not find a registry entry");
+
     tui::SessionScreen screen;
     screen.resize({80, 10});
     screen.set_model("test-model", std::nullopt);
@@ -680,6 +710,294 @@ void check_command_parsing_and_status() {
     require(frame_text(editor).contains("Save and close external editor") &&
                 editor.surface.cells[static_cast<usize>(9 * editor.surface.columns)].style == tui::Style::MUTED,
             "external-editor guidance must take priority over a copy confirmation");
+}
+
+void check_help_notice_lists_registry() {
+    const auto reference = tui::describe_commands();
+    require(reference.starts_with("commands:\n"), "/help must open with the command reference heading");
+    for (const auto &spec : tui::command_registry()) {
+        require(reference.contains("/" + std::string(spec.name)), "/help must list every registered command");
+        require(reference.contains(spec.description), "/help must carry every registry description");
+        for (const auto &alias : spec.aliases) {
+            require(reference.contains("(also /" + std::string(alias) + ")"), "/help must surface registered aliases");
+        }
+        if (spec.idle_only) {
+            const auto line_start = reference.find("/" + std::string(spec.name));
+            const auto line_end = reference.find('\n', line_start);
+            require(reference.substr(line_start, line_end - line_start).contains("(idle only)"),
+                    "/help must mark idle-only commands on their own line");
+        }
+    }
+    require(reference.contains("[selector]") && reference.contains("<title> | --clear"),
+            "/help must show argument synopses from the registry");
+    require(reference.contains("type // to send a prompt that starts with /"), "/help must explain the double-slash escape");
+    const auto lines = static_cast<usize>(std::ranges::count(reference, '\n'));
+    require(lines == tui::command_registry().size() + 2, "/help must render exactly one line per command plus chrome");
+}
+
+void check_compact_picker_filtering_and_states() {
+    auto item = [](std::string id, std::string primary) {
+        tui::CompactPickerItem entry{.id = std::move(id), .primary = std::move(primary)};
+        entry.haystacks.push_back(entry.id);
+        return entry;
+    };
+
+    tui::CompactPicker prefix{.match = tui::CompactPickerMatch::PREFIX};
+    std::vector<tui::CompactPickerItem> commands;
+    commands.push_back(item("model", "/model"));
+    commands.push_back(item("compact", "/compact"));
+    commands.push_back(item("copy", "/copy"));
+    prefix.set_items(std::move(commands));
+    require(prefix.filtered.size() == 3, "an empty query must match every item");
+    prefix.set_query("co");
+    require(prefix.filtered.size() == 2 && prefix.highlighted_id() == "compact",
+            "prefix matching must keep only names beginning with the query");
+    prefix.set_query("ompac");
+    require(prefix.filtered.empty() && !prefix.highlighted_id(), "prefix matching must not match interior text");
+    prefix.set_query("CO");
+    require(prefix.filtered.size() == 2, "matching must be case-insensitive");
+
+    tui::CompactPicker picker{.query_label = "Model", .empty_message = "No matching model"};
+    std::vector<tui::CompactPickerItem> models;
+    for (auto name : {"alpha/one", "alpha/two", "beta/one", "beta/two", "gamma/one"}) {
+        models.push_back(item(name, name));
+    }
+    models[3].current = true;
+    picker.set_items(std::move(models));
+    require(picker.filtered.size() == 5, "substring picker must start unfiltered");
+    picker.move(3);
+    require(picker.highlighted_id() == "beta/two", "movement must follow filtered order");
+    picker.move(10);
+    require(picker.highlighted_id() == "gamma/one", "movement must clamp at the last result");
+    picker.move(-1);
+    picker.set_query("two");
+    require(picker.filtered.size() == 2 && picker.highlighted_id() == "beta/two",
+            "narrowing the query must preserve the highlighted identity when it still matches");
+    picker.set_query("one");
+    require(picker.highlighted_id() == "alpha/one", "a highlight filtered out must reset to the first result");
+    picker.set_query("");
+    require(picker.highlighted_id() == "alpha/one" && picker.filtered.size() == 5,
+            "clearing the query must restore the complete ordered dataset");
+
+    require(picker.desired_rows(false) == 5 && picker.desired_rows(true) == 6, "desired rows must count results plus the owned query row");
+    picker.error = "refresh failed";
+    require(picker.desired_rows(true) == 7, "an error must occupy one extra row");
+    picker.error.reset();
+
+    tui::Surface surface(40, 10);
+    picker.set_query("one");
+    const auto cursor = picker.project(surface, 2, picker.desired_rows(true), true);
+    require(surface.row_text(2) == "› alpha/one" && surface.row_text(3) == "  beta/one" && surface.row_text(4) == "  gamma/one",
+            "the highlighted result must carry the selection marker");
+    require(surface.row_text(5) == "Model: one", "the owned query row must render nearest the composer");
+    require(cursor && cursor->row == 5 && cursor->column == tui::text_width("Model: one") && cursor->visible,
+            "the query cursor must sit after the query text");
+
+    tui::Surface narrow_query_surface(12, 1);
+    picker.set_query("ab中cd👩‍💻ef");
+    const auto end_cursor = picker.project(narrow_query_surface, 0, 1, true);
+    require(narrow_query_surface.row_text(0) == "Model: 👩‍💻ef" && end_cursor && end_cursor->column == 11,
+            "a long query must show a grapheme-safe suffix with its end cursor visible");
+    picker.edit_query(tui::PickerQueryEdit::HOME);
+    narrow_query_surface.clear();
+    const auto home_cursor = picker.project(narrow_query_surface, 0, 1, true);
+    require(narrow_query_surface.row_text(0) == "Model: ab中c" && home_cursor && home_cursor->column == tui::text_width("Model: "),
+            "moving to the start must window a long query back to its grapheme-safe prefix");
+    picker.edit_query(tui::PickerQueryEdit::RIGHT);
+    picker.edit_query(tui::PickerQueryEdit::RIGHT);
+    picker.edit_query(tui::PickerQueryEdit::RIGHT);
+    picker.edit_query(tui::PickerQueryEdit::RIGHT);
+    narrow_query_surface.clear();
+    const auto middle_cursor = picker.project(narrow_query_surface, 0, 1, true);
+    require(narrow_query_surface.row_text(0) == "Model: b中cd" && middle_cursor && middle_cursor->column == 11,
+            "query windowing must follow a moved cursor without splitting wide graphemes");
+
+    surface.clear();
+    picker.set_query("one");
+    picker.move(2);
+    picker.project(surface, 0, 2, false);
+    require(surface.row_text(0) == "  beta/one" && surface.row_text(1) == "› gamma/one",
+            "a shrunken band must keep the highlighted result visible");
+
+    surface.clear();
+    picker.error = "Cannot refresh models";
+    picker.set_query("nothing-matches");
+    picker.project(surface, 0, picker.desired_rows(true), true);
+    require(surface.row_text(0) == "No matching model" && surface.row_text(1) == "Cannot refresh models" &&
+                surface.row_text(2) == "Model: nothing-matches",
+            "empty and error states must render as explicit compact rows");
+
+    surface.clear();
+    picker.error.reset();
+    picker.loading = true;
+    picker.project(surface, 0, picker.desired_rows(false), false);
+    require(surface.row_text(0) == "Loading…", "the loading state must render one compact row");
+
+    tui::CompactPicker current_marker;
+    current_marker.set_items({item("beta/two", "beta/two")});
+    current_marker.items[0].current = true;
+    tui::Surface marker_surface(40, 1);
+    current_marker.project(marker_surface, 0, 1, false);
+    require(marker_surface.row_text(0) == "› beta/two · current", "the current item must carry a visible marker");
+}
+
+void check_command_menu_activation_boundary() {
+    tui::HeadlessSession session(80, 24);
+    auto ok = [&](const tui::HeadlessAction &action) { require(session.apply(action).has_value(), "headless action must apply"); };
+
+    ok({.type = "insert", .text = "/"});
+    auto snapshot = session.inspect();
+    require(snapshot.command_menu_open, "typing a lone slash must open the command menu");
+    require(snapshot.picker_visible_ids.size() == tui::command_registry().size(), "an empty command token must list the whole registry");
+
+    ok({.type = "insert", .text = "mo"});
+    snapshot = session.inspect();
+    require(snapshot.command_menu_open && snapshot.picker_visible_ids == std::vector<std::string>{"model"},
+            "prefix matching must narrow the menu to the single matching command");
+
+    ok({.type = "insert", .text = " high"});
+    require(!session.inspect().command_menu_open, "a cursor inside command arguments must close the menu");
+    for (i32 step = 0; step < 5; ++step) ok({.type = "left"});
+    require(session.inspect().command_menu_open, "returning the cursor to the command token must reopen the menu");
+
+    ok({.type = "clear"});
+    ok({.type = "insert", .text = "//model"});
+    require(!session.inspect().command_menu_open, "an escaped double-slash draft must never open the menu");
+
+    ok({.type = "clear"});
+    ok({.type = "insert", .text = "see /model docs"});
+    require(!session.inspect().command_menu_open, "a slash later in an ordinary prompt must not open the menu");
+
+    ok({.type = "clear"});
+    ok({.type = "insert", .text = "/name foo\nbar"});
+    require(!session.inspect().command_menu_open, "a multi-line command draft with the cursor in arguments must stay closed");
+
+    ok({.type = "clear"});
+    ok({.type = "insert", .text = "/mo"});
+    require(session.inspect().command_menu_open, "a fresh command token must open the menu");
+    ok({.type = "escape"});
+    snapshot = session.inspect();
+    require(!snapshot.command_menu_open && snapshot.composer_text == "/mo", "Esc must close the menu without modifying the draft");
+    ok({.type = "left"});
+    ok({.type = "right"});
+    require(!session.inspect().command_menu_open, "cursor movement over an unchanged dismissed token must not reopen the menu");
+    ok({.type = "insert", .text = "d"});
+    require(session.inspect().command_menu_open, "editing the token must clear the dismissal and reopen the menu");
+}
+
+void check_command_menu_key_semantics() {
+    tui::HeadlessSession session(80, 24);
+    auto ok = [&](const tui::HeadlessAction &action) { require(session.apply(action).has_value(), "headless action must apply"); };
+
+    ok({.type = "insert", .text = "/mo"});
+    auto snapshot = session.inspect();
+    require(snapshot.command_menu_open && snapshot.picker_highlight_id == "model", "the prefix match must be highlighted");
+    ok({.type = "tab"});
+    snapshot = session.inspect();
+    require(snapshot.composer_text == "/model" && snapshot.composer_cursor == 6 && snapshot.command_menu_open,
+            "Tab must complete the canonical command name and keep the menu open");
+    require(snapshot.blocks.empty(), "Tab completion must not submit anything");
+
+    ok({.type = "clear"});
+    ok({.type = "insert", .text = "/hi"});
+    ok({.type = "submit"});
+    snapshot = session.inspect();
+    require(snapshot.composer_text == "/history" && snapshot.blocks.empty(),
+            "Enter on an incomplete highlighted command must complete it without executing");
+    ok({.type = "submit"});
+    snapshot = session.inspect();
+    require(snapshot.blocks.size() == 1 && snapshot.composer_text.empty() && !snapshot.command_menu_open,
+            "Enter on an exact command must fall through to normal submission");
+
+    ok({.type = "insert", .text = "/exit"});
+    require(session.inspect().command_menu_open, "an alias token must keep the menu open");
+    ok({.type = "submit"});
+    snapshot = session.inspect();
+    require(snapshot.blocks.size() == 2 && snapshot.composer_text.empty(),
+            "Enter on an exact alias must fall through to normal submission");
+
+    ok({.type = "insert", .text = "/c"});
+    snapshot = session.inspect();
+    require(snapshot.picker_visible_ids == std::vector<std::string>{"context", "compact", "copy"},
+            "prefix results must keep registry order");
+    require(snapshot.picker_highlight_id == "context", "the first result must be highlighted initially");
+    ok({.type = "down"});
+    require(session.inspect().picker_highlight_id == "compact", "Down must move the highlight");
+    ok({.type = "down"});
+    ok({.type = "down"});
+    require(session.inspect().picker_highlight_id == "copy", "the highlight must clamp at the last result");
+    ok({.type = "up"});
+    require(session.inspect().picker_highlight_id == "compact", "Up must move the highlight back");
+    require(session.inspect().composer_text == "/c", "moving the highlight must not modify the draft");
+
+    ok({.type = "clear"});
+    ok({.type = "insert", .text = "/copycat"});
+    snapshot = session.inspect();
+    require(snapshot.command_menu_open && snapshot.picker_visible_ids.empty() && !snapshot.picker_highlight_id,
+            "an unknown token must show the explicit empty state");
+    ok({.type = "submit"});
+    snapshot = session.inspect();
+    require(snapshot.blocks.size() == 3 && snapshot.composer_text.empty(),
+            "Enter with no matching command must submit into the command error boundary");
+
+    ok({.type = "insert", .text = "hello"});
+    ok({.type = "tab"});
+    require(session.inspect().composer_text == "hello\t", "Tab outside an active menu must keep inserting a literal tab");
+}
+
+void check_command_menu_rows_and_availability() {
+    tui::HeadlessSession session(100, 24);
+    auto ok = [&](const tui::HeadlessAction &action) { require(session.apply(action).has_value(), "headless action must apply"); };
+
+    ok({.type = "insert", .text = "/re"});
+    auto snapshot = session.inspect();
+    bool found = false;
+    for (const auto &row : snapshot.visible_text) {
+        if (!row.contains("/resume")) continue;
+        found = true;
+        require(row.contains("› /resume"), "the highlighted row must carry the selection marker");
+        require(row.contains("switch to another session") && row.contains("(idle only)"),
+                "menu rows must show the description and availability without hiding the command");
+    }
+    require(found, "the matching command row must be visible above the composer");
+
+    ok({.type = "clear"});
+    ok({.type = "insert", .text = "/copy"});
+    snapshot = session.inspect();
+    found = false;
+    for (const auto &row : snapshot.visible_text) {
+        if (!row.contains("[reply number]")) continue;
+        found = true;
+        require(row.contains("/copy") && row.contains("copy an assistant reply"),
+                "menu rows must include the argument synopsis alongside the description");
+    }
+    require(found, "the synopsis row must be visible");
+
+    const auto before_rows = session.inspect();
+    ok({.type = "escape"});
+    const auto after_rows = session.inspect();
+    require(!after_rows.command_menu_open, "Esc must close the menu");
+    require(after_rows.composer_text == before_rows.composer_text, "closing the menu must preserve the draft");
+}
+
+void check_empty_session_hint() {
+    tui::HeadlessSession session(80, 12);
+    auto ok = [&](const tui::HeadlessAction &action) { require(session.apply(action).has_value(), "headless action must apply"); };
+    auto shows_hint = [&] {
+        const auto snapshot = session.inspect();
+        return std::ranges::any_of(snapshot.visible_text,
+                                   [](const std::string &row) { return row.contains("Ask Liminal anything. Type / for commands."); });
+    };
+
+    require(shows_hint(), "a fresh empty session must show the discovery hint");
+    ok({.type = "insert", .text = "/"});
+    require(!shows_hint(), "the open command menu must replace the hint");
+    ok({.type = "escape"});
+    require(shows_hint(), "closing the menu on an empty session must restore the hint");
+    ok({.type = "resize", .columns = 60, .rows = 10});
+    require(shows_hint(), "resize must not lose the hint on an empty session");
+    ok({.type = "notice", .text = "session restored"});
+    require(!shows_hint(), "any transcript content must retire the hint");
 }
 
 void check_scroll_resize_state() {
@@ -960,6 +1278,201 @@ void check_headless_selectable_list() {
             "page failure must render without losing the selected item identity");
 }
 
+void check_model_picker_headless_flow() {
+    tui::HeadlessSession session(80, 24);
+    auto ok = [&](const tui::HeadlessAction &action) { require(session.apply(action).has_value(), "headless action must apply"); };
+
+    ok({.type = "insert", .text = "draft in progress"});
+    ok({.type = "open_model_picker", .amount = 1});
+    auto snapshot = session.inspect();
+    require(snapshot.focused_surface == "compact_picker" && snapshot.picker_loading,
+            "an opening picker must own focus and show its loading state");
+    require(std::ranges::any_of(snapshot.visible_text, [](const std::string &row) { return row.contains("Loading…"); }),
+            "the loading state must render a compact row");
+    require(std::ranges::any_of(snapshot.visible_text, [](const std::string &row) { return row.starts_with("Model:"); }),
+            "the owned query row must render while loading");
+
+    ok({.type = "picker_items", .text = "alpha/one@low\nalpha/one@high\n*beta/one@high\ngamma/two"});
+    ok({.type = "insert", .text = "one"});
+    snapshot = session.inspect();
+    require(!snapshot.picker_loading && snapshot.picker_query == "one" && snapshot.picker_visible_ids.size() == 3,
+            "typing while the picker owns focus must edit the picker query");
+    require(snapshot.composer_text == "draft in progress", "the composer draft must stay untouched behind the picker");
+
+    ok({.type = "insert", .text = " HIGH"});
+    require(session.inspect().picker_visible_ids.empty(), "a spaced query must reach the empty state");
+    for (i32 step = 0; step < 5; ++step) ok({.type = "backspace"});
+    ok({.type = "insert", .text = "high"});
+    snapshot = session.inspect();
+    require(snapshot.picker_query == "onehigh" && snapshot.picker_visible_ids.empty(),
+            "backspace must edit the picker query, not the composer");
+    for (i32 step = 0; step < 7; ++step) ok({.type = "backspace"});
+    ok({.type = "insert", .text = "high"});
+    snapshot = session.inspect();
+    require(snapshot.picker_visible_ids == std::vector<std::string>{"alpha/one@high", "beta/one@high"},
+            "case-insensitive substring matching must include effort labels");
+
+    ok({.type = "down"});
+    snapshot = session.inspect();
+    require(snapshot.picker_highlight_id == "beta/one@high", "Down must move the picker highlight");
+
+    ok({.type = "picker_error", .text = "Cannot refresh models: provider offline"});
+    snapshot = session.inspect();
+    require(snapshot.picker_error == "Cannot refresh models: provider offline" && snapshot.picker_query == "high" &&
+                snapshot.picker_highlight_id == "beta/one@high",
+            "an error must preserve the query and highlighted identity");
+    require(std::ranges::any_of(snapshot.visible_text,
+                                [](const std::string &row) { return row.contains("Cannot refresh models: provider offline"); }),
+            "the error state must render a bounded compact row");
+
+    ok({.type = "resize", .columns = 70, .rows = 20});
+    snapshot = session.inspect();
+    require(snapshot.picker_query == "high" && snapshot.picker_highlight_id == "beta/one@high",
+            "resize must preserve the picker query and selection identity");
+
+    ok({.type = "home"});
+    require(session.inspect().picker_query_cursor == 0, "Home must move the query cursor to the start");
+    ok({.type = "insert", .text = "not"});
+    snapshot = session.inspect();
+    require(snapshot.picker_query == "nothigh" && snapshot.picker_query_cursor == 3,
+            "insertion must happen at the query cursor rather than the tail");
+    require(snapshot.picker_visible_ids.empty(), "mid-query insertion must refilter");
+    ok({.type = "delete_word"});
+    snapshot = session.inspect();
+    require(snapshot.picker_query == "not" && snapshot.picker_query_cursor == 3, "delete-word must erase the word after the query cursor");
+    ok({.type = "backspace_word"});
+    snapshot = session.inspect();
+    require(snapshot.picker_query.empty() && snapshot.picker_query_cursor == 0,
+            "backspace-word must erase the word before the query cursor");
+    require(snapshot.picker_visible_ids.size() == 4, "clearing the query must restore the complete dataset");
+
+    ok({.type = "insert", .text = "中"});
+    ok({.type = "insert", .text = "x"});
+    ok({.type = "left"});
+    ok({.type = "left"});
+    snapshot = session.inspect();
+    require(snapshot.picker_query == "中x" && snapshot.picker_query_cursor == 0, "Left must move by grapheme boundaries");
+    require(snapshot.cursor.visible && snapshot.cursor.column == tui::text_width("Model: "),
+            "the frame cursor must track the query cursor");
+    ok({.type = "right"});
+    require(session.inspect().picker_query_cursor == 3, "Right must cross a multi-byte grapheme in one step");
+    ok({.type = "end"});
+    require(session.inspect().picker_query_cursor == 4, "End must move the query cursor to the end");
+    ok({.type = "delete"});
+    require(session.inspect().picker_query == "中x", "Delete at the end of the query must be a no-op");
+    ok({.type = "word_left"});
+    require(session.inspect().picker_query_cursor == 0, "word movement must operate on the query");
+    ok({.type = "delete"});
+    require(session.inspect().picker_query == "x", "Delete must erase the grapheme after the cursor");
+
+    ok({.type = "escape"});
+    snapshot = session.inspect();
+    require(snapshot.focused_surface == "session" && snapshot.composer_text == "draft in progress",
+            "cancelling the picker must return focus to the untouched composer");
+}
+
+void check_model_picker_rows_disambiguate_providers() {
+    std::vector<model::Entry> entries;
+    entries.push_back({.provider = "alpha", .id = "gpt-x", .name = "GPT X", .reasoning_efforts = {"low", "high"}});
+    entries.push_back({.provider = "beta", .id = "gpt-x", .name = "gpt-x"});
+    const auto items = tui::model_picker_items(entries, "alpha", "gpt-x", std::optional<std::string>("high"));
+
+    std::vector<std::string> ids;
+    for (const auto &item : items) ids.push_back(item.id);
+    require(ids == std::vector<std::string>{"alpha/gpt-x@low", "alpha/gpt-x@high", "alpha/gpt-x@off", "beta/gpt-x"},
+            "rows must expand declared efforts plus an explicit off variant and stay selector-addressable");
+    require(items[0].primary == "alpha/gpt-x@low" && items[3].primary == "beta/gpt-x",
+            "duplicate model IDs must stay distinguishable by provider in the row text");
+    require(!items[0].current && items[1].current && !items[2].current && !items[3].current,
+            "exactly the active provider, model, and effort row must carry the current marker");
+    require(items[0].description == "GPT X" && items[3].description.empty(),
+            "display names must appear only when they differ from the model ID");
+
+    const auto effort_off = tui::model_picker_items(entries, "alpha", "gpt-x", std::nullopt);
+    require(!effort_off[0].current && !effort_off[1].current && effort_off[2].current && !effort_off[3].current,
+            "a null current effort must mark the @off row for a model with declared efforts");
+    const auto other_current = tui::model_picker_items(entries, "beta", "gpt-x", std::nullopt);
+    require(!other_current[0].current && !other_current[1].current && !other_current[2].current && other_current[3].current,
+            "a model without declared efforts must mark its bare row when its effort is null");
+
+    tui::CompactPicker picker;
+    picker.set_items(items);
+    picker.set_query("beta");
+    require(picker.filtered.size() == 1 && picker.highlighted_id() == "beta/gpt-x", "provider text must be searchable");
+    picker.set_query("gpt x");
+    require(picker.filtered.size() == 3, "display names must be searchable");
+    picker.set_query("off");
+    require(picker.filtered.size() == 1 && picker.highlighted_id() == "alpha/gpt-x@off",
+            "the off variant must be reachable through effort search");
+}
+
+void check_model_picker_shrinks_before_transcript_reserve() {
+    tui::HeadlessSession tall(60, 24);
+    auto ok_tall = [&](const tui::HeadlessAction &action) { require(tall.apply(action).has_value(), "headless action must apply"); };
+    for (i32 index = 0; index < 6; ++index) ok_tall({.type = "notice", .text = "transcript row " + std::to_string(index)});
+    ok_tall({.type = "open_model_picker", .text = "alpha/one\nbeta/two\ngamma/three\ndelta/four\nepsilon/five"});
+    auto snapshot = tall.inspect();
+    require(tall.screen.viewport_rows() >= 4, "a tall terminal must keep the guaranteed transcript reserve with the picker open");
+    require(std::ranges::any_of(snapshot.visible_text, [](const std::string &row) { return row.starts_with("Model:"); }),
+            "the tall band must render its query row");
+    require(std::ranges::any_of(snapshot.visible_text, [](const std::string &row) { return row.contains("alpha/one"); }),
+            "the tall band must render its result rows");
+    require(std::ranges::any_of(snapshot.visible_text, [](const std::string &row) { return row.contains("transcript row"); }),
+            "the transcript must stay visible above the band");
+    require(snapshot.visible_text.back().contains("headless"), "the footer must stay on the last row");
+
+    tui::HeadlessSession low(60, 8);
+    auto ok_low = [&](const tui::HeadlessAction &action) { require(low.apply(action).has_value(), "headless action must apply"); };
+    for (i32 index = 0; index < 6; ++index) ok_low({.type = "notice", .text = "transcript row " + std::to_string(index)});
+    const auto viewport_before = low.screen.viewport_rows();
+    ok_low({.type = "open_model_picker", .text = "alpha/one\nbeta/two"});
+    snapshot = low.inspect();
+    require(snapshot.focused_surface == "compact_picker", "the picker must stay active even when the band cannot render");
+    require(std::ranges::none_of(snapshot.visible_text, [](const std::string &row) { return row.starts_with("Model:"); }),
+            "the band must shrink to nothing before consuming the minimum transcript space");
+    require(low.screen.viewport_rows() == viewport_before, "a band with no room must leave the transcript viewport untouched");
+    require(snapshot.visible_text.back().contains("headless"), "the footer must survive on a short terminal");
+}
+
+void check_compact_picker_dialog_flow() {
+    tui::ConsoleRenderer renderer;
+    tui::CompactPickerDialog dialog;
+    lighter::EventLoop loop;
+
+    tui::CompactPicker picker{.query_label = "Model", .empty_message = "No matching model"};
+    picker.loading = true;
+    require(!dialog.begin(renderer, std::move(picker)), "compact picker dialog fixture failed to open");
+    require(dialog.active() && renderer.model_picker_active(), "the dialog must expose the open picker");
+
+    std::vector<tui::CompactPickerItem> items;
+    for (auto id : {"alpha/one", "beta/two"}) {
+        tui::CompactPickerItem item{.id = id, .primary = id};
+        item.haystacks.push_back(id);
+        items.push_back(std::move(item));
+    }
+    require(!dialog.set_items(items), "populating the dialog must succeed");
+    require(!renderer.screen.picker->loading, "populating must clear the loading state");
+
+    require(!dialog.confirm(), "confirm must succeed");
+    require(!dialog.active(), "confirm must close the picker");
+    auto decision = dialog.next();
+    loop.schedule(decision);
+    loop.run();
+    auto selected = decision.result();
+    require(selected.has_value() && *selected == "alpha/one", "confirm must record the highlighted identity");
+
+    picker = tui::CompactPicker{.query_label = "Model", .empty_message = "No matching model"};
+    require(!dialog.begin(renderer, std::move(picker)), "the dialog must reopen cleanly");
+    require(!dialog.set_items(items), "repopulating must succeed");
+    renderer.screen.picker->set_query("nothing-matches");
+    require(!dialog.confirm() && dialog.active(), "Enter with no matching result must keep the picker open");
+    require(!dialog.cancel() && !dialog.active(), "cancel must close the picker");
+    auto cancelled = dialog.next();
+    loop.schedule(cancelled);
+    loop.run();
+    require(!cancelled.result().has_value(), "cancel must record an empty decision");
+}
+
 void check_selectable_dialog_uses_generic_page_errors() {
     tui::ConsoleRenderer renderer;
     tui::SelectableListDialog dialog;
@@ -982,15 +1495,17 @@ void check_headless_resize_and_markup_stress() {
         return state;
     };
     constexpr std::string_view fragments[] = {
-        "plain text ", "**unfinished", "** done\n", "```cpp\n", "x();\n```\n", "\x1b[2J", "中", "👩‍💻", "\xff",
+        "plain text ", "**unfinished", "** done\n", "```cpp\n", "x();\n```\n", "\x1b[2J", "中", "👩‍💻", "\xff", "/", "/model x",
     };
 
+    bool assistant_streaming = false;
     for (usize index = 0; index < 4000; ++index) {
-        const auto choice = next() % 8;
+        const auto choice = next() % 11;
         tui::HeadlessAction action;
         if (choice <= 2) {
             action.type = "assistant_delta";
             action.text = std::string(fragments[next() % std::size(fragments)]);
+            assistant_streaming = true;
         } else if (choice == 3) {
             action.type = "resize";
             action.columns = 1 + static_cast<i32>(next() % 120);
@@ -1004,8 +1519,23 @@ void check_headless_resize_and_markup_stress() {
         } else if (choice == 6) {
             action.type = "advance_time";
             action.milliseconds = next() % 33;
-        } else {
+        } else if (choice == 7) {
+            action.type = "insert";
+            action.text = std::string(fragments[next() % std::size(fragments)]);
+        } else if (choice == 8) {
+            action.type = next() % 2 == 0 ? "tab" : "escape";
+        } else if (choice == 9) {
+            action.type = next() % 4 == 0 ? "close_picker" : "open_model_picker";
+            if (action.type == "open_model_picker") action.text = "alpha/one\nbeta/two\ngamma/three";
+        } else if (assistant_streaming) {
+            // The transcript reducer requires a streaming assistant block
+            // before an assistant message can complete.
             action.type = "assistant_message_completed";
+            assistant_streaming = false;
+        } else {
+            action.type = "assistant_delta";
+            action.text = std::string(fragments[next() % std::size(fragments)]);
+            assistant_streaming = true;
         }
         require(session.apply(action).has_value(), "bounded stress action must remain valid");
 
@@ -1041,11 +1571,21 @@ i32 run_all(std::string_view executable) {
     check_external_editor_round_trip(executable);
     check_clipboard_helper();
     check_command_parsing_and_status();
+    check_help_notice_lists_registry();
+    check_compact_picker_filtering_and_states();
+    check_command_menu_activation_boundary();
+    check_command_menu_key_semantics();
+    check_command_menu_rows_and_availability();
+    check_empty_session_hint();
     check_scroll_resize_state();
     check_working_indicator();
     check_mouse_selection();
     check_headless_virtual_time_and_snapshots();
     check_headless_selectable_list();
+    check_model_picker_headless_flow();
+    check_model_picker_rows_disambiguate_providers();
+    check_model_picker_shrinks_before_transcript_reserve();
+    check_compact_picker_dialog_flow();
     check_selectable_dialog_uses_generic_page_errors();
     check_headless_resize_and_markup_stress();
     return 0;
