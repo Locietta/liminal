@@ -19,11 +19,24 @@ the matching home prefix is shown as `~`.
 
 ## Turn activity
 
-While a turn is active, `• Working…` follows the newest output directly in the transcript, with one blank line after it separating turn activity from the prompt composer. A soft highlight shimmers across the label while its elapsed timer remains muted. When the turn completes, the line becomes a persistent muted `Finished (3s)` summary until the next turn begins and keeps the same trailing separation. It scrolls away naturally while browsing history. Scrolling does not replace the footer's model, context, and token metadata. Very short terminals drop the blank separator before hiding the activity itself.
+While a turn is active, one status follows the newest output directly in the transcript:
+
+- `• Thinking…` while Liminal waits for provider output.
+- `• Writing…` while visible assistant text is arriving.
+- `• Running tool…` while one tool is active.
+- `• Running <n> tools…` while tools run concurrently.
+
+Tool activity wins when text and tools overlap. When the last tool finishes, the status returns to Writing if assistant text is still arriving and otherwise to Thinking. A completed progress message also returns an active turn to Thinking instead of leaving a stale Writing status.
+
+One blank line separates activity from the prompt composer. A soft highlight shimmers across the complete current label while its elapsed timer remains muted. When the turn completes, the line becomes a persistent muted `Finished (3s)` summary until the next turn begins and keeps the same trailing separation. Cancellation and failure do not retain that summary. Activity scrolls away naturally while browsing history. Scrolling does not replace footer metadata, and very short terminals drop the blank separator before hiding activity itself.
 
 ## Prompt composer
 
-The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline text aligns with the draft instead of the marker and remains vertically windowed around the cursor when it grows. The footer beneath the composer shows the selected model and effort, remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan; browsing and external-editor states replace it when they need attention. On short terminals, decorative padding is removed before transcript or editing space.
+The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline text aligns with the draft instead of the marker and remains vertically windowed around the cursor when it grows. The footer beneath the composer shows the selected model and effort, remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan.
+
+On a narrow terminal, the footer removes whole fields in order: tokens first, context second, and an optional provider-limit field third. The model and effort remain last and are shortened by displayed terminal width only when nothing else remains. Separators disappear with their fields, and Unicode model names are never split inside a displayed character. Provider limits are shown only when an authoritative value has been supplied; Liminal does not currently acquire them.
+
+External-editor guidance and brief confirmations replace ordinary metadata when they need attention. A persistence failure shows `SESSION NOT SAVING` instead of allowing narrow ordinary fields to hide it. On short terminals, decorative composer padding is removed before transcript or editing space.
 
 ## Slash commands
 

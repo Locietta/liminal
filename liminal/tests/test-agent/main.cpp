@@ -160,7 +160,7 @@ void test_successful_task() {
     auto outcome = task.result();
 
     require(outcome.has_value(), "agent task failed");
-    require(events.size() == 7, "agent emitted an unexpected event count");
+    require(events.size() == 9, "agent emitted an unexpected event count");
     require(std::holds_alternative<AssistantTextDelta>(events[0]), "text delta must be the first response event");
     require(std::holds_alternative<AssistantMessageCompleted>(events[1]), "assistant message must finish before its tool");
     require(std::get<AssistantTextDelta>(events[0]).item_id == "message-1" &&
@@ -169,9 +169,19 @@ void test_successful_task() {
             "agent events did not preserve assistant output-item identity");
     require(std::holds_alternative<ToolStarted>(events[2]), "tool start event is missing");
     require(std::holds_alternative<ToolCompleted>(events[3]), "tool completion event is missing");
-    require(std::holds_alternative<AssistantTextDelta>(events[4]), "continuation text delta is missing");
-    require(std::holds_alternative<AssistantMessageCompleted>(events[5]), "continuation message completion is missing");
-    require(std::holds_alternative<TaskCompleted>(events[6]), "task completion event is missing");
+    require(std::holds_alternative<ProviderActivityCompleted>(events[4]), "first provider activity completion is missing");
+    require(std::holds_alternative<AssistantTextDelta>(events[5]), "continuation text delta is missing");
+    require(std::holds_alternative<AssistantMessageCompleted>(events[6]), "continuation message completion is missing");
+    require(std::holds_alternative<ProviderActivityCompleted>(events[7]), "continuation provider activity completion is missing");
+    require(std::holds_alternative<TaskCompleted>(events[8]), "task completion event is missing");
+    const auto first_scope = std::get<AssistantTextDelta>(events[0]).activity_scope;
+    const auto second_scope = std::get<AssistantTextDelta>(events[5]).activity_scope;
+    require(first_scope.task_generation != 0 && first_scope.task_generation == second_scope.task_generation &&
+                first_scope.provider_call_generation != second_scope.provider_call_generation &&
+                std::get<ToolStarted>(events[2]).activity_scope == first_scope &&
+                std::get<ToolCompleted>(events[3]).activity_scope == first_scope &&
+                std::get<TaskCompleted>(events[8]).task_generation == first_scope.task_generation,
+            "agent lifecycle events must preserve task identity while advancing provider-call activity generations");
     require(agent.session.entries.size() == 8, "semantic session has the wrong number of entries");
     require(std::holds_alternative<session::TaskStarted>(agent.session.entries[0].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
@@ -629,8 +639,9 @@ void test_automatic_compaction() {
     loop.run();
 
     require(task.result().has_value(), "automatic compaction task failed");
-    require(events.size() == 3 && std::holds_alternative<AssistantMessageCompleted>(events[0]) &&
-                std::holds_alternative<SessionNotice>(events[1]) && std::holds_alternative<TaskCompleted>(events[2]),
+    require(events.size() == 4 && std::holds_alternative<AssistantMessageCompleted>(events[0]) &&
+                std::holds_alternative<ProviderActivityCompleted>(events[1]) && std::holds_alternative<SessionNotice>(events[2]) &&
+                std::holds_alternative<TaskCompleted>(events[3]),
             "automatic compaction emitted the wrong lifecycle events");
     require(agent.session.entries.size() == 7 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[4].payload) &&

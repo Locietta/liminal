@@ -123,6 +123,47 @@ void check_completed_payload_reconciles_missing_deltas() {
             "completed-only assistant payload was not displayed");
 }
 
+void check_repeated_item_ids_are_provider_scoped() {
+    constexpr ActivityScope first_call{.task_generation = 7, .provider_call_generation = 11};
+    constexpr ActivityScope second_call{.task_generation = 7, .provider_call_generation = 12};
+    tui::Transcript transcript;
+    transcript.apply(AssistantTextDelta{.item_id = "output:0", .text = "first", .activity_scope = first_call});
+    transcript.apply(AssistantMessageCompleted{
+        .item_id = "output:0",
+        .text = "first response",
+        .phase = provider::MessagePhase::COMMENTARY,
+        .activity_scope = first_call,
+    });
+    transcript.apply(AssistantTextDelta{.item_id = "output:0", .text = "late", .activity_scope = first_call});
+    require(transcript.blocks.size() == 1 && transcript.blocks.front().text == "first response",
+            "a settled item must ignore late deltas from its own provider-call generation");
+    transcript.apply(AssistantTextDelta{.item_id = "output:0", .text = "second", .activity_scope = second_call});
+    transcript.apply(AssistantMessageCompleted{
+        .item_id = "output:0",
+        .text = "second response",
+        .phase = provider::MessagePhase::FINAL,
+        .activity_scope = second_call,
+    });
+
+    require(transcript.blocks.size() == 2 && transcript.blocks[0].text == "first response" &&
+                transcript.blocks[1].text == "second response" && transcript.blocks[0].activity_scope == first_call &&
+                transcript.blocks[1].activity_scope == second_call,
+            "provider-local output item IDs must remain independent across provider-call generations");
+}
+
+void check_task_completion_requires_settled_tools() {
+    tui::Transcript transcript;
+    transcript.apply(ToolStarted{.call_id = "call-1", .name = "read_file"});
+    require(transcript.has_running_tools() && transcript.blocks.back().state == tui::BlockState::RUNNING,
+            "a task with a running tool must not satisfy the completion invariant or fabricate success");
+
+    transcript.apply(ToolCompleted{.call_id = "call-1", .name = "read_file", .summary = "done"});
+    require(!transcript.has_running_tools(), "the explicit matching ToolCompleted event must settle the completion invariant");
+    transcript.apply(TaskCompleted{});
+    require(transcript.blocks.back().state == tui::BlockState::COMPLETED,
+            "TaskCompleted must preserve the state established by explicit tool completion");
+}
+
 void check_typed_model_selection() {
     tui::Transcript transcript;
     transcript.apply(ModelSelected{.name = "test-model", .effort = "high"});
@@ -137,6 +178,8 @@ i32 run_all() {
     check_cancelled_partial_output();
     check_item_identity_survives_interleaved_tools();
     check_completed_payload_reconciles_missing_deltas();
+    check_repeated_item_ids_are_provider_scoped();
+    check_task_completion_requires_settled_tools();
     check_typed_model_selection();
     return 0;
 }

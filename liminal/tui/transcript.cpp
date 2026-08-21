@@ -1,5 +1,6 @@
 #include "transcript.h"
 
+#include <algorithm>
 #include <type_traits>
 #include <utility>
 
@@ -25,30 +26,41 @@ void Transcript::load(std::vector<Block> completed_blocks) {
     for (auto &block : blocks) block.id = next_id++;
 }
 
+bool Transcript::has_running_tools() const noexcept {
+    return std::ranges::any_of(blocks,
+                               [](const Block &block) { return block.kind == BlockKind::TOOL && block.state == BlockState::RUNNING; });
+}
+
 void Transcript::apply_one(const PromptSubmitted &event) {
     append({.kind = BlockKind::USER, .state = BlockState::COMPLETED, .text = event.text});
 }
 
 void Transcript::apply_one(const AssistantTextDelta &event) {
     for (auto block = blocks.rbegin(); block != blocks.rend(); ++block) {
-        if (block->kind == BlockKind::ASSISTANT && block->state == BlockState::STREAMING && block->output_item_id == event.item_id) {
-            block->text += event.text;
-            return;
-        }
+        if (block->kind != BlockKind::ASSISTANT || block->activity_scope != event.activity_scope || block->output_item_id != event.item_id)
+            continue;
+        if (block->state == BlockState::STREAMING) block->text += event.text;
+        return;
     }
     append({
         .kind = BlockKind::ASSISTANT,
         .state = BlockState::STREAMING,
         .text = event.text,
         .output_item_id = event.item_id,
+        .activity_scope = event.activity_scope,
     });
 }
 
 void Transcript::apply_one(const AssistantMessageCompleted &event) {
-    finish_assistant(event.item_id, event.text, BlockState::COMPLETED, event.phase);
+    finish_assistant(event.activity_scope, event.item_id, event.text, BlockState::COMPLETED, event.phase);
 }
 
 void Transcript::apply_one(const ToolStarted &event, std::chrono::steady_clock::time_point now) {
+    if (std::ranges::any_of(blocks, [&event](const Block &block) {
+            return block.kind == BlockKind::TOOL && block.activity_scope == event.activity_scope && block.call_id == event.call_id;
+        })) {
+        return;
+    }
     append({
         .kind = BlockKind::TOOL,
         .state = BlockState::RUNNING,
@@ -56,13 +68,14 @@ void Transcript::apply_one(const ToolStarted &event, std::chrono::steady_clock::
         .tool_name = event.name,
         .command = event.command,
         .call_id = event.call_id,
+        .activity_scope = event.activity_scope,
         .started_at = now,
     });
 }
 
 void Transcript::apply_one(const ToolCompleted &event) {
     for (auto block = blocks.rbegin(); block != blocks.rend(); ++block) {
-        if (block->kind == BlockKind::TOOL && block->call_id == event.call_id) {
+        if (block->kind == BlockKind::TOOL && block->activity_scope == event.activity_scope && block->call_id == event.call_id) {
             lighter::check(block->state == BlockState::RUNNING, "completed tool block was not running");
             block->state = event.is_error ? BlockState::FAILED : BlockState::COMPLETED;
             if (!event.description.empty()) block->text = event.description;
@@ -74,7 +87,12 @@ void Transcript::apply_one(const ToolCompleted &event) {
     lighter::panic("completed tool block was not found");
 }
 
-void Transcript::apply_one(const TaskCompleted &) { finish_streaming(BlockState::COMPLETED); }
+void Transcript::apply_one(const ProviderActivityCompleted &) {}
+
+void Transcript::apply_one(const TaskCompleted &) {
+    lighter::check(!has_running_tools(), "completed task still has a running tool block");
+    finish_streaming(BlockState::COMPLETED);
+}
 
 void Transcript::apply_one(const TaskCancelled &) {
     finish_streaming(BlockState::CANCELLED);
@@ -112,10 +130,11 @@ void Transcript::finish_streaming(BlockState state) {
     }
 }
 
-void Transcript::finish_assistant(std::string_view item_id, std::string_view text, BlockState state, provider::MessagePhase phase) {
+void Transcript::finish_assistant(ActivityScope activity_scope, std::string_view item_id, std::string_view text, BlockState state,
+                                  provider::MessagePhase phase) {
     for (auto block = blocks.rbegin(); block != blocks.rend(); ++block) {
-        if (block->kind == BlockKind::ASSISTANT && block->output_item_id == item_id) {
-            lighter::check(block->state == BlockState::STREAMING, "completed assistant block was not streaming");
+        if (block->kind == BlockKind::ASSISTANT && block->activity_scope == activity_scope && block->output_item_id == item_id) {
+            if (block->state != BlockState::STREAMING) return;
             if (!text.empty()) block->text = text;
             block->state = state;
             block->message_phase = phase;
@@ -128,6 +147,7 @@ void Transcript::finish_assistant(std::string_view item_id, std::string_view tex
             .state = state,
             .text = std::string(text),
             .output_item_id = std::string(item_id),
+            .activity_scope = activity_scope,
             .message_phase = phase,
         });
     }

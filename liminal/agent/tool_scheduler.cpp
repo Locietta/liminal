@@ -34,10 +34,12 @@ struct ParallelBatch {
 } // namespace
 
 struct ToolScheduler::State {
-    State(const ToolSet &tools, EventSink events) : tools(&tools), events(std::move(events)) {}
+    State(const ToolSet &tools, EventSink events, ActivityScope activity_scope)
+        : tools(&tools), events(std::move(events)), activity_scope(activity_scope) {}
 
     const ToolSet *tools;
     EventSink events;
+    ActivityScope activity_scope;
     std::vector<std::string> call_ids;
     std::vector<std::optional<provider::ToolResult>> results;
     std::vector<bool> started;
@@ -68,6 +70,7 @@ Task<provider::ToolResult> execute_one(const std::shared_ptr<ToolScheduler::Stat
                             .name = call.name,
                             .description = presentation.description,
                             .command = presentation.command,
+                            .activity_scope = state->activity_scope,
                         });
 
     auto outcome = co_await state->tools->execute(call);
@@ -88,6 +91,7 @@ Task<provider::ToolResult> execute_one(const std::shared_ptr<ToolScheduler::Stat
                             .command = presentation.command,
                             .summary = state->tools->summarize(call, result),
                             .is_error = result.is_error,
+                            .activity_scope = state->activity_scope,
                         });
     co_return result;
 }
@@ -147,7 +151,8 @@ std::vector<provider::ToolResult> collect_results(ToolScheduler::State &state, b
 
 } // namespace
 
-ToolScheduler::ToolScheduler(const ToolSet &tools, EventSink events) : state(std::make_shared<State>(tools, std::move(events))) {}
+ToolScheduler::ToolScheduler(const ToolSet &tools, EventSink events, ActivityScope activity_scope)
+    : state(std::make_shared<State>(tools, std::move(events), activity_scope)) {}
 
 void ToolScheduler::submit(provider::ToolCall call) {
     lighter::check(state->accepting, "cannot submit a tool call after provider completion");

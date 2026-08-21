@@ -39,6 +39,7 @@ struct Block {
     std::string command;
     std::string call_id;
     std::string output_item_id;
+    ActivityScope activity_scope;
     provider::MessagePhase message_phase = provider::MessagePhase::UNSPECIFIED;
     std::chrono::steady_clock::time_point started_at;
 };
@@ -46,6 +47,7 @@ struct Block {
 struct Transcript {
     void apply(const Event &event, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
     void load(std::vector<Block> completed_blocks);
+    bool has_running_tools() const noexcept;
 
     std::vector<Block> blocks;
 
@@ -55,13 +57,15 @@ private:
     void apply_one(const AssistantMessageCompleted &event);
     void apply_one(const ToolStarted &event, std::chrono::steady_clock::time_point now);
     void apply_one(const ToolCompleted &event);
+    void apply_one(const ProviderActivityCompleted &event);
     void apply_one(const TaskCompleted &event);
     void apply_one(const TaskCancelled &event);
     void apply_one(const TaskFailed &event);
     void apply_one(const SessionNotice &event);
     void apply_one(const ModelSelected &event);
     void finish_streaming(BlockState state);
-    void finish_assistant(std::string_view item_id, std::string_view text, BlockState state, provider::MessagePhase phase);
+    void finish_assistant(ActivityScope activity_scope, std::string_view item_id, std::string_view text, BlockState state,
+                          provider::MessagePhase phase);
     Block &append(Block block);
 
     u64 next_id = 1;

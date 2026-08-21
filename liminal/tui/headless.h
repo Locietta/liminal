@@ -41,6 +41,8 @@ struct SnapshotBlock {
     std::string command;
     std::string call_id;
     std::string output_item_id;
+    u64 task_generation = 0;
+    u64 provider_call_generation = 0;
 };
 
 struct SnapshotAnchor {
@@ -122,8 +124,16 @@ struct HeadlessSession {
     std::vector<std::string> ansi_operations;
 
 private:
+    void begin_activity_task() noexcept;
+    ActivityScope current_activity_scope() noexcept;
+    void finish_activity_task() noexcept;
     void invalidate();
     void flush();
+
+    u64 next_activity_task_generation = 1;
+    u64 next_activity_provider_call_generation = 1;
+    std::optional<u64> activity_task_generation;
+    std::optional<ActivityScope> activity_scope;
 };
 
 } // namespace liminal::tui

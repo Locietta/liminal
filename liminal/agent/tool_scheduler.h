@@ -18,7 +18,7 @@ namespace liminal::agent::detail {
 struct ToolScheduler {
     struct State;
 
-    ToolScheduler(const ToolSet &tools, EventSink events);
+    ToolScheduler(const ToolSet &tools, EventSink events, ActivityScope activity_scope);
 
     void submit(provider::ToolCall call);
     void finish_accepting();

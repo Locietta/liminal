@@ -46,7 +46,7 @@ constexpr i32 k_transcript_reserve = 4;
 
 constexpr std::string_view k_empty_session_hint = "Ask Liminal anything. Type / for commands.";
 
-constexpr auto k_working_elapsed_threshold = std::chrono::seconds(3);
+constexpr auto k_activity_elapsed_threshold = std::chrono::seconds(3);
 constexpr auto k_shimmer_period = std::chrono::seconds(2);
 constexpr usize k_shimmer_padding = 10;
 constexpr float k_shimmer_half_width = 5.0F;
@@ -487,37 +487,6 @@ ComposerLayout composer_layout(const SessionScreen &screen, const ComposerProjec
     return result;
 }
 
-std::string model_selection(const SessionScreen &screen) {
-    auto selection = screen.model;
-    if (screen.effort) selection += " " + *screen.effort;
-    return selection;
-}
-
-std::string compact_tokens(u64 tokens) {
-    constexpr u64 k_thousand = 1'000;
-    constexpr u64 k_million = 1'000'000;
-    if (tokens < k_thousand) return std::to_string(tokens);
-
-    const auto divisor = tokens < k_million ? k_thousand : k_million;
-    const auto suffix = tokens < k_million ? 'K' : 'M';
-    auto whole = tokens / divisor;
-    auto hundredths = ((tokens % divisor) * 100 + divisor / 2) / divisor;
-    if (hundredths == 100) {
-        ++whole;
-        hundredths = 0;
-    }
-
-    auto result = std::to_string(whole);
-    if (hundredths != 0) {
-        result += '.';
-        if (hundredths < 10) result += '0';
-        result += std::to_string(hundredths);
-        while (result.ends_with('0')) result.pop_back();
-    }
-    result += suffix;
-    return result;
-}
-
 std::string trim_notice(std::string text) {
     while (!text.empty() && (text.back() == '\r' || text.back() == '\n')) text.pop_back();
     return text;
@@ -705,7 +674,51 @@ void SessionScreen::set_footer(SessionFooter next) { footer = std::move(next); }
 void SessionScreen::show_status(std::string text) { transient_status = std::move(text); }
 
 void SessionScreen::apply(const Event &event) {
-    const bool was_working = working();
+    const bool was_active = task_active();
+    const bool terminal = state == SessionState::COMPLETED || state == SessionState::CANCELLED || state == SessionState::FAILED;
+    const auto *assistant_delta = std::get_if<AssistantTextDelta>(&event);
+    const auto *assistant_completed = std::get_if<AssistantMessageCompleted>(&event);
+    const auto *tool_started = std::get_if<ToolStarted>(&event);
+    const auto *tool_completed = std::get_if<ToolCompleted>(&event);
+    const auto *provider_completed = std::get_if<ProviderActivityCompleted>(&event);
+    const auto *task_completed = std::get_if<TaskCompleted>(&event);
+    const auto event_scope = assistant_delta     ? assistant_delta->activity_scope :
+                             assistant_completed ? assistant_completed->activity_scope :
+                             tool_started        ? tool_started->activity_scope :
+                             tool_completed      ? tool_completed->activity_scope :
+                             provider_completed  ? provider_completed->activity_scope :
+                                                   ActivityScope{};
+    const auto event_task_generation = task_completed ? task_completed->task_generation : event_scope.task_generation;
+    const auto assistant_stream =
+        assistant_delta ? streaming_assistant_items.find(assistant_delta->item_id) : streaming_assistant_items.end();
+    const auto assistant_finish =
+        assistant_completed ? streaming_assistant_items.find(assistant_completed->item_id) : streaming_assistant_items.end();
+    const auto tool_start = tool_started ? active_tool_calls.find(tool_started->call_id) : active_tool_calls.end();
+    const auto tool_finish = tool_completed ? active_tool_calls.find(tool_completed->call_id) : active_tool_calls.end();
+    const auto settled_assistant =
+        assistant_delta || assistant_completed ?
+            settled_assistant_items.find(assistant_delta ? assistant_delta->item_id : assistant_completed->item_id) :
+            settled_assistant_items.end();
+    const auto settled_tool = tool_started || tool_completed ?
+                                  settled_tool_calls.find(tool_started ? tool_started->call_id : tool_completed->call_id) :
+                                  settled_tool_calls.end();
+
+    // Identity is response-scoped. Monotonic retirement high-water marks reject
+    // late events without reserving provider-local IDs such as `output:0` forever.
+    if ((terminal && (assistant_delta || assistant_completed || tool_started || tool_completed || provider_completed || task_completed)) ||
+        (event_task_generation != 0 && activity_task_generation && event_task_generation != *activity_task_generation) ||
+        (event_task_generation != 0 && !activity_task_generation && event_task_generation <= retired_activity_task_generation) ||
+        (event_scope.provider_call_generation != 0 && retired_activity_scope(event_scope)) ||
+        (assistant_delta && settled_assistant != settled_assistant_items.end() && settled_assistant->second == event_scope) ||
+        (assistant_delta && assistant_stream != streaming_assistant_items.end() && assistant_stream->second != event_scope) ||
+        (assistant_completed && assistant_finish != streaming_assistant_items.end() && assistant_finish->second != event_scope) ||
+        (tool_started &&
+         ((settled_tool != settled_tool_calls.end() && settled_tool->second == event_scope) || tool_start != active_tool_calls.end())) ||
+        (tool_completed && (tool_finish == active_tool_calls.end() || tool_finish->second != event_scope))) {
+        return;
+    }
+    if (event_task_generation != 0 && !activity_task_generation) activity_task_generation = event_task_generation;
+
     const auto now = monotonic_now();
     transient_status.reset();
     // Cell-anchored selections cannot follow content, so any transcript
@@ -721,28 +734,63 @@ void SessionScreen::apply(const Event &event) {
         const auto &submitted = std::get<PromptSubmitted>(event);
         if (header.prompt_preview.empty()) header.prompt_preview = session::session_preview(submitted.text);
         completed_task_elapsed.reset();
+        retire_activity();
         state = SessionState::WAITING;
     }
-    if (std::holds_alternative<AssistantTextDelta>(event)) state = SessionState::STREAMING;
-    if (std::holds_alternative<ToolStarted>(event)) state = SessionState::RUNNING_TOOLS;
-    if (std::holds_alternative<ToolCompleted>(event)) {
-        const bool running = std::ranges::any_of(
-            transcript.blocks, [](const Block &block) { return block.kind == BlockKind::TOOL && block.state == BlockState::RUNNING; });
-        state = running ? SessionState::RUNNING_TOOLS : SessionState::STREAMING;
+    if (assistant_delta) {
+        streaming_assistant_items.insert_or_assign(assistant_delta->item_id, assistant_delta->activity_scope);
+        if (!task_active()) state = SessionState::WAITING;
+        refresh_activity_state();
     }
-    if (std::holds_alternative<TaskCompleted>(event)) {
-        completed_task_elapsed = was_working && now >= task_started_at ? now - task_started_at : std::chrono::steady_clock::duration{};
+    if (assistant_completed) {
+        if (assistant_finish != streaming_assistant_items.end()) streaming_assistant_items.erase(assistant_finish);
+        settled_assistant_items.insert_or_assign(assistant_completed->item_id, assistant_completed->activity_scope);
+        if (!task_active()) state = SessionState::WAITING;
+        refresh_activity_state();
+    }
+    if (tool_started) {
+        active_tool_calls.emplace(tool_started->call_id, tool_started->activity_scope);
+        if (!task_active()) state = SessionState::WAITING;
+        refresh_activity_state();
+    }
+    if (tool_completed) {
+        active_tool_calls.erase(tool_finish);
+        settled_tool_calls.insert_or_assign(tool_completed->call_id, tool_completed->activity_scope);
+        refresh_activity_state();
+    }
+    if (provider_completed) {
+        lighter::check(
+            std::ranges::none_of(active_tool_calls,
+                                 [provider_completed](const auto &entry) { return entry.second == provider_completed->activity_scope; }),
+            "provider activity completed with an active tool call");
+        lighter::check(
+            std::ranges::none_of(streaming_assistant_items,
+                                 [provider_completed](const auto &entry) { return entry.second == provider_completed->activity_scope; }),
+            "provider activity completed with a streaming assistant item");
+        retired_activity_provider_call_generation =
+            std::max(retired_activity_provider_call_generation, provider_completed->activity_scope.provider_call_generation);
+        std::erase_if(settled_assistant_items,
+                      [provider_completed](const auto &entry) { return entry.second == provider_completed->activity_scope; });
+        std::erase_if(settled_tool_calls,
+                      [provider_completed](const auto &entry) { return entry.second == provider_completed->activity_scope; });
+        refresh_activity_state();
+    }
+    if (task_completed) {
+        completed_task_elapsed = was_active && now >= task_started_at ? now - task_started_at : std::chrono::steady_clock::duration{};
+        retire_activity();
         state = SessionState::COMPLETED;
     }
     if (std::holds_alternative<TaskCancelled>(event)) {
         completed_task_elapsed.reset();
+        retire_activity();
         state = SessionState::CANCELLED;
     }
     if (std::holds_alternative<TaskFailed>(event)) {
         completed_task_elapsed.reset();
+        retire_activity();
         state = SessionState::FAILED;
     }
-    if (!was_working && working()) task_started_at = now;
+    if (!was_active && task_active()) task_started_at = now;
 }
 
 void SessionScreen::add_notice(std::string text) { apply(SessionNotice{.text = trim_notice(std::move(text))}); }
@@ -754,6 +802,7 @@ void SessionScreen::load_transcript(std::vector<Block> blocks) {
     selection.reset();
     state = SessionState::EDITING;
     completed_task_elapsed.reset();
+    retire_activity();
 }
 
 void SessionScreen::insert(std::string_view text) {
@@ -1137,19 +1186,55 @@ i32 SessionScreen::viewport_rows() const {
     return std::max(base - compact_band_rows(base), 0);
 }
 
-bool SessionScreen::working() const noexcept {
+bool SessionScreen::task_active() const noexcept {
     return state == SessionState::WAITING || state == SessionState::STREAMING || state == SessionState::RUNNING_TOOLS;
 }
 
-bool SessionScreen::animating() const { return working() || has_elapsed_running_command(); }
+bool SessionScreen::animating() const { return task_active() || has_elapsed_running_command(); }
+
+void SessionScreen::refresh_activity_state() noexcept {
+    if (!active_tool_calls.empty()) {
+        state = SessionState::RUNNING_TOOLS;
+    } else if (!streaming_assistant_items.empty()) {
+        state = SessionState::STREAMING;
+    } else {
+        state = SessionState::WAITING;
+    }
+}
+
+void SessionScreen::clear_activity_identities() noexcept {
+    active_tool_calls.clear();
+    streaming_assistant_items.clear();
+    settled_tool_calls.clear();
+    settled_assistant_items.clear();
+}
+
+void SessionScreen::retire_activity() noexcept {
+    if (activity_task_generation) retired_activity_task_generation = std::max(retired_activity_task_generation, *activity_task_generation);
+    activity_task_generation.reset();
+    clear_activity_identities();
+}
+
+bool SessionScreen::retired_activity_scope(ActivityScope scope) const noexcept {
+    return (scope.task_generation != 0 && scope.task_generation <= retired_activity_task_generation) ||
+           (scope.provider_call_generation != 0 && scope.provider_call_generation <= retired_activity_provider_call_generation);
+}
 
 std::vector<LayoutRow> SessionScreen::activity_rows() const {
-    if (working()) {
+    if (task_active()) {
         const auto now = monotonic_now();
         const auto elapsed = now >= task_started_at ? now - task_started_at : std::chrono::steady_clock::duration{};
         std::vector<LayoutRow> rows(2);
-        append_shimmer(rows.front().spans, "• Working…", elapsed);
-        if (elapsed >= k_working_elapsed_threshold) {
+        auto label = std::string_view("• Thinking…");
+        if (state == SessionState::STREAMING) label = "• Writing…";
+        std::string tool_label;
+        if (state == SessionState::RUNNING_TOOLS) {
+            tool_label =
+                active_tool_calls.size() == 1 ? "• Running tool…" : "• Running " + std::to_string(active_tool_calls.size()) + " tools…";
+            label = tool_label;
+        }
+        append_shimmer(rows.front().spans, label, elapsed);
+        if (elapsed >= k_activity_elapsed_threshold) {
             const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
             append_span(rows.front().spans, " (" + elapsed_text(seconds) + ")", Style::MUTED);
         }
@@ -1203,17 +1288,12 @@ Frame SessionScreen::frame() const {
         if (external_editor_active || transient_status) {
             const auto status_style = !external_editor_active && transient_status ? Style::ACCENT : Style::MUTED;
             result.surface.write(size.rows - 1, 0, status_text, status_style);
+        } else if (footer.not_saving) {
+            result.surface.write(size.rows - 1, 0, "SESSION NOT SAVING", Style::FAILURE);
         } else {
-            auto column = result.surface.write(size.rows - 1, 0, model_selection(*this), Style::FOOTER_MODEL);
-            column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
-            const auto context = footer.context_left_percent ? "Context " + std::to_string(*footer.context_left_percent) + "% left" :
-                                                               std::string("Context n/a");
-            column = result.surface.write(size.rows - 1, column, context, Style::FOOTER_CONTEXT);
-            column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
-            column = result.surface.write(size.rows - 1, column, compact_tokens(footer.tokens_used) + " used", Style::FOOTER_TOKENS);
-            if (footer.not_saving) {
-                column = result.surface.write(size.rows - 1, column, " · ", Style::MUTED);
-                result.surface.write(size.rows - 1, column, "SESSION NOT SAVING", Style::FAILURE);
+            i32 column = 0;
+            for (const auto &span : present_footer(model, effort, footer, size.columns)) {
+                column = result.surface.write(size.rows - 1, column, span.text, span.style);
             }
         }
     }

@@ -286,6 +286,7 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
                 prompt = action.text;
                 screen.prompt_history.record(prompt);
             }
+            begin_activity_task();
             screen.apply(PromptSubmitted{.text = std::move(prompt)});
         }
     } else if (action.type == "escape") {
@@ -296,11 +297,15 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
         else
             screen.apply_picker_key(PickerKey::ESCAPE);
     } else if (action.type == "assistant_delta") {
-        screen.apply(AssistantTextDelta{.item_id = action.item_id, .text = action.text});
+        screen.apply(AssistantTextDelta{.item_id = action.item_id, .text = action.text, .activity_scope = current_activity_scope()});
     } else if (action.type == "assistant_message_completed") {
-        screen.apply(AssistantMessageCompleted{.item_id = action.item_id, .text = action.text});
+        screen.apply(AssistantMessageCompleted{.item_id = action.item_id, .text = action.text, .activity_scope = current_activity_scope()});
     } else if (action.type == "tool_started") {
-        screen.apply(ToolStarted{.call_id = action.call_id, .name = action.name, .description = action.text, .command = action.command});
+        screen.apply(ToolStarted{.call_id = action.call_id,
+                                 .name = action.name,
+                                 .description = action.text,
+                                 .command = action.command,
+                                 .activity_scope = current_activity_scope()});
     } else if (action.type == "tool_completed") {
         screen.apply(ToolCompleted{
             .call_id = action.call_id,
@@ -308,13 +313,21 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
             .command = action.command,
             .summary = action.text,
             .is_error = action.is_error,
+            .activity_scope = current_activity_scope(),
         });
+    } else if (action.type == "provider_activity_completed") {
+        screen.apply(ProviderActivityCompleted{.activity_scope = current_activity_scope()});
+        activity_scope.reset();
     } else if (action.type == "task_completed") {
-        screen.apply(TaskCompleted{});
+        if (!activity_task_generation) begin_activity_task();
+        screen.apply(TaskCompleted{.task_generation = *activity_task_generation});
+        finish_activity_task();
     } else if (action.type == "task_cancelled") {
         screen.apply(TaskCancelled{});
+        finish_activity_task();
     } else if (action.type == "task_failed") {
         screen.apply(TaskFailed{.message = action.text});
+        finish_activity_task();
     } else if (action.type == "notice") {
         screen.add_notice(action.text);
     } else if (action.type == "scroll") {
@@ -408,6 +421,27 @@ std::expected<void, std::string> HeadlessSession::apply(const HeadlessAction &ac
     return {};
 }
 
+void HeadlessSession::begin_activity_task() noexcept {
+    activity_task_generation = next_activity_task_generation++;
+    activity_scope.reset();
+}
+
+ActivityScope HeadlessSession::current_activity_scope() noexcept {
+    if (!activity_task_generation) begin_activity_task();
+    if (!activity_scope) {
+        activity_scope = ActivityScope{
+            .task_generation = *activity_task_generation,
+            .provider_call_generation = next_activity_provider_call_generation++,
+        };
+    }
+    return *activity_scope;
+}
+
+void HeadlessSession::finish_activity_task() noexcept {
+    activity_scope.reset();
+    activity_task_generation.reset();
+}
+
 std::expected<void, std::string> HeadlessSession::apply(const std::vector<HeadlessAction> &actions) {
     for (const auto &action : actions) {
         if (auto result = apply(action); !result) return result;
@@ -472,7 +506,9 @@ HeadlessSnapshot HeadlessSession::inspect() const {
                                    .detail = block.detail,
                                    .command = block.command,
                                    .call_id = block.call_id,
-                                   .output_item_id = block.output_item_id});
+                                   .output_item_id = block.output_item_id,
+                                   .task_generation = block.activity_scope.task_generation,
+                                   .provider_call_generation = block.activity_scope.provider_call_generation});
     }
     for (i32 row = 0; row < frame.surface.rows; ++row) snapshot.visible_text.push_back(frame.surface.row_text(row));
     for (i32 row = 0; row < frame.surface.rows; ++row) {

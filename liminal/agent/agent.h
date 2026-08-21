@@ -39,8 +39,12 @@ struct Agent {
     session::Session session;
 
 private:
-    lighter::Task<bool, Error, lighter::Cancellation> run_task_loop(session::TaskId task_id, const EventSink &events,
+    lighter::Task<bool, Error, lighter::Cancellation> run_task_loop(session::TaskId task_id, u64 activity_task_generation,
+                                                                    const EventSink &events,
                                                                     const std::optional<lighter::CancellationToken> &cancellation);
+
+    u64 next_activity_task_generation = 1;
+    u64 next_activity_provider_call_generation = 1;
 };
 
 } // namespace liminal

@@ -473,9 +473,9 @@ void check_multiline_navigation_history_and_projection() {
                 row_uses_style(8, tui::Style::COMPOSER),
             "an empty composer must render as a padded three-row input surface");
     require(empty.cursor.row == 7 && empty.cursor.column == 2, "the composer cursor must begin after its concise prompt marker");
-    require(empty.surface.row_text(9) == "test-model high · Context 54% left · 1.1" &&
+    require(empty.surface.row_text(9) == "test-model high · Context 54% left" &&
                 empty.surface.cells[static_cast<usize>(9 * empty.surface.columns)].style == tui::Style::FOOTER_MODEL,
-            "the footer must place model, context, and usage metadata below the composer");
+            "the footer must remove token usage as a whole when all metadata does not fit");
 
     visual.resize({80, 10});
     const auto wide_footer = visual.frame();
@@ -494,10 +494,11 @@ void check_multiline_navigation_history_and_projection() {
     require(!wide_footer.surface.row_text(9).contains("D:\\code\\liminal"), "the workspace must no longer have a footer rendering path");
 
     visual.footer.not_saving = true;
-    visual.resize({100, 10});
+    visual.resize({20, 10});
     const auto degraded_footer = visual.frame();
-    require(degraded_footer.surface.row_text(9).contains("SESSION NOT SAVING"),
-            "a degraded persistence queue must remain visible in the session footer");
+    require(degraded_footer.surface.row_text(9) == "SESSION NOT SAVING" &&
+                degraded_footer.surface.cells[static_cast<usize>(9 * degraded_footer.surface.columns)].style == tui::Style::FAILURE,
+            "a narrow degraded persistence queue must replace ordinary metadata with its critical warning");
 
     screen.clear_prompt();
     screen.insert("one\ntwo\nthree\nfour");
@@ -516,6 +517,56 @@ void check_multiline_navigation_history_and_projection() {
     active.resize({40, 8});
     require(frame_text(active.frame()).contains("Save and close external editor"),
             "the status row must explain how to return from an external editor handoff");
+}
+
+void check_responsive_footer() {
+    tui::SessionScreen screen;
+    screen.resize({80, 6});
+    screen.set_model("model", std::optional<std::string>("high"));
+    screen.set_footer({
+        .context_left_percent = 54,
+        .tokens_used = 1'184'000,
+        .provider_limits = "Limit 80%",
+    });
+    const auto footer_at = [&screen](i32 columns) {
+        screen.resize({columns, 6});
+        return screen.frame().surface.row_text(5);
+    };
+
+    const auto full = std::string("model high · Context 54% left · 1.18M used · Limit 80%");
+    const auto without_tokens = std::string("model high · Context 54% left · Limit 80%");
+    const auto model_and_limits = std::string("model high · Limit 80%");
+    const auto model_only = std::string("model high");
+    const auto full_width = tui::text_width(full);
+    const auto without_tokens_width = tui::text_width(without_tokens);
+    const auto model_and_limits_width = tui::text_width(model_and_limits);
+    const auto model_width = tui::text_width(model_only);
+
+    require(footer_at(full_width) == full, "a wide footer must retain model, context, tokens, and provider limits in semantic order");
+    require(footer_at(full_width - 1) == without_tokens && footer_at(without_tokens_width) == without_tokens,
+            "the first oversized boundary must remove the complete token segment and retain exact fits");
+    require(footer_at(without_tokens_width - 1) == model_and_limits && footer_at(model_and_limits_width) == model_and_limits,
+            "the next oversized boundary must remove context while retaining provider limits");
+    require(footer_at(model_and_limits_width - 1) == model_only && footer_at(model_width) == model_only,
+            "provider limits must disappear only after tokens and context, leaving the complete model at its exact width");
+    require(footer_at(model_width - 1) == "model hi…",
+            "model plus effort may truncate only after every other ordinary footer segment is gone");
+
+    for (i32 width = 1; width <= full_width; ++width) {
+        const auto projected = footer_at(width);
+        require(!projected.starts_with(" · ") && !projected.ends_with(" · ") && !projected.contains(" ·  · "),
+                "responsive footer projection must never leave an orphan separator");
+        require(tui::text_width(projected) <= width, "every responsive footer projection must fit its terminal-cell budget");
+    }
+
+    screen.set_model("A👩‍💻éZ", std::optional<std::string>("👨‍👩‍👧‍👦X"));
+    require(footer_at(8) == "A👩‍💻éZ …" && lighter::encoding::utf8::is_valid(footer_at(8)),
+            "final model truncation must preserve combining and ZWJ extended grapheme clusters");
+
+    screen.set_model("model", std::optional<std::string>("high"));
+    screen.set_footer({.context_left_percent = 54, .tokens_used = 1'184'000});
+    require(footer_at(80) == "model high · Context 54% left · 1.18M used",
+            "an absent provider limit must leave no text, spacing, or separator residue");
 }
 
 void check_rich_output_and_concurrent_tools() {
@@ -700,7 +751,8 @@ diff --git a/file.cpp b/file.cpp
     require(layout_text_has_style(command_rows, "exit 0", tui::Style::MUTED) &&
                 layout_text_has_style(command_rows, "2 tests passed", tui::Style::MUTED),
             "command status and output preview rows must use the dim secondary style");
-    require(tools.state == tui::SessionState::STREAMING, "tool state may settle only after the final concurrent tool completes");
+    require(tools.state == tui::SessionState::WAITING,
+            "after the final concurrent tool completes, a task without active text must return to provider waiting");
 }
 
 void check_external_editor_round_trip(std::string_view executable) {
@@ -857,18 +909,21 @@ void check_command_parsing_and_status() {
     tui::SessionScreen screen;
     screen.resize({80, 10});
     screen.set_model("test-model", std::nullopt);
+    screen.footer.not_saving = true;
     screen.show_status("Copied latest reply to clipboard");
     const auto copied = screen.frame();
     require(frame_text(copied).contains("Copied latest reply to clipboard") &&
                 copied.surface.cells[static_cast<usize>(9 * copied.surface.columns)].style == tui::Style::ACCENT,
-            "copy success must temporarily replace the footer with an emphasized textual confirmation");
+            "copy success must temporarily replace persistence and ordinary footer metadata with an emphasized confirmation");
 
+    screen.footer.not_saving = false;
     screen.insert("next prompt");
     const auto editing = frame_text(screen.frame());
     require(!editing.contains("Copied latest reply") && editing.contains("test-model"),
             "the copy confirmation must yield to normal footer metadata on the next interaction");
 
     screen.show_status("Copied latest reply to clipboard");
+    screen.footer.not_saving = true;
     screen.external_editor_active = true;
     const auto editor = screen.frame();
     require(frame_text(editor).contains("Save and close external editor") &&
@@ -1196,7 +1251,8 @@ void check_scroll_resize_state() {
     screen.resize({10, 8});
     require(screen.anchor == original_anchor, "resize must preserve the semantic source anchor");
     const auto resized = screen.frame();
-    require(resized.surface.row_text(7).starts_with("test-model"), "resize must deterministically retain footer metadata");
+    require(resized.surface.row_text(7) == "test-mode…",
+            "resize must deterministically retain and cell-truncate the model after dropping other footer metadata");
     require(tui::encode_frame(resized) == tui::encode_frame(screen.frame()), "unchanged state must produce an identical frame");
     const auto diagnostics = screen.layout_diagnostics();
     require(diagnostics.cache_hits > 0 && diagnostics.cached_blocks > 0, "repeated frames must reuse stable block layout");
@@ -1206,65 +1262,177 @@ void check_scroll_resize_state() {
     require(frame_text(screen.frame()).contains("line-9"), "returning to tail must reveal the newest output");
 }
 
-void check_working_indicator() {
+void check_repeated_activity_ids_are_provider_scoped() {
+    constexpr ActivityScope first_call{.task_generation = 19, .provider_call_generation = 41};
+    constexpr ActivityScope second_call{.task_generation = 19, .provider_call_generation = 42};
+    tui::SessionScreen screen;
+    screen.resize({48, 12});
+    screen.apply(PromptSubmitted{.text = "repeat IDs"});
+    screen.apply(AssistantTextDelta{.item_id = "output:0", .text = "checking", .activity_scope = first_call});
+    screen.apply(AssistantMessageCompleted{
+        .item_id = "output:0",
+        .text = "checking",
+        .phase = provider::MessagePhase::COMMENTARY,
+        .activity_scope = first_call,
+    });
+    const auto completed_message_blocks = screen.transcript.blocks.size();
+    screen.apply(AssistantTextDelta{.item_id = "output:0", .text = "late", .activity_scope = first_call});
+    require(screen.state == tui::SessionState::WAITING && screen.transcript.blocks.size() == completed_message_blocks &&
+                screen.transcript.blocks.back().text == "checking",
+            "a late delta must not reactivate an item already settled in the current provider-call generation");
+    screen.apply(ToolStarted{.call_id = "call", .name = "read_file", .activity_scope = first_call});
+    screen.apply(ToolCompleted{.call_id = "call", .name = "read_file", .summary = "done", .activity_scope = first_call});
+    const auto completed_tool_blocks = screen.transcript.blocks.size();
+    screen.apply(ToolStarted{.call_id = "call", .name = "read_file", .activity_scope = first_call});
+    require(screen.state == tui::SessionState::WAITING && screen.transcript.blocks.size() == completed_tool_blocks &&
+                screen.active_tool_calls.empty(),
+            "a late start must not reactivate a tool already settled in the current provider-call generation");
+    screen.apply(ProviderActivityCompleted{.activity_scope = first_call});
+
+    screen.apply(AssistantTextDelta{.item_id = "output:0", .text = "final", .activity_scope = second_call});
+    require(screen.state == tui::SessionState::STREAMING && frame_text(screen.frame()).contains("Writing…") &&
+                screen.transcript.blocks.back().text == "final" && screen.transcript.blocks.back().activity_scope == second_call,
+            "a repeated provider-local output ID must start visible Writing activity in the next provider-call generation");
+    const auto block_count = screen.transcript.blocks.size();
+    screen.apply(AssistantMessageCompleted{
+        .item_id = "output:0",
+        .text = "stale",
+        .phase = provider::MessagePhase::COMMENTARY,
+        .activity_scope = first_call,
+    });
+    require(screen.state == tui::SessionState::STREAMING && screen.transcript.blocks.size() == block_count &&
+                screen.transcript.blocks.back().text == "final",
+            "a late completion from the retired provider-call generation must not settle the repeated current identity");
+    screen.apply(AssistantMessageCompleted{
+        .item_id = "output:0",
+        .text = "final answer",
+        .phase = provider::MessagePhase::FINAL,
+        .activity_scope = second_call,
+    });
+    require(screen.state == tui::SessionState::WAITING && screen.transcript.blocks.back().text == "final answer",
+            "the matching current generation must complete the repeated identity and return activity to Thinking");
+}
+
+void check_activity_state() {
     auto now = std::chrono::steady_clock::time_point{};
     tui::SessionScreen screen([&now] { return now; });
     screen.resize({40, 10});
     screen.set_model("test-model", std::nullopt);
     const auto idle_rows = screen.viewport_rows();
-    require(!screen.working() && !frame_text(screen.frame()).contains("Working"), "an idle session must not show the working indicator");
+    require(!screen.task_active() && screen.activity_rows().empty(), "an idle session must not show task activity");
+
+    const auto activity_text = [](const tui::SessionScreen &target) { return layout_rows_text(target.activity_rows()); };
+    const auto shimmer_style = [](tui::Style style) {
+        switch (style) {
+            case tui::Style::WORKING_BASE:
+            case tui::Style::WORKING_LOW:
+            case tui::Style::WORKING_MEDIUM:
+            case tui::Style::WORKING_HIGH:
+            case tui::Style::WORKING_BRIGHT:
+            case tui::Style::WORKING_PEAK: return true;
+            default: return false;
+        }
+    };
+    const auto require_shimmer = [&](std::string_view label) {
+        const auto rows = screen.activity_rows();
+        require(rows.size() == 2 && layout_rows_text({rows.front()}) == label,
+                "the activity projector must preserve the complete current semantic label");
+        require(
+            std::ranges::all_of(rows.front().spans, [&](const tui::StyledSpan &span) { return shimmer_style(span.style); }) &&
+                std::ranges::any_of(rows.front().spans, [](const tui::StyledSpan &span) { return span.style == tui::Style::WORKING_PEAK; }),
+            "every active semantic label must retain the full-label shimmer");
+    };
+    const auto require_elapsed = [&](std::string_view label) {
+        const auto rows = screen.activity_rows();
+        require(layout_rows_text({rows.front()}) == std::string(label) + " (3s)" && rows.front().spans.back().style == tui::Style::MUTED,
+                "every active semantic label must retain the muted elapsed suffix after three seconds");
+    };
 
     screen.apply(PromptSubmitted{.text = "go"});
-    require(screen.working() && screen.animating(), "a submitted prompt must enter the animated working state");
-    require(screen.viewport_rows() == idle_rows, "the in-flow working status must not shrink the transcript viewport");
+    require(screen.task_active() && screen.animating() && activity_text(screen).starts_with("• Thinking…"),
+            "a submitted prompt must enter the animated provider-waiting state");
+    require(screen.viewport_rows() == idle_rows, "in-flow activity must not shrink the transcript viewport");
     const auto waiting = screen.frame();
-    require(waiting.surface.row_text(1) == "go" && waiting.surface.row_text(2).contains("Working…") && waiting.surface.row_text(3).empty(),
-            "a waiting task must show the unprefixed prompt above its status and leave space before the composer");
-    const auto status_styles = [&screen] {
-        const auto frame = screen.frame();
-        std::vector<tui::Style> styles;
-        for (i32 column = 0; column < tui::text_width("• Working…"); ++column) {
-            styles.push_back(frame.surface.cells[static_cast<usize>(2 * frame.surface.columns + column)].style);
-        }
-        return styles;
-    };
-    const auto initial_styles = status_styles();
-    require(std::ranges::all_of(initial_styles, [](tui::Style style) { return style == tui::Style::WORKING_BASE; }),
-            "the working shimmer must begin at its base brightness");
-    now += std::chrono::milliseconds(900);
-    const auto highlighted_styles = status_styles();
-    require(highlighted_styles[2] != tui::Style::WORKING_BASE &&
-                std::ranges::any_of(highlighted_styles, [](tui::Style style) { return style == tui::Style::WORKING_PEAK; }),
-            "the shimmer highlight must travel across the state text, not only the dot");
-    now += std::chrono::milliseconds(100);
-    require(status_styles() != highlighted_styles, "the full-label shimmer must advance on each 100ms animation frame");
-    now += std::chrono::seconds(2);
-    const auto timed = screen.frame();
-    require(frame_text(timed).contains("(3s)"), "long waits must add an elapsed suffix");
-    const auto timer_column = tui::text_width("• Working…");
-    const auto timer_width = tui::text_width(" (3s)");
-    for (i32 column = timer_column; column < timer_column + timer_width; ++column) {
-        require(timed.surface.cells[static_cast<usize>(2 * timed.surface.columns + column)].style == tui::Style::MUTED,
-                "every elapsed suffix cell must stay muted instead of joining the shimmer");
-    }
+    require(waiting.surface.row_text(1) == "go" && waiting.surface.row_text(2).contains("Thinking…") && waiting.surface.row_text(3).empty(),
+            "a waiting task must show the unprefixed prompt above Thinking and leave space before the composer");
+    require(screen.activity_rows().front().spans.size() == 1 &&
+                screen.activity_rows().front().spans.front().style == tui::Style::WORKING_BASE,
+            "activity shimmer must begin at its base brightness");
 
-    screen.apply(AssistantTextDelta{.text = "hi"});
-    require(frame_text(screen.frame()).contains("Working…"), "streaming tasks must keep the unified working status");
-    screen.apply(ToolStarted{.call_id = "tool", .name = "exec_command", .command = "echo hi"});
-    require(frame_text(screen.frame()).contains("Working…"), "running tools must keep the unified working status");
-    screen.apply(ToolCompleted{.call_id = "tool", .name = "exec_command", .command = "echo hi", .summary = "exit 0"});
-    require(frame_text(screen.frame()).contains("Working…"), "completed tools must keep the unified working status");
+    now += std::chrono::milliseconds(900);
+    require_shimmer("• Thinking…");
+    const auto highlighted = screen.activity_rows().front().spans;
+    now += std::chrono::milliseconds(100);
+    require(screen.activity_rows().front().spans != highlighted,
+            "the full-label shimmer must advance on each shared 100ms animation frame");
+
+    screen.apply(AssistantTextDelta{.item_id = "message-1", .text = "hi"});
+    require(screen.state == tui::SessionState::STREAMING && activity_text(screen).starts_with("• Writing…"),
+            "visible assistant text must select Writing");
+    require_shimmer("• Writing…");
+
+    screen.apply(AssistantMessageCompleted{.item_id = "message-1", .text = "hi"});
+    require(screen.state == tui::SessionState::WAITING && activity_text(screen).starts_with("• Thinking…"),
+            "completing an assistant message must return an otherwise active task to Thinking");
+
+    screen.apply(ToolStarted{.call_id = "tool-1", .name = "read_file", .description = "Read one"});
+    require(screen.active_tool_calls.size() == 1 && activity_text(screen).starts_with("• Running tool…"),
+            "one active tool identity must select the singular running label");
+    require_shimmer("• Running tool…");
+    screen.apply(ToolStarted{.call_id = "tool-2", .name = "read_file", .description = "Read two"});
+    require(screen.active_tool_calls.size() == 2 && activity_text(screen).starts_with("• Running 2 tools…"),
+            "two active tool identities must select the counted running label");
+    require_shimmer("• Running 2 tools…");
+
+    screen.apply(AssistantTextDelta{.item_id = "message-2", .text = "overlap"});
+    require(screen.streaming_assistant_items.size() == 1 && activity_text(screen).starts_with("• Running 2 tools…"),
+            "assistant deltas during tool execution must not hide tool activity");
+    screen.apply(ToolCompleted{.call_id = "tool-1", .name = "read_file", .description = "Read one", .summary = "done"});
+    require(screen.active_tool_calls.size() == 1 && activity_text(screen).starts_with("• Running tool…"),
+            "completing one concurrent tool must decrement rather than hide its running sibling");
+    screen.apply(ToolCompleted{.call_id = "tool-2", .name = "read_file", .description = "Read two", .summary = "done"});
+    require(screen.active_tool_calls.empty() && activity_text(screen).starts_with("• Writing…"),
+            "completing the final tool must reveal still-active visible assistant streaming");
+    screen.apply(AssistantMessageCompleted{.item_id = "message-2", .text = "overlap"});
+    require(screen.streaming_assistant_items.empty() && activity_text(screen).starts_with("• Thinking…"),
+            "completing the overlapping message must return the active task to Thinking");
+
+    now += std::chrono::milliseconds(100);
+    now += std::chrono::seconds(2);
+    require_elapsed("• Thinking…");
+    constexpr ActivityScope final_scope{.task_generation = 1, .provider_call_generation = 2};
+    screen.apply(AssistantTextDelta{.item_id = "message-3", .text = "more", .activity_scope = final_scope});
+    require_elapsed("• Writing…");
+    screen.apply(ToolStarted{
+        .call_id = "tool-3",
+        .name = "exec_command",
+        .command = "echo hi",
+        .activity_scope = final_scope,
+    });
+    require_elapsed("• Running tool…");
+    screen.apply(ToolStarted{
+        .call_id = "tool-4",
+        .name = "read_file",
+        .description = "Read more",
+        .activity_scope = final_scope,
+    });
+    require_elapsed("• Running 2 tools…");
 
     for (i32 index = 0; index < 12; ++index) screen.apply(SessionNotice{.text = "line-" + std::to_string(index)});
-    require(frame_text(screen.frame()).contains("Working…"), "a full viewport must keep the status at the transcript tail");
+    require(frame_text(screen.frame()).contains("Running 2 tools…"), "a full viewport must keep activity at the transcript tail");
     screen.page(-1);
-    require(screen.anchor.has_value() && !frame_text(screen.frame()).contains("Working…"),
-            "browsing history must scroll the working status away with the flow");
+    require(screen.anchor.has_value() && !frame_text(screen.frame()).contains("Running 2 tools…"),
+            "browsing history must scroll activity away with the flow");
     screen.follow_tail();
-    require(frame_text(screen.frame()).contains("Working…"), "returning to the tail must reveal the working status again");
+    require(frame_text(screen.frame()).contains("Running 2 tools…"), "returning to the tail must reveal activity again");
 
-    screen.apply(TaskCompleted{});
-    require(!screen.working() && !screen.animating(), "a completed task must leave the animated working state");
+    screen.apply(ToolCompleted{.call_id = "tool-3", .name = "exec_command", .summary = "done", .activity_scope = final_scope});
+    screen.apply(ToolCompleted{.call_id = "tool-4", .name = "read_file", .summary = "done", .activity_scope = final_scope});
+    screen.apply(AssistantMessageCompleted{.item_id = "message-3", .text = "more", .activity_scope = final_scope});
+    screen.apply(ProviderActivityCompleted{.activity_scope = final_scope});
+    screen.apply(TaskCompleted{.task_generation = final_scope.task_generation});
+    require(!screen.task_active() && !screen.animating() && screen.active_tool_calls.empty() && screen.streaming_assistant_items.empty(),
+            "a completed task must clear every active lifecycle identity");
     const auto completed = screen.frame();
     require(frame_text(completed).contains("Finished (3s)"), "a completed task must retain its final elapsed status");
     i32 finished_row = -1;
@@ -1279,14 +1447,59 @@ void check_working_indicator() {
     screen.insert("next");
     require(frame_text(screen.frame()).contains("Finished (3s)"), "editing the next prompt must preserve the finished status");
     screen.apply(PromptSubmitted{.text = "next"});
-    require(!frame_text(screen.frame()).contains("Finished") && frame_text(screen.frame()).contains("Working…"),
-            "a new task must replace the finished status with the working status");
+    require(!frame_text(screen.frame()).contains("Finished") && frame_text(screen.frame()).contains("Thinking…") &&
+                screen.active_tool_calls.empty() && screen.streaming_assistant_items.empty(),
+            "a subsequent prompt must replace Finished with Thinking and begin with clean lifecycle identities");
+    screen.apply(AssistantTextDelta{.item_id = "message-3", .text = "late", .activity_scope = final_scope});
+    screen.apply(ToolStarted{.call_id = "tool-3", .name = "exec_command", .command = "late", .activity_scope = final_scope});
+    require(activity_text(screen).starts_with("• Thinking…") && screen.active_tool_calls.empty() &&
+                screen.streaming_assistant_items.empty(),
+            "late identities from the prior task must not contaminate a subsequent prompt");
+
+    tui::SessionScreen cancelled;
+    constexpr ActivityScope cancelled_scope{.task_generation = 2, .provider_call_generation = 1};
+    cancelled.apply(PromptSubmitted{.text = "cancel"});
+    cancelled.apply(AssistantTextDelta{.item_id = "cancel-message", .text = "partial", .activity_scope = cancelled_scope});
+    cancelled.apply(ToolStarted{.call_id = "cancel-tool", .name = "read_file", .activity_scope = cancelled_scope});
+    cancelled.apply(TaskCancelled{});
+    const auto cancelled_blocks = cancelled.transcript.blocks.size();
+    cancelled.apply(AssistantMessageCompleted{.item_id = "cancel-message", .text = "late", .activity_scope = cancelled_scope});
+    cancelled.apply(ToolCompleted{.call_id = "cancel-tool", .name = "read_file", .summary = "late", .activity_scope = cancelled_scope});
+    require(cancelled.state == tui::SessionState::CANCELLED && cancelled.activity_rows().empty() && cancelled.active_tool_calls.empty() &&
+                cancelled.streaming_assistant_items.empty() && cancelled.transcript.blocks.size() == cancelled_blocks &&
+                !frame_text(cancelled.frame()).contains("Finished"),
+            "cancellation and late completions must clear activity without retaining a finished summary");
+
+    tui::SessionScreen failed;
+    constexpr ActivityScope failed_scope{.task_generation = 3, .provider_call_generation = 1};
+    failed.apply(PromptSubmitted{.text = "fail"});
+    failed.apply(AssistantTextDelta{.item_id = "failed-message", .text = "partial", .activity_scope = failed_scope});
+    failed.apply(ToolStarted{.call_id = "failed-tool", .name = "read_file", .activity_scope = failed_scope});
+    failed.apply(TaskFailed{.message = "provider failed"});
+    failed.apply(AssistantTextDelta{.item_id = "failed-message", .text = "late", .activity_scope = failed_scope});
+    failed.apply(ToolCompleted{.call_id = "failed-tool", .name = "read_file", .summary = "late", .activity_scope = failed_scope});
+    require(failed.state == tui::SessionState::FAILED && failed.activity_rows().empty() && failed.active_tool_calls.empty() &&
+                failed.streaming_assistant_items.empty() && !frame_text(failed.frame()).contains("Finished"),
+            "failure and late lifecycle events must clear activity without retaining a finished summary");
+
+    tui::SessionScreen replaced;
+    constexpr ActivityScope replaced_scope{.task_generation = 4, .provider_call_generation = 1};
+    replaced.apply(PromptSubmitted{.text = "replace"});
+    replaced.apply(AssistantTextDelta{.item_id = "replace-message", .text = "partial", .activity_scope = replaced_scope});
+    replaced.apply(ToolStarted{.call_id = "replace-tool", .name = "read_file", .activity_scope = replaced_scope});
+    replaced.load_transcript({});
+    replaced.apply(AssistantTextDelta{.item_id = "replace-message", .text = "late", .activity_scope = replaced_scope});
+    replaced.apply(AssistantMessageCompleted{.item_id = "replace-message", .text = "late", .activity_scope = replaced_scope});
+    replaced.apply(ToolStarted{.call_id = "replace-tool", .name = "read_file", .activity_scope = replaced_scope});
+    replaced.apply(ToolCompleted{.call_id = "replace-tool", .name = "read_file", .summary = "late", .activity_scope = replaced_scope});
+    require(replaced.state == tui::SessionState::EDITING && replaced.transcript.blocks.empty() && replaced.active_tool_calls.empty() &&
+                replaced.streaming_assistant_items.empty(),
+            "transcript replacement must retire stale assistant-item and tool-call identities");
 
     tui::SessionScreen compact([&now] { return now; });
     compact.resize({40, 4});
     compact.apply(PromptSubmitted{.text = "go"});
-    require(frame_text(compact.frame()).contains("Working…"),
-            "a one-row transcript viewport must drop the separator instead of the working status");
+    require(frame_text(compact.frame()).contains("Thinking…"), "a one-row transcript viewport must drop the separator instead of activity");
 }
 
 void check_mouse_selection() {
@@ -1385,6 +1598,49 @@ void check_headless_virtual_time_and_snapshots() {
     for (const auto &line : command_snapshot.visible_text) command_text += line + "\n";
     require(command_text.contains("• Running echo ready (10s)"),
             "virtual time must drive the same elapsed command refresh as the interactive timer");
+}
+
+void check_headless_repeated_activity_ids_across_turns() {
+    tui::HeadlessSession session(48, 16);
+    const auto ok = [&session](const tui::HeadlessAction &action) {
+        require(session.apply(action).has_value(), "scoped headless lifecycle action must apply");
+    };
+
+    ok({.type = "submit", .text = "first"});
+    ok({.type = "assistant_delta", .text = "first answer"});
+    ok({.type = "assistant_message_completed", .text = "first answer"});
+    ok({.type = "tool_started", .text = "first tool", .name = "read_file"});
+    ok({.type = "tool_completed", .text = "first done", .name = "read_file"});
+    ok({.type = "provider_activity_completed"});
+    ok({.type = "task_completed"});
+
+    ok({.type = "submit", .text = "second"});
+    ok({.type = "assistant_delta", .text = "second answer"});
+    ok({.type = "assistant_message_completed", .text = "second answer"});
+    ok({.type = "tool_started", .text = "second tool", .name = "read_file"});
+    ok({.type = "tool_completed", .text = "second done", .name = "read_file"});
+    ok({.type = "provider_activity_completed"});
+    ok({.type = "task_completed"});
+
+    const auto snapshot = session.inspect();
+    std::vector<const tui::SnapshotBlock *> assistant_blocks;
+    std::vector<const tui::SnapshotBlock *> tool_blocks;
+    const auto &blocks = snapshot.blocks;
+    for (const auto &block : blocks) {
+        if (block.kind == "assistant") assistant_blocks.push_back(&block);
+        if (block.kind == "tool") tool_blocks.push_back(&block);
+    }
+    require(assistant_blocks.size() == 2 && assistant_blocks[0]->text == "first answer" && assistant_blocks[1]->text == "second answer",
+            "two headless turns must retain assistant messages that reuse the default empty item ID");
+    require(tool_blocks.size() == 2 && tool_blocks[0]->detail == "first done" && tool_blocks[1]->detail == "second done",
+            "two headless turns must retain tool calls that reuse the default empty call ID");
+    require(assistant_blocks[0]->task_generation != 0 && assistant_blocks[0]->task_generation != assistant_blocks[1]->task_generation &&
+                assistant_blocks[0]->provider_call_generation != assistant_blocks[1]->provider_call_generation &&
+                tool_blocks[0]->task_generation == assistant_blocks[0]->task_generation &&
+                tool_blocks[0]->provider_call_generation == assistant_blocks[0]->provider_call_generation &&
+                tool_blocks[1]->task_generation == assistant_blocks[1]->task_generation &&
+                tool_blocks[1]->provider_call_generation == assistant_blocks[1]->provider_call_generation,
+            "headless lifecycle actions must use nonzero task/provider scopes and advance them between turns");
 }
 
 void check_headless_selectable_list() {
@@ -1895,6 +2151,7 @@ i32 run_all(std::string_view executable) {
     check_header_identity_and_path_presentation();
     check_composer_editing();
     check_multiline_navigation_history_and_projection();
+    check_responsive_footer();
     check_rich_output_and_concurrent_tools();
     check_external_editor_round_trip(executable);
     check_clipboard_helper();
@@ -1906,9 +2163,11 @@ i32 run_all(std::string_view executable) {
     check_command_menu_rows_and_availability();
     check_empty_session_hint();
     check_scroll_resize_state();
-    check_working_indicator();
+    check_repeated_activity_ids_are_provider_scoped();
+    check_activity_state();
     check_mouse_selection();
     check_headless_virtual_time_and_snapshots();
+    check_headless_repeated_activity_ids_across_turns();
     check_headless_selectable_list();
     check_headless_selectable_list_query();
     check_history_complete_text_filtering();

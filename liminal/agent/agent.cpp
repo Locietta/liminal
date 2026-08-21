@@ -104,7 +104,8 @@ Result<context::ContextManifest> Agent::context_manifest() const {
 Task<void, Error, lighter::Cancellation> Agent::run_task(std::string prompt, EventSink events,
                                                          std::optional<lighter::CancellationToken> cancellation) {
     const auto task_id = session.start_task(std::move(prompt));
-    auto outcome = co_await run_task_loop(task_id, events, cancellation);
+    const auto activity_task_generation = next_activity_task_generation++;
+    auto outcome = co_await run_task_loop(task_id, activity_task_generation, events, cancellation);
     if (outcome.is_cancelled()) {
         session.append(session::TaskFinished{.id = task_id, .outcome = session::TaskOutcome::CANCELLED});
         co_await cancel();
@@ -115,10 +116,11 @@ Task<void, Error, lighter::Cancellation> Agent::run_task(std::string prompt, Eve
     }
     session.append(session::TaskFinished{.id = task_id, .outcome = session::TaskOutcome::COMPLETED});
     if (outcome.has_value() && *outcome) emit(events, SessionNotice{.text = "[history compacted automatically]\n"});
-    emit(events, TaskCompleted{});
+    emit(events, TaskCompleted{.task_generation = activity_task_generation});
 }
 
-Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId task_id, const EventSink &events,
+Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId task_id, u64 activity_task_generation,
+                                                              const EventSink &events,
                                                               const std::optional<lighter::CancellationToken> &cancellation) {
     bool automatically_compacted = false;
     while (true) {
@@ -157,16 +159,20 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
             }
         }
         const auto provider_call_id = session.next_provider_call();
+        const ActivityScope activity_scope{
+            .task_generation = activity_task_generation,
+            .provider_call_generation = next_activity_provider_call_generation++,
+        };
         usize call_count = 0;
         bool has_terminal_answer = false;
-        agent::detail::ToolScheduler scheduler(*tools, events);
+        agent::detail::ToolScheduler scheduler(*tools, events, activity_scope);
         provider::StreamCallbacks stream{
             .on_assistant_text_delta =
-                [&events](const provider::OutputItemId &item_id, std::string_view text) {
-                    emit(events, AssistantTextDelta{.item_id = item_id.value, .text = std::string(text)});
+                [&events, activity_scope](const provider::OutputItemId &item_id, std::string_view text) {
+                    emit(events, AssistantTextDelta{.item_id = item_id.value, .text = std::string(text), .activity_scope = activity_scope});
                 },
             .on_item_completed =
-                [this, task_id, provider_call_id, &events, &scheduler, &call_count,
+                [this, task_id, provider_call_id, activity_scope, &events, &scheduler, &call_count,
                  &has_terminal_answer](const provider::OutputItem &item) {
                     session.append(session::OutputItemCompleted{
                         .task_id = task_id,
@@ -180,6 +186,7 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
                                          .item_id = message->id.value,
                                          .text = std::move(text),
                                          .phase = message->phase,
+                                         .activity_scope = activity_scope,
                                      });
                         if (message->phase != provider::MessagePhase::COMMENTARY &&
                             std::ranges::any_of(message->parts, [](const provider::TextPart &part) { return !part.text.empty(); })) {
@@ -273,10 +280,12 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
                     if (!has_terminal_answer) {
                         co_await fail(Error::protocol("provider completed the task without a terminal assistant answer"));
                     }
+                    emit(events, ProviderActivityCompleted{.activity_scope = activity_scope});
                     co_return automatically_compacted;
                 }
+                emit(events, ProviderActivityCompleted{.activity_scope = activity_scope});
                 break;
-            case provider::StopKind::NEEDS_TOOL_RESULTS: break;
+            case provider::StopKind::NEEDS_TOOL_RESULTS: emit(events, ProviderActivityCompleted{.activity_scope = activity_scope}); break;
             case provider::StopKind::TRUNCATED:
                 co_await fail(Error::protocol("response truncated (" + completion.stop_detail + "); raise max_tokens"));
             case provider::StopKind::CONTEXT_EXHAUSTED: co_await fail(Error::protocol("context window exhausted; try /compact"));

@@ -13,6 +13,7 @@
 
 #include <liminal/event.h>
 #include <liminal/tui/compact_picker.h>
+#include <liminal/tui/footer_presentation.h>
 #include <liminal/tui/header_presentation.h>
 #include <liminal/tui/surface.h>
 #include <liminal/tui/transcript.h>
@@ -109,12 +110,6 @@ struct CachedBlockLayout {
     std::string tool_name;
     std::string command;
     std::vector<LayoutRow> rows;
-};
-
-struct SessionFooter {
-    std::optional<u32> context_left_percent;
-    u64 tokens_used = 0;
-    bool not_saving = false;
 };
 
 enum struct SessionState {
@@ -218,7 +213,7 @@ struct SessionScreen {
     std::vector<LayoutRow> layout_block(const Block &block) const;
     LayoutDiagnostics layout_diagnostics() const noexcept;
     bool has_elapsed_running_command() const;
-    bool working() const noexcept;
+    bool task_active() const noexcept;
     bool animating() const;
     std::vector<LayoutRow> activity_rows() const;
 
@@ -239,6 +234,8 @@ struct SessionScreen {
     SessionState state = SessionState::EDITING;
     std::chrono::steady_clock::time_point task_started_at;
     std::optional<std::chrono::steady_clock::duration> completed_task_elapsed;
+    std::unordered_map<std::string, ActivityScope> active_tool_calls;
+    std::unordered_map<std::string, ActivityScope> streaming_assistant_items;
     mutable std::unordered_map<u64, CachedBlockLayout> layout_cache;
     mutable LayoutDiagnostics diagnostics;
 
@@ -248,8 +245,17 @@ private:
     std::optional<std::string_view> command_token() const noexcept;
     void complete_highlighted_command();
     i32 compact_band_rows(i32 base_viewport) const noexcept;
+    void refresh_activity_state() noexcept;
+    void clear_activity_identities() noexcept;
+    void retire_activity() noexcept;
+    bool retired_activity_scope(ActivityScope scope) const noexcept;
 
     MonotonicNow monotonic_now;
+    std::optional<u64> activity_task_generation;
+    std::unordered_map<std::string, ActivityScope> settled_tool_calls;
+    std::unordered_map<std::string, ActivityScope> settled_assistant_items;
+    u64 retired_activity_task_generation = 0;
+    u64 retired_activity_provider_call_generation = 0;
 };
 
 } // namespace liminal::tui
