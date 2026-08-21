@@ -14,7 +14,7 @@ contract.
 - the first-user-prompt preview, bounded by the session domain's canonical 240-byte valid-UTF-8 policy.
 
 `SessionScreen` owns this state. `/name`, `/name --clear`, the first submitted prompt, resume switching, and fork switching update it directly.
-Transcript loading and width changes do not derive or replace identity. The noninteractive renderer retains its existing append-only output.
+Transcript loading and width changes do not derive or replace identity. The noninteractive renderer emits append-only output.
 
 Workspace conversion and home discovery occur once during REPL setup, outside `SessionScreen::frame()`, and cross the TUI boundary as valid
 UTF-8 strings. On Windows, the platform implementation converts the native wide workspace path and reads home variables through the wide
@@ -68,13 +68,13 @@ The main full-screen surfaces use the same path and title rules:
 
 Checkpoint action and unsaved-history confirmation dialogs keep their own concise titles and do not opt into contextual headers.
 
-The header remains exactly one row under the existing terminal-height rules. Composer sizing, compact-picker placement, transcript viewport
-height, tail-following, and semantic viewport anchors are independent of header content. The footer no longer owns or renders workspace data;
-its current fields are model/effort, remaining context, token usage, and persistence/status overrides.
+The header occupies exactly one row under the terminal-height rules. Composer sizing, compact-picker placement, transcript viewport
+height, tail-following, and semantic viewport anchors are independent of header content. The footer owns model/effort, remaining context,
+token usage, and persistence/status overrides; workspace identity belongs to the header.
 
 ## Verification contract
 
 Tests exercise path and title projection as pure functions and inspect production frames through the headless TUI adapter. Coverage includes
 foreign path styles, home boundaries, hidden and Unicode components, full/fish/truncated forms, contextual picker headers, state refresh, and
-resize in both tail-following and transcript-browsing states. Visible assertions use surface rows and cells rather than relying only on encoded
-ANSI output.
+resize in both tail-following and transcript-browsing states. Visible assertions use surface rows and cells, with encoded ANSI output covered
+as a supplementary boundary.

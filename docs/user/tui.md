@@ -2,7 +2,7 @@
 
 Liminal's interactive terminal interface keeps the transcript and prompt composer available at the same time. Tool activity updates in place, and long drafts can be handed to an external editor.
 
-Assistant replies use a soft, normal-weight neutral foreground. Markdown headings and strong text become bold white, emphasis becomes italic without getting brighter, and links remain underlined and distinct. Blockquotes render with a green `│` gutter and green text while preserving inline code, links, bold, and italic styling. Code and diffs keep their existing semantic palette, while labels and secondary status details use a stable muted neutral rather than terminal dim text.
+Assistant replies use a soft, normal-weight neutral foreground. Markdown headings and strong text become bold white, emphasis becomes italic without getting brighter, and links remain underlined and distinct. Blockquotes render with a green `│` gutter and green text while preserving inline code, links, bold, and italic styling. Code and diffs use their semantic palette, while labels and secondary status details use a stable muted neutral at normal intensity.
 
 Prompts and replies render without `you:` or `assistant:` prefixes. Prompt color, reply typography, ordering, and tool/status rows keep turns visually distinct without redundant role labels.
 
@@ -26,17 +26,17 @@ While a turn is active, one status follows the newest output directly in the tra
 - `• Running tool…` while one tool is active.
 - `• Running <n> tools…` while tools run concurrently.
 
-Tool activity wins when text and tools overlap. When the last tool finishes, the status returns to Writing if assistant text is still arriving and otherwise to Thinking. A completed progress message also returns an active turn to Thinking instead of leaving a stale Writing status.
+Tool activity wins when text and tools overlap. When the last tool finishes, the status returns to Writing if assistant text is still arriving and otherwise to Thinking. A completed progress message also returns an active turn to Thinking.
 
 One blank line separates activity from the prompt composer. A soft highlight shimmers across the complete current label while its elapsed timer remains muted. When the turn completes, the line becomes a persistent muted `Finished (3s)` summary until the next turn begins and keeps the same trailing separation. Cancellation and failure do not retain that summary. Activity scrolls away naturally while browsing history. Scrolling does not replace footer metadata, and very short terminals drop the blank separator before hiding activity itself.
 
 ## Prompt composer
 
-The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline text aligns with the draft instead of the marker and remains vertically windowed around the cursor when it grows. The footer beneath the composer shows the selected model and effort, remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan.
+The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline continuation rows align to the draft column and remain vertically windowed around the cursor when the text grows. The footer beneath the composer shows the selected model and effort, remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan.
 
-On a narrow terminal, the footer removes whole fields in order: tokens first, context second, and an optional provider-limit field third. The model and effort remain last and are shortened by displayed terminal width only when nothing else remains. Separators disappear with their fields, and Unicode model names are never split inside a displayed character. Provider limits are shown only when an authoritative value has been supplied; Liminal does not currently acquire them.
+On a narrow terminal, the footer removes whole fields in order: tokens first, context second, and an optional provider-limit field third. The model and effort remain last and are shortened by displayed terminal width only when nothing else remains. Separators disappear with their fields, and Unicode model names are never split inside a displayed character. Provider limits appear when provider integration supplies an authoritative value.
 
-External-editor guidance and brief confirmations replace ordinary metadata when they need attention. A persistence failure shows `SESSION NOT SAVING` instead of allowing narrow ordinary fields to hide it. On short terminals, decorative composer padding is removed before transcript or editing space.
+External-editor guidance and brief confirmations replace ordinary metadata when they need attention. A persistence failure replaces ordinary metadata with `SESSION NOT SAVING`. On short terminals, decorative composer padding is removed before transcript or editing space.
 
 ## Slash commands
 
@@ -53,7 +53,7 @@ While the menu is open:
 
 `/help` prints a durable command reference into the transcript, listing every command with its arguments, aliases, and availability.
 
-`/model` opens a compact model picker above the composer instead of printing the catalog. It shows one row per model and reasoning effort (plus an `@off` row for models with reasoning support), marks the current selection, and searches provider, model ID, display name, and effort labels as you type into its own query line, which supports the usual cursor, word, and deletion keys. Enter applies the highlighted model immediately; Esc cancels and leaves the current model unchanged. `/model <selector>` still selects directly. See `providers-and-models.md` for selector syntax.
+Interactive `/model` opens a compact model picker above the composer. It shows one row per model and reasoning effort (plus an `@off` row for models with reasoning support), marks the current selection, and searches provider, model ID, display name, and effort labels as you type into its own query line, which supports the usual cursor, word, and deletion keys. Enter applies the highlighted model immediately; Esc cancels and leaves the current model unchanged. `/model <selector>` selects directly. See `providers-and-models.md` for selector syntax.
 
 ## External prompt editor
 
@@ -119,7 +119,7 @@ Session catalog commands are available while the agent is idle:
 - `/resume` opens recent sessions for the current workspace under `Resume Session · <workspace path>`. Its focused `Search:` row searches the complete workspace catalog by explicit title, first-prompt preview, or canonical full session UUID—even when a match is beyond the pages already shown. Up and Down move one row, PageUp and PageDown move between catalog pages, Enter confirms, and Esc cancels immediately without changing the current session.
 - `/name <title>` names the current session. `/name --clear` returns it to the first-prompt preview.
 
-In the `/resume` and `/history` search rows, printable text and paste insert at the cursor; pasted control characters such as trailing newlines and tabs are ignored. Backspace/Delete remove one grapheme, Ctrl+Backspace/Ctrl+Delete remove a word, Left/Right move by grapheme, Ctrl+Left/Ctrl+Right move by word, and Home/End move to the query boundaries. Clearing the query restores the ordinary ordering and paging. Matching ignores ASCII letter case but compares non-ASCII text exactly, including user-authored titles and prompt text.
+In the `/resume` and `/history` search rows, printable text and paste insert at the cursor; pasted control characters such as trailing newlines and tabs are ignored. Backspace/Delete remove one grapheme, Ctrl+Backspace/Ctrl+Delete remove a word, Left/Right move by grapheme, Ctrl+Left/Ctrl+Right move by word, and Home/End move to the query boundaries. Clearing the query restores the ordinary ordering and paging. Matching ignores ASCII letter case but compares non-ASCII text exactly, including user-authored titles and prompt text; no Unicode case conversion or normalization is performed.
 
 Liminal fully prepares a selected resume target before replacing the current transcript. If the current session still has unsaved history after a final save attempt, Liminal asks before switching and explains that the unsaved tail will not be resumable and that external tool effects are not undone. Choosing to stay leaves the current session unchanged.
 

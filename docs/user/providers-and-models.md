@@ -81,8 +81,7 @@ Normal agent turns offer the selected provider's hosted web access. URL citation
 answer streams and remain available in the saved assistant text.
 
 The selected model and endpoint must support these provider-native tools. An incompatible
-OpenAI-compatible gateway or Anthropic model reports its normal API error; Liminal does not silently
-replace hosted search with a local scraper.
+OpenAI-compatible gateway or Anthropic model reports its normal API error.
 
 Context capabilities are likewise explicit because standard model discovery does not reliably
 report them. `context_window` is the total token window, `max_output_tokens` is both the request
@@ -107,7 +106,7 @@ Follow the printed URL and enter the displayed code. Liminal stores access and r
 `LIMINAL_AUTH_FILE` overrides that path. On Linux, Liminal restricts the file to the current user.
 
 After login, Liminal exposes its bundled Codex model catalog without requiring remote discovery.
-The initial catalog includes GPT-5.6 Sol, Terra, Luna, and GPT-5.5. The built-in API URL, wire API,
+The bundled catalog includes GPT-5.6 Sol, Terra, Luna, and GPT-5.5. The built-in API URL, wire API,
 and authentication strategy cannot be overridden.
 
 A `codex` entry in `providers.json` may customize its display name, enable discovery, override
@@ -153,14 +152,15 @@ picker above the composer with one row per model and reasoning effort, including
 models with reasoning support. Typing filters the catalog by provider, model ID, display name, or
 effort label (case-insensitive for ASCII), and the query line supports normal cursor editing; Enter
 applies the highlighted row immediately and Esc leaves the current model unchanged. In
-non-interactive (redirected) sessions, `/model` prints the combined catalog instead.
+non-interactive (redirected) sessions, `/model` prints the combined catalog instead. Non-ASCII
+display text and queries are compared exactly; Liminal performs no Unicode case conversion or
+normalization.
 
 `/model <id>` selects an unambiguous model directly. Use `<provider>/<id>` when two providers expose
 the same ID. Append `@<effort>` to select a declared reasoning effort; `@off` clears an explicit
 effort.
 
 Model changes apply to subsequent turns while retaining provider-neutral conversation history.
-There is no separate provider-selection state.
 
 `LIMINAL_MODEL` selects the startup model using the same selector syntax. When it is unset, Liminal
 uses the first available catalog entry.

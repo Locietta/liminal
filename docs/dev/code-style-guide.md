@@ -36,7 +36,7 @@ Always use `struct`, do not use `class` for custom types. This way, we don't nee
 
 ## Polymorphism
 
-We generally avoid virtual functions in this project. If you need polymorphism, use `ngcpp-proxy` (previously `microsoft-proxy`). It provide a dynamic dispatch mechanism based on fat pointers, much close to rust's trait objects. It can also support static dispatch with `PRO_DEF_MEM_DISPATCH` and `PRO_DEF_FREE_DISPATCH`. An example:
+We generally avoid virtual functions in this project. If you need polymorphism, use `ngcpp-proxy`. It provides a dynamic dispatch mechanism based on fat pointers, much closer to Rust's trait objects. It also supports static dispatch with `PRO_DEF_MEM_DISPATCH` and `PRO_DEF_FREE_DISPATCH`. An example:
 
 ```c++
 struct RenderContext {};
@@ -95,9 +95,9 @@ Use the standard callable wrappers according to ownership:
 
 ## Basic Types
 
-We have some short convenience types defined in `lighter/types.hpp`, use them over the standard types. (e.g. use `usize` instead of `std::size_t`).
+Use the short convenience types defined in `lighter/types.hpp`; for example, the project spelling for an unsigned size is `usize`.
 
-These types should be direcly available inside the `lighter` namespace, if you are in a different namespace, `using namespace lighter::types;` is generally recommended.
+These types are directly available inside the `lighter` namespace. In another namespace, `using namespace lighter::types;` is generally recommended.
 
 ## Assertions, Contracts and Panic
 
@@ -137,6 +137,6 @@ refactor(tui): centralize slash command parsing
 
 - Lexes REPL input once into either a user prompt or an exact command name and argument string.
 - Resolves commands and aliases centrally and keeps command recognition out of individual handlers.
-- Rejects unknown slash commands instead of submitting them to the model.
+- Reports unknown slash commands as command errors.
 - Supports a leading double slash as an escaped slash-prefixed user prompt.
 ```

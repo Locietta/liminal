@@ -1,10 +1,10 @@
 # Session Architecture
 
-This document records the stable concepts behind Liminal sessions. It deliberately avoids concrete schemas and API signatures, which remain free to evolve with the implementation.
+This document records the stable concepts behind Liminal sessions. Concrete schemas and API signatures evolve with the implementation.
 
 ## Semantic authority
 
-Liminal owns a provider-neutral semantic session. Provider request history, the terminal transcript, copyable replies, and catalog summaries are projections of that session rather than independent sources of truth.
+Liminal owns a provider-neutral semantic session as the sole authority. Provider request history, the terminal transcript, copyable replies, and catalog summaries are projections of that session.
 
 A session records stable events, not streaming presentation updates. User task boundaries, completed provider output items, provider-call outcomes, tool-result batches, task outcomes, model preference changes, branch selection, and compaction checkpoints are semantic. Partial text deltas, timers, animations, scroll state, and drafts are not.
 
@@ -36,7 +36,7 @@ Entries form an append-only parent-linked history. Selecting an ancestor moves t
 
 Provider context is derived from the active branch according to provider compatibility. Transcript hydration is a separate non-streaming projection and must not recreate running states. A copyable reply comes only from the terminal provider call of a successfully completed task.
 
-Conversation navigation exposes a distinct semantic checkpoint identity rather than accepting arbitrary entry IDs. A safe checkpoint is a completed task boundary or a compaction boundary whose ancestry is already idle. Provider output, provider-call, tool-result, and within-task compaction entries are not independently selectable. Projection derives checkpoint ancestry, descendants, active ancestry, the selected append point, and stable branch identity from the append-only entry tree; it does not persist parallel branch records. Descendant branch summaries retain a total leaf count and bounded representative identities rather than duplicating every leaf into every ancestor.
+Conversation navigation addresses distinct semantic checkpoint identities. A safe checkpoint is a completed task boundary or a compaction boundary whose ancestry is already idle. Provider output, provider-call, tool-result, and within-task compaction entries are not independently selectable. Projection derives checkpoint ancestry, descendants, active ancestry, the selected append point, and stable branch identity from the append-only entry tree; it does not persist parallel branch records. Descendant branch summaries contain a total leaf count and bounded representative identities.
 
 Checkout is a session-domain cursor mutation. It validates the requested checkpoint, preserves every descendant, persists the selected append point, and then hydrates transcript and provider context from that ancestry. Appending after checkout creates a branch naturally. Conversation navigation never represents filesystem, process, network, or other external tool effects as reverted.
 
@@ -46,11 +46,11 @@ Fork preparation is not publication. A disposable fork plan owns the new identit
 
 ## Discovery
 
-Session discovery reads bounded, indexed catalog metadata without decoding entry payloads. Workspace association is immutable session metadata used for discovery, not an execution sandbox: the current invocation still controls the working directory and instruction discovery.
+Session discovery reads bounded, indexed catalog metadata without decoding entry payloads. Workspace association is immutable session metadata used for discovery. The current invocation controls the working directory and instruction discovery.
 
-Workspace catalogs are ordered newest first and traversed with stable keyset cursors rather than offsets. A catalog summary contains only bounded identification metadata; the full session ID remains its durable identity. An empty page is a successful discovery result, while failure to resolve an explicitly requested session is an error.
+Workspace catalogs are ordered newest first and traversed with stable keyset cursors. A catalog summary contains only bounded identification metadata; the full session ID remains its durable identity. An empty page is a successful discovery result, while failure to resolve an explicitly requested session is an error.
 
-The catalog paging request also carries an optional platform-neutral text query. An empty query uses the ordinary workspace/recency keyset query. A non-empty query filters inside SQLite across explicit title, bounded first-prompt preview, and the canonical full UUID while retaining the same workspace predicate, `updated_at_ms DESC, id DESC` order, bounded page size, and keyset continuation. Matching uses literal `instr` operations, so `%`, `_`, and similar characters have no wildcard meaning. ASCII letters are compared case-insensitively; non-ASCII title and preview bytes must match exactly.
+The catalog paging request also carries an optional platform-neutral text query. An empty query uses the ordinary workspace/recency keyset query. A non-empty query filters inside SQLite across explicit title, bounded first-prompt preview, and the canonical full UUID while retaining the same workspace predicate, `updated_at_ms DESC, id DESC` order, bounded page size, and keyset continuation. Matching uses literal `instr` operations, so `%`, `_`, and similar characters have no wildcard meaning. ASCII letters are compared case-insensitively; non-ASCII title and preview bytes must match exactly, without Unicode case conversion or normalization.
 
 Replacement may include a preferred session ID. The catalog checks that exact ID under the same workspace and text predicates and, when it still matches, returns a bounded page beginning at that identity plus preceding and following keyset continuations. This keeps the preferred row selected without loading or walking every newer match; PageUp/Up can traverse newer pages and PageDown/Down can traverse older pages while every loaded page remains in global recency/ID order. A missing or nonmatching preferred ID falls back to the ordered first page. Every continuation belongs to one query, and changing or clearing the query discards both directions before establishing the replacement page.
 
@@ -64,7 +64,7 @@ Interactive switching must preserve the current live session until both preparat
 
 Naming is an authoritative session mutation and follows the same ownership and persistence rules as semantic history. It does not advance conversation recency. After its session commit, Liminal makes a bounded synchronous catalog-refresh attempt so selectors normally reflect the new title immediately.
 
-There is no archived or otherwise hidden session state: every published session remains resumable and participates in ordinary workspace discovery until a future explicit deletion removes it. Conversation recency advances non-regressingly when a user task is admitted and becomes durable atomically with that task start. Output, tools, task completion, recovery bookkeeping, model changes, rename, checkout, compaction, catalog repair, and SQLite maintenance do not advance it.
+Every published session is resumable and participates in ordinary workspace discovery. Conversation recency advances non-regressingly when a user task is admitted and becomes durable atomically with that task start. Output, tools, task completion, recovery bookkeeping, model changes, rename, checkout, compaction, catalog repair, and SQLite maintenance do not advance it.
 
 ## Catalog recovery
 
@@ -77,5 +77,4 @@ Normal startup inspects pending markers and the bounded staging directory. It tr
 - Persisted payload kinds and schema versions have explicit stable identities; C++ variant ordering is never a storage format.
 - Schema migration is ordered and rejects databases that are newer, foreign, or unidentified and non-empty.
 - New catalog features must remain independent of total payload size.
-- New storage abstractions require a real second backend; speculative indirection is not a goal.
-- Export, synchronization, encryption, cleanup, and repair are separate product decisions and must not introduce another canonical history store.
+- The semantic session remains the sole canonical history store across export, synchronization, encryption, cleanup, and repair features.

@@ -9,15 +9,15 @@ Architecture notes for the slash-command registry, compact command and model pic
 - `resolve_command` and `find_command` resolve canonical names and aliases from it.
 - The compact command menu builds its rows from it.
 - `/help` (`describe_commands`) renders it as a durable transcript notice.
-- Tests assert a bijection between `CommandKind` and registry entries and that removed commands stay absent.
+- Tests assert a bijection between `CommandKind` and registry entries.
 
-Execution stays with the dispatcher switch in `repl_body`; `idle_only` is presentation metadata only, and the dispatcher's own idle guards remain the executable truth. Adding a command means adding one registry entry, one `CommandKind`, and one dispatch case — parsing, completion, and `/help` follow automatically.
+Execution lives in the dispatcher switch in `repl_body`; `idle_only` is presentation metadata, and the dispatcher's idle guards are the executable truth. Adding a command means adding one registry entry, one `CommandKind`, and one dispatch case — parsing, completion, and `/help` follow automatically.
 
 ## Compact picker primitive
 
 `CompactPicker` (`liminal/tui/compact_picker.h`) is the bounded contextual selection surface rendered as a band directly above the composer. It owns query filtering (PREFIX or SUBSTRING over pre-lowercased haystacks), a highlight preserved by item identity across query and item changes, and explicit `loading` / `error` / empty states. The owned query carries a grapheme-aware byte cursor edited through `edit_query` (insert, backspace/delete, word variants, Left/Right/Word/Home/End). `project` renders into a caller-chosen row range; the owned query line renders nearest the composer and returns the frame cursor at the query cursor position.
 
-Matching contract: filtering is case-insensitive for ASCII only — haystacks and queries are folded with byte-wise ASCII lowering. Provider IDs, model IDs, effort labels, and command names are ASCII by construction; non-ASCII text (display names, arbitrary queries) matches exactly, byte for byte. This is deliberate: the vendored libunicode provides segmentation and width but no case folding, and full Unicode folding is not worth a dependency for identifier search. Revisit if catalogs ever carry cased non-ASCII display names in practice.
+Matching contract: filtering is case-insensitive for ASCII only — haystacks and queries are folded with byte-wise ASCII lowering. Provider IDs, model IDs, effort labels, and command names are ASCII by construction; non-ASCII text in display names and arbitrary queries matches exactly, byte for byte. Liminal performs no non-ASCII case conversion or Unicode normalization.
 
 Band placement lives in `SessionScreen::frame`: the band takes rows between the transcript viewport and the composer, and `viewport_rows()` subtracts it. Its budget is `base_viewport − k_transcript_reserve (4)`, capped at 8 result rows plus chrome, so it shrinks to zero before consuming the guaranteed minimum transcript space. A band with zero rows is invisible but its key handling stays active. All picker state is width-independent, so resize preserves query and selection identity for free.
 
@@ -57,11 +57,11 @@ The full-screen `SelectableListDialog` branch stays first in `apply_terminal_eve
 
 `picker_query.*` is the single query-editing primitive used by compact and full-screen pickers. It applies insertion, paste, grapheme deletion and movement, word deletion and movement, Home, and End to a UTF-8 byte cursor. Insertions discard C0 controls and Delete before changing the query, so terminal paste cannot create an invisible newline or tab. Its cell-aware query window keeps that cursor visible without splitting an extended grapheme cluster. Query text and cursor position are model state and therefore survive resize; frame projection only reads them.
 
-Picker matching folds ASCII `A`–`Z` only. Non-ASCII bytes are compared exactly. This deliberately avoids locale-dependent behavior and a Unicode case-folding dependency, but it means user-authored session titles and prompt labels with cased non-ASCII letters must use the same non-ASCII case to match.
+Picker matching follows the shared ASCII-only contract: fold `A`–`Z`, compare non-ASCII bytes exactly, and perform no Unicode normalization. User-authored session titles and prompt labels with cased non-ASCII letters must therefore use the same non-ASCII case to match.
 
 ## Full-screen selectable-list filtering
 
-`SelectableList` remains the full-screen screen model for `/resume`, `/history`, and confirmation lists. Search-enabled lists add an owned `Search: <query>` row, query cursor, explicit result replacement transition, and query-specific empty state. Navigation and confirmation use the owned selected item ID; page and query replacement locate that identity in the new result set and otherwise select the first result deterministically. A page arriving without pending navigation preserves identity. A page requested by boundary Up, Down, PageUp, or PageDown completes that outstanding action exactly once after arrival.
+`SelectableList` is the full-screen screen model for `/resume`, `/history`, and confirmation lists. Search-enabled lists add an owned `Search: <query>` row, query cursor, explicit result replacement transition, and query-specific empty state. Navigation and confirmation use the owned selected item ID; page and query replacement locate that identity in the new result set and otherwise select the first result deterministically. A page arriving without pending navigation preserves identity. A page requested by boundary Up, Down, PageUp, or PageDown completes that outstanding action exactly once after arrival.
 
 `SelectableListDialog` owns the transition boundary between input and domain work. Text-changing edits request a complete result replacement; cursor-only edits redraw without loading. Boundary navigation requests the preceding or next page when its keyset continuation exists. The injected loader receives the current query, transition direction, and preferred selected identity for replacement. No loader runs from `frame()`.
 
@@ -77,7 +77,7 @@ The explicit states are:
 
 `/history` filters the complete `conversation_checkpoints()` collection in memory at the input transition, before mapping matches to bounded visible rows. Its haystacks are the untruncated prompt label, checkpoint identity, task outcome, current/ancestor/preserved state text, total branch count, and representative leaf identities. Matching checkpoints retain their original tree order and stable checkpoint IDs.
 
-`/resume` uses the catalog query/paging boundary described in `session-architecture.md`; it never filters the pages currently held by `SelectableList`.
+`/resume` delegates complete-dataset filtering and paging to the catalog boundary described in `session-architecture.md`.
 
 ## Model picker flow
 
@@ -85,7 +85,7 @@ The explicit states are:
 
 Interactive `/model` with no arguments: open the picker in loading state → `guard_task(models.refresh())` → warnings render as ordinary transcript notices (visible above the band; picker state preserved) → a hard refresh error keeps prior catalog entries plus an error row → `model_picker_items` populates rows → await the decision. A confirmed row id is an exact catalog selector (`provider/id[@effort]`), so it maps back through `Catalog::select` and duplicate model IDs stay disambiguated by provider. Entries with declared efforts get one row per effort plus an explicit `@off` row (their bare selector resolves to the default effort, so "no effort" needs its own selector); the `@off` row carries the current marker when the active effort is null. Cancellation leaves the model and the transcript untouched — including Esc during the refresh, which cancels both the task and the picker silently (the notice is reserved for the non-picker selector path).
 
-Non-interactive (redirected stdio) `/model` keeps the historical transcript catalog listing so scripted use keeps working. `/model <selector>` is unchanged.
+Non-interactive (redirected stdio) `/model` prints the combined catalog into the transcript. `/model <selector>` performs direct selection.
 
 ## Empty-session hint
 
