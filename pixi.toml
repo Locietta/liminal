@@ -13,6 +13,8 @@ configure = "xmake f -m releasedbg --sanitizers=n -y" # we use releasedbg for de
 configure-release = "xmake f -m release --sanitizers=n -y"
 configure-sanitize = "xmake f -m releasedbg --sanitizers=y -y"
 build = "xmake build -y"
+package = "python scripts/package.py package"
+install = "python scripts/package.py install"
 test-unit = "xmake test"
 test-integration = { cmd = "python -m pytest tests/integration -v", depends-on = [
   "build",
