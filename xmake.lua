@@ -1,6 +1,12 @@
 set_xmakever("3.0.9")
 set_project("liminal")
 
+local project_version = os.getenv("PIXI_PROJECT_VERSION")
+if not project_version then
+    raise("this project reads its version from Pixi: use `pixi run xmake ...` or develop inside `pixi shell`")
+end
+set_version(project_version)
+
 -- use releasedbg for development builds, ship with release
 add_rules("mode.release", "mode.releasedbg")
 

@@ -1,3 +1,12 @@
+# Releases
+
+The product version is the Pixi workspace version in `pixi.toml`. Pixi exposes
+the same value to xmake, which generates `<xmake/version/liminal.hpp>` for C++
+consumers. Use `pixi workspace version set <version>` to change it.
+
+`liminal --version` prints the product version and, when built from a Git
+worktree, the source commit and dirty state. It exits without starting the TUI.
+
 ## Portable Windows release
 
 ```powershell

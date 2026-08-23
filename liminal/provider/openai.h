@@ -26,7 +26,6 @@ inline constexpr std::string_view k_provider_tag = "openai";
 struct ClientOptions {
     provider::AuthResolver auth;
     std::string base_url = "https://api.openai.com/v1";
-    std::optional<std::string> models_client_version;
     std::string model;
     std::optional<std::string> reasoning_effort;
     std::optional<u32> max_output_tokens = 8192;
@@ -59,5 +58,6 @@ struct Client {
 
 /// Lists models exposed by the configured OpenAI-compatible endpoint.
 lighter::Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options);
+lighter::Task<std::vector<provider::DiscoveredModel>, Error> list_codex_models(ClientOptions options, std::string compatibility_version);
 
 } // namespace liminal::openai

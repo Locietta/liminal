@@ -26,6 +26,9 @@ namespace liminal::provider {
 
 namespace {
 
+// OpenAI uses this sentinel when generating its bundled, unfiltered Codex model catalog.
+inline constexpr std::string_view k_codex_models_compatibility_version = "99.99.99";
+
 struct ConfigModel {
     std::string id;
     std::optional<std::string> name;
@@ -207,12 +210,11 @@ const Instance *Registry::find(std::string_view id) const noexcept {
 
 lighter::Task<std::vector<DiscoveredModel>, Error> Registry::discover(const Instance &provider) const {
     if (provider.api == ApiType::OPENAI_RESPONSES) {
-        co_return co_await openai::list_models({
-                                                   .auth = provider.auth,
-                                                   .base_url = provider.base_url,
-                                                   .models_client_version = provider.models_client_version,
-                                               })
-            .or_fail();
+        openai::ClientOptions options{.auth = provider.auth, .base_url = provider.base_url};
+        if (provider.codex_subscription) {
+            co_return co_await openai::list_codex_models(std::move(options), std::string(k_codex_models_compatibility_version)).or_fail();
+        }
+        co_return co_await openai::list_models(std::move(options)).or_fail();
     }
     co_return co_await anthropic::list_models({.auth = provider.auth, .base_url = provider.base_url}).or_fail();
 }
@@ -269,7 +271,6 @@ Result<Registry> load_registry(const std::filesystem::path &providers_path, cons
             .base_url = codex_api_base_url(),
             .auth = *std::move(codex_auth),
             .codex_subscription = true,
-            .models_client_version = "0.1.0",
             .models = bundled_codex_models(),
         });
         if (codex_override != config->providers.end()) {

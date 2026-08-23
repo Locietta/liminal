@@ -11,6 +11,7 @@ output; tests skip with a clear message if it has not been built.
 import errno
 import json
 import os
+import re
 import select
 import shlex
 import shutil
@@ -23,6 +24,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+import tomllib
 
 sys.path.insert(0, str(Path(__file__).parent))
 import mock_anthropic
@@ -428,6 +430,33 @@ def check(state, expected_log):
     assert state["log"] == expected_log, f"scenario order mismatch: {state['log']}"
 
 
+def test_version_exits_without_startup(tmp_path):
+    with (REPO_ROOT / "pixi.toml").open("rb") as manifest:
+        version = tomllib.load(manifest)["workspace"]["version"]
+
+    env = os.environ.copy()
+    env["LIMINAL_PROVIDERS_FILE"] = str(tmp_path)
+    result = subprocess.run(
+        [str(BINARY), "--version"],
+        stdin=subprocess.DEVNULL,
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert re.fullmatch(
+        rf"liminal {re.escape(version)}(?: \([0-9a-f]{{12}}(?:-dirty)?\))?\n",
+        result.stdout,
+    )
+
+
 def test_redirected_eof_exits_cleanly(tmp_path):
     out = run_liminal(
         "",
@@ -779,8 +808,13 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
 
     stored["expires_at"] = 0
     auth_file.write_text(json.dumps({"codex": stored}))
+    providers_file = tmp_path / "providers.json"
+    providers_file.write_text(
+        json.dumps({"providers": {"codex": {"discover_models": True}}})
+    )
 
     env["LIMINAL_CODEX_API_BASE_URL"] = f"{url}/codex"
+    env["LIMINAL_PROVIDERS_FILE"] = str(providers_file)
     env["LIMINAL_MODEL"] = "codex/gpt-5.6-sol"
     session = subprocess.run(
         [str(BINARY)],
@@ -801,6 +835,7 @@ def test_codex_subscription_device_login(codex_auth_mock, tmp_path):
         "poll",
         "exchange",
         "refresh",
+        "models",
         "responses",
     ]
 

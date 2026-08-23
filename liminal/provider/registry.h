@@ -27,7 +27,6 @@ struct Instance {
     std::string base_url;
     AuthResolver auth;
     bool codex_subscription = false;
-    std::optional<std::string> models_client_version;
     bool discover_models = false;
     std::vector<model::Entry> models;
 };

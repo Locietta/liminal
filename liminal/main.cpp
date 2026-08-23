@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include <xmake/version/liminal.hpp>
+
 #include <lighter/async/async.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/runtime/interrupt.h>
@@ -30,6 +32,15 @@
 namespace {
 
 using namespace liminal;
+
+void print_version() {
+    std::printf("liminal %.*s", static_cast<int>(xmake::version::version.size()), xmake::version::version.data());
+    if (!xmake::version::commit.empty()) {
+        const auto short_commit = xmake::version::commit.substr(0, 12);
+        std::printf(" (%.*s%s)", static_cast<int>(short_commit.size()), short_commit.data(), xmake::version::dirty ? "-dirty" : "");
+    }
+    std::putchar('\n');
+}
 
 std::string env_or(const char *name, std::string fallback) {
     const char *value = std::getenv(name);
@@ -267,6 +278,11 @@ int run_codex_login() {
 } // namespace
 
 int main(int argc, char **argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--version") {
+        print_version();
+        return 0;
+    }
+
     StartupOptions options;
     if (argc > 1) {
         if (argc == 3 && std::string_view(argv[1]) == "login" && std::string_view(argv[2]) == "codex") {
@@ -277,7 +293,7 @@ int main(int argc, char **argv) {
         } else if (argc == 2 && std::string_view(argv[1]) == "continue") {
             options = {.kind = StartupKind::CONTINUE};
         } else {
-            std::fprintf(stderr, "usage: %s [login codex | resume <session-id> | continue]\n", argv[0]);
+            std::fprintf(stderr, "usage: %s [--version | login codex | resume <session-id> | continue]\n", argv[0]);
             return 2;
         }
     }

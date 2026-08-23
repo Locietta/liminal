@@ -1021,15 +1021,17 @@ Task<void, Error> Client::compact(provider::History &history, std::string_view i
         .or_fail();
 }
 
-Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options) {
+namespace {
+
+Task<std::vector<provider::DiscoveredModel>, Error> list_models_impl(ClientOptions options, std::string client_version) {
     while (!options.base_url.empty() && options.base_url.back() == '/') {
         options.base_url.pop_back();
     }
 
     http::Client client;
     auto request = client.on().get(options.base_url + "/models");
-    if (options.models_client_version) {
-        request.query("client_version", *options.models_client_version);
+    if (!client_version.empty()) {
+        request.query("client_version", client_version);
     }
     apply_auth_headers(request, co_await resolve_auth(options).or_fail());
     auto sent = co_await std::move(request).send();
@@ -1058,6 +1060,16 @@ Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions op
         }
     }
     co_return models;
+}
+
+} // namespace
+
+Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options) {
+    co_return co_await list_models_impl(std::move(options), {}).or_fail();
+}
+
+Task<std::vector<provider::DiscoveredModel>, Error> list_codex_models(ClientOptions options, std::string compatibility_version) {
+    co_return co_await list_models_impl(std::move(options), std::move(compatibility_version)).or_fail();
 }
 
 } // namespace liminal::openai

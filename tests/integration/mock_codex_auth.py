@@ -3,7 +3,7 @@
 import base64
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 
 def encode_segment(value):
@@ -35,6 +35,28 @@ def make_server(port=0):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+
+        def do_GET(self):
+            try:
+                request = urlsplit(self.path)
+                assert request.path == "/codex/models"
+                assert parse_qs(request.query) == {"client_version": ["99.99.99"]}
+                assert self.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
+                assert self.headers["chatgpt-account-id"] == "account-123"
+                state["log"].append("models")
+                self.send_json(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-sol",
+                                "display_name": "GPT-5.6-Sol",
+                            }
+                        ]
+                    }
+                )
+            except AssertionError as error:
+                state["errors"].append(str(error))
+                self.send_error(500, str(error))
 
         def do_POST(self):
             try:
