@@ -118,6 +118,7 @@ struct SessionCoordinator {
     Result<PreparedSession> prepare(session::SessionId id) const;
     Result<ForkPlan> prepare_fork(const session::Session &source, session::ConversationCheckpointId checkpoint) const;
     Result<PreparedSession> publish_fork(ForkPlan plan) const;
+    Result<SessionSwitch> begin_new(session::SessionWorkspace workspace, std::string working_directory, model::Choice selected_model) const;
     Result<SessionSwitch> begin_switch(session::SessionId current, session::SessionId target) const;
     Result<session::PersistenceStatus> rename_inactive(session::SessionId id, RenameSession mutation) const;
 

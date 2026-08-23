@@ -202,6 +202,10 @@ lighter::Task<lighter::Error> finish_switch(Agent &agent, ConsoleRenderer &rende
     auto *current_queue = agent.session.persistence_queue();
     switching.flush_current(current_queue);
     if (switching.state() == application::SessionSwitchState::AWAITING_UNSAVED_CONFIRMATION) {
+        if (!renderer.terminal) {
+            switching.resolve_unsaved(application::UnsavedSwitchDecision::STAY, current_queue->status());
+            co_return renderer.notice("[session switch cancelled: the current session has unsaved history]\n");
+        }
         auto confirmation = open_unsaved_confirmation(dialog, renderer);
         if (!confirmation) co_return renderer.status("Session switch error: " + confirmation.error().message());
         auto decision = co_await dialog.next();
@@ -267,6 +271,19 @@ lighter::Task<lighter::Error> publish_and_switch_to_fork(Agent &agent, ConsoleRe
 
 SelectableListPage conversation_history_page(const std::vector<session::ConversationCheckpoint> &checkpoints, std::string_view query) {
     return history_page_impl(checkpoints, query);
+}
+
+lighter::Task<lighter::Error> start_new_session(Agent &agent, application::SessionCoordinator *sessions,
+                                                const session::SessionWorkspace &workspace, model::Catalog &models,
+                                                ConsoleRenderer &renderer, SelectableListDialog &dialog) {
+    if (!sessions) co_return renderer.status("New session is unavailable while session storage is unavailable");
+    auto selector = agent.model.entry.provider + "/" + agent.model.entry.id;
+    if (agent.model.reasoning_effort) selector += "@" + *agent.model.reasoning_effort;
+    auto selected_model = models.select(selector);
+    if (!selected_model) co_return renderer.status("New session error: " + selected_model.error().message());
+    auto switching = sessions->begin_new(workspace, agent.tools->working_directory.generic_string(), *std::move(selected_model));
+    if (!switching) co_return renderer.status("New session error: " + switching.error().message());
+    co_return co_await finish_switch(agent, renderer, dialog, *std::move(switching), "Started a new session");
 }
 
 lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,

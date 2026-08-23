@@ -869,10 +869,12 @@ void check_command_parsing_and_status() {
     command = tui::resolve_command("exit");
     require(command && *command == tui::CommandKind::QUIT, "command aliases must be registered centrally");
     const auto resume = tui::resolve_command("resume");
+    const auto fresh = tui::resolve_command("new");
     const auto archive = tui::resolve_command("archive");
     const auto unarchive = tui::resolve_command("unarchive");
     const auto history = tui::resolve_command("history");
-    require(resume && *resume == tui::CommandKind::RESUME && !archive && !unarchive && history && *history == tui::CommandKind::HISTORY,
+    require(resume && *resume == tui::CommandKind::RESUME && fresh && *fresh == tui::CommandKind::NEW && !archive && !unarchive &&
+                history && *history == tui::CommandKind::HISTORY,
             "session commands and removed archive commands must resolve through the central command registry");
     const auto named = tui::parse_name_arguments("  Catalog work  ");
     const auto cleared = tui::parse_name_arguments("--clear");

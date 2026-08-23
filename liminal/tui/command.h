@@ -33,6 +33,7 @@ enum struct CommandKind {
     CONTEXT,
     COMPACT,
     MODEL,
+    NEW,
     RESUME,
     NAME,
     HISTORY,

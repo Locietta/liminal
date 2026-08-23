@@ -62,6 +62,8 @@ Target preparation has two ordered stages. Durable acquisition takes the exclusi
 
 Interactive switching must preserve the current live session until both preparation stages succeed. Abandoning an unsaved tail requires an explicit user decision and does not imply that tool effects are reverted. Fork confirmation is distinct from resume confirmation because the selected prefix will be saved in the fork even when unsaved source-only history or metadata cannot be saved in the source.
 
+A fresh interactive session retains the invocation workspace, working directory, and selected model preference, while receiving a new identity and empty history, title, preview, and fork provenance. Its writer is acquired before the live session is replaced, and it follows the same save-or-confirm switch boundary as resume.
+
 Naming is an authoritative session mutation and follows the same ownership and persistence rules as semantic history. It does not advance conversation recency. After its session commit, Liminal makes a bounded synchronous catalog-refresh attempt so selectors normally reflect the new title immediately.
 
 Every published session is resumable and participates in ordinary workspace discovery. Conversation recency advances non-regressingly when a user task is admitted and becomes durable atomically with that task start. Output, tools, task completion, recovery bookkeeping, model changes, rename, checkout, compaction, catalog repair, and SQLite maintenance do not advance it.

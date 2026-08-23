@@ -595,8 +595,8 @@ Task<lighter::Outcome<T, E, lighter::Cancellation>> guard_task(Task<T, E> work, 
 }
 
 Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &renderer, TaskControl &control, model::Catalog &models,
-                    application::SessionCoordinator *sessions, SelectableListDialog &dialog, CompactPickerDialog &model_picker,
-                    SessionFailure &failure) {
+                    application::SessionCoordinator *sessions, const session::SessionWorkspace &workspace, SelectableListDialog &dialog,
+                    CompactPickerDialog &model_picker, SessionFailure &failure) {
     lighter::Error render_error;
     EventSink events = [&renderer, &render_error, &control](const Event &event) {
         if (render_error) return;
@@ -730,6 +730,27 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                     }
                     if (!rendered(co_await resume_session(agent, sessions, renderer, dialog), "cannot run resume command")) co_return 1;
                     saving_notice_visible = false;
+                    continue;
+                }
+                case CommandKind::NEW: {
+                    auto arguments = require_no_arguments(command_line.name, command_line.arguments);
+                    if (!arguments) {
+                        if (!rendered(renderer.notice("[command error: " + arguments.error().detail + "]\n"),
+                                      "cannot render command error"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (control.active_task) {
+                        if (!rendered(renderer.notice("[/new is available only while the agent is idle]\n"),
+                                      "cannot render new session status"))
+                            co_return 1;
+                        continue;
+                    }
+                    if (!rendered(co_await start_new_session(agent, sessions, workspace, models, renderer, dialog),
+                                  "cannot start new session"))
+                        co_return 1;
+                    saving_notice_visible = false;
+                    catalog_notice_visible = false;
                     continue;
                 }
                 case CommandKind::NAME: {
@@ -900,7 +921,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
 } // namespace
 
 Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &models, application::SessionCoordinator *sessions,
-                   std::vector<Block> initial_transcript, std::vector<std::string> startup_notices) {
+                   session::SessionWorkspace workspace, std::vector<Block> initial_transcript, std::vector<std::string> startup_notices) {
     auto workspace_path = native_path_utf8(agent.tools->working_directory);
     if (!workspace_path) {
         std::fprintf(stderr, "cannot encode workspace path: %s\n", std::string(workspace_path.error().message()).c_str());
@@ -995,16 +1016,16 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             lighter::Event render_requested;
             renderer.set_redraw_scheduler([&render_requested] { render_requested.set(); });
 #ifndef _WIN32
-            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, model_picker, failure),
-                                          signal_monitor(interrupts, renderer, control, failure, &selection_copies),
-                                          terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies,
-                                                              dialog, model_picker, control, failure),
-                                          render_monitor(render_requested, renderer, control, failure),
-                                          external_editor_loop(editor_requests, terminal, renderer, control, failure),
-                                          copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
-                                          selection_copy_loop(selection_copies, renderer, control, failure),
-                                          animation_monitor(renderer, control, failure),
-                                          suspend_monitor(suspend_controls, terminal, renderer, control, failure));
+            auto raced = co_await WhenAny(
+                repl_body(agent, reader, renderer, control, models, sessions, workspace, dialog, model_picker, failure),
+                signal_monitor(interrupts, renderer, control, failure, &selection_copies),
+                terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies, dialog, model_picker,
+                                    control, failure),
+                render_monitor(render_requested, renderer, control, failure),
+                external_editor_loop(editor_requests, terminal, renderer, control, failure),
+                copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
+                selection_copy_loop(selection_copies, renderer, control, failure), animation_monitor(renderer, control, failure),
+                suspend_monitor(suspend_controls, terminal, renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
@@ -1015,15 +1036,15 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             if (raced.index() == 7) exit_code = std::get<7>(raced);
             if (raced.index() == 8) exit_code = std::get<8>(raced);
 #else
-            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, model_picker, failure),
-                                          signal_monitor(interrupts, renderer, control, failure, &selection_copies),
-                                          terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies,
-                                                              dialog, model_picker, control, failure),
-                                          render_monitor(render_requested, renderer, control, failure),
-                                          external_editor_loop(editor_requests, terminal, renderer, control, failure),
-                                          copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
-                                          selection_copy_loop(selection_copies, renderer, control, failure),
-                                          animation_monitor(renderer, control, failure));
+            auto raced = co_await WhenAny(
+                repl_body(agent, reader, renderer, control, models, sessions, workspace, dialog, model_picker, failure),
+                signal_monitor(interrupts, renderer, control, failure, &selection_copies),
+                terminal_input_loop(terminal, renderer, prompts, editor_requests, copy_requests, selection_copies, dialog, model_picker,
+                                    control, failure),
+                render_monitor(render_requested, renderer, control, failure),
+                external_editor_loop(editor_requests, terminal, renderer, control, failure),
+                copy_reply_loop(copy_requests, selection_copies, agent, renderer, control, failure),
+                selection_copy_loop(selection_copies, renderer, control, failure), animation_monitor(renderer, control, failure));
             if (raced.index() == 0) exit_code = std::get<0>(raced);
             if (raced.index() == 1) exit_code = std::get<1>(raced);
             if (raced.index() == 2) exit_code = std::get<2>(raced);
@@ -1038,8 +1059,9 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             PromptReader reader{.input = &pipe};
             SelectableListDialog dialog;
             CompactPickerDialog model_picker;
-            auto raced = co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, dialog, model_picker, failure),
-                                          signal_monitor(interrupts, renderer, control, failure));
+            auto raced =
+                co_await WhenAny(repl_body(agent, reader, renderer, control, models, sessions, workspace, dialog, model_picker, failure),
+                                 signal_monitor(interrupts, renderer, control, failure));
             exit_code = raced.index() == 0 ? std::get<0>(raced) : std::get<1>(raced);
         }
     }

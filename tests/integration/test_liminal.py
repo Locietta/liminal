@@ -476,7 +476,7 @@ def test_redirected_eof_exits_cleanly(tmp_path):
 def test_slash_commands_are_exact_and_can_be_escaped(openai_mock, tmp_path):
     url, state = openai_mock
     out = run_liminal(
-        "/copycat\n//copycat\n/quit\n",
+        "/new\n/copycat\n//copycat\n/quit\n",
         {
             "openai": configured_provider(
                 "openai-responses", url, mock_openai.API_KEY, [{"id": "test-model"}]
@@ -486,6 +486,7 @@ def test_slash_commands_are_exact_and_can_be_escaped(openai_mock, tmp_path):
     )
 
     check(state, ["429", "tools-turn", "continuation"])
+    assert "Started a new session" in out
     assert "[command error: unknown command '/copycat']" in out
     assert "/copycat" in json.dumps(state["request_bodies"][0])
 

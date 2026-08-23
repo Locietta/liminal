@@ -18,6 +18,9 @@ SelectableListPage conversation_history_page(const std::vector<session::Conversa
 
 lighter::Task<lighter::Error> resume_session(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
                                              SelectableListDialog &dialog);
+lighter::Task<lighter::Error> start_new_session(Agent &agent, application::SessionCoordinator *sessions,
+                                                const session::SessionWorkspace &workspace, model::Catalog &models,
+                                                ConsoleRenderer &renderer, SelectableListDialog &dialog);
 lighter::Task<lighter::Error> navigate_conversation(Agent &agent, application::SessionCoordinator *sessions, ConsoleRenderer &renderer,
                                                     SelectableListDialog &dialog);
 lighter::Error name_current_session(Agent &agent, ConsoleRenderer &renderer, std::optional<std::string> title);

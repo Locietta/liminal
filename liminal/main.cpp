@@ -253,8 +253,9 @@ lighter::Task<i32> run_app(ToolSet &tools, lighter::InterruptSource &interrupts,
     auto selection = *std::move(selected_session);
     auto coordinator = std::move(selection.coordinator);
     Agent agent(std::move(selection.model), tools, std::move(instructions), std::move(selection.session));
-    co_return co_await tui::run_repl(agent, interrupts, models, coordinator ? &*coordinator : nullptr, std::move(selection.transcript),
-                                     std::move(selection.notices));
+    co_return co_await tui::run_repl(agent, interrupts, models, coordinator ? &*coordinator : nullptr,
+                                     session::SessionWorkspace{.root = workspace->root, .key = workspace->key},
+                                     std::move(selection.transcript), std::move(selection.notices));
 }
 
 int run_codex_login() {

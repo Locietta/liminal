@@ -2004,6 +2004,56 @@ void test_prepared_switch_keeps_live_state_atomic() {
             "prepared switch did not yield one complete target while preserving the old live value");
 }
 
+void test_new_session_preparation_keeps_only_invocation_state() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open new-session storage");
+    auto live = make_session("history that must not cross the boundary");
+    live.metadata.title = "Old title";
+    live.set_model_preference("test", "selected-model", "high");
+    const auto live_id = live.id;
+    const auto live_entries = live.entries.size();
+    const session::SessionWorkspace invocation_workspace{.root = "D:/current-workspace", .key = "current-workspace"};
+    const std::string invocation_working_directory = "D:/current-workspace/subdirectory";
+
+    application::SessionPreparationServices services(
+        [](const session::Session &value) -> Result<std::vector<tui::Block>> {
+            require(value.entries.empty(), "new-session transcript projection observed inherited history");
+            return std::vector<tui::Block>{};
+        },
+        [](const std::optional<session::SessionModelPreference> &) -> Result<application::SessionModelResolution> {
+            return lighter::outcome_error(Error::config("new-session preparation must retain the already selected model"));
+        });
+    application::SessionCoordinator coordinator(storage->repository, std::move(services));
+    auto switching = coordinator.begin_new(
+        invocation_workspace, invocation_working_directory,
+        {.entry = {.provider = "test", .id = "selected-model", .name = "Selected model"}, .reasoning_effort = "high"});
+    require(switching && switching->state() == application::SessionSwitchState::PREPARED && live.id == live_id &&
+                live.entries.size() == live_entries && live.metadata.title == "Old title",
+            "preparing a new session changed the live session");
+    switching->flush_current(nullptr);
+    auto prepared = std::move(*switching).take_target();
+    require(prepared.session.id != live_id && prepared.session.entries.empty() && !prepared.session.metadata.title &&
+                prepared.session.metadata.preview.empty() && !prepared.session.metadata.forked_from &&
+                prepared.session.metadata.workspace == invocation_workspace &&
+                prepared.session.metadata.working_directory == invocation_working_directory && prepared.transcript.empty() &&
+                prepared.session.persistence_queue() != nullptr && prepared.model.entry.provider == "test" &&
+                prepared.model.entry.id == "selected-model" && prepared.model.reasoning_effort == "high" &&
+                prepared.session.metadata.model_preference && prepared.session.metadata.model_preference->provider == "test" &&
+                prepared.session.metadata.model_preference->model == "selected-model" &&
+                prepared.session.metadata.model_preference->reasoning_effort == "high",
+            "fresh session inherited conversation state or lost invocation state");
+
+    const auto fresh_id = prepared.session.id;
+    const auto task = prepared.session.start_task("first fresh prompt");
+    prepared.session.append(session::TaskFinished{.id = task});
+    require(prepared.session.persistence_queue()->flush().has_value(), "fresh session did not save its first task");
+    auto catalog_entry = storage->catalog.find(fresh_id);
+    require(catalog_entry && *catalog_entry && (*catalog_entry)->summary.preview == "first fresh prompt" &&
+                (*catalog_entry)->workspace_key == invocation_workspace.key,
+            "fresh session was not published into its workspace after the first prompt");
+}
+
 void test_removed_archive_surface_and_state_root_override() {
     TemporaryState temporary;
 #ifdef _WIN32
@@ -2094,6 +2144,7 @@ int main(int argc, char **argv) {
     test_sqlite_sidecar_and_lease_links_are_rejected();
     test_catalog_repair_validates_root_before_lock_creation();
     test_prepared_switch_keeps_live_state_atomic();
+    test_new_session_preparation_keeps_only_invocation_state();
     test_stale_catalog_hint_removal_requires_session_lease();
     test_removed_archive_surface_and_state_root_override();
     return 0;

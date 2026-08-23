@@ -226,6 +226,27 @@ Result<PreparedSession> SessionCoordinator::publish_fork(ForkPlan plan) const {
     return std::move(plan.target);
 }
 
+Result<SessionSwitch> SessionCoordinator::begin_new(session::SessionWorkspace workspace, std::string working_directory,
+                                                    model::Choice selected_model) const {
+    session::Session fresh;
+    fresh.metadata.workspace = std::move(workspace);
+    fresh.metadata.working_directory = std::move(working_directory);
+    fresh.set_model_preference(selected_model.entry.provider, selected_model.entry.id, selected_model.reasoning_effort);
+
+    auto transcript = services.project(fresh);
+    if (!transcript) return lighter::outcome_error(std::move(transcript).error());
+    auto writer = repository.create(fresh.id);
+    if (!writer) return lighter::outcome_error(std::move(writer).error());
+    auto attached = fresh.attach_persistence(services.persistence(*std::move(writer)));
+    if (!attached) return lighter::outcome_error(std::move(attached).error());
+
+    return SessionSwitch(SessionSwitchState::PREPARED, PreparedSession{
+                                                           .session = std::move(fresh),
+                                                           .model = std::move(selected_model),
+                                                           .transcript = *std::move(transcript),
+                                                       });
+}
+
 Result<SessionSwitch> SessionCoordinator::begin_switch(session::SessionId current, session::SessionId target) const {
     if (current == target) return SessionSwitch(SessionSwitchState::CURRENT_SELECTED);
     auto prepared = prepare_catalog_hint(target);

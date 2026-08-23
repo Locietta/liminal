@@ -12,7 +12,7 @@
 namespace liminal::tui {
 
 lighter::Task<i32> run_repl(Agent &agent, lighter::InterruptSource &interrupts, model::Catalog &models,
-                            application::SessionCoordinator *sessions, std::vector<Block> initial_transcript,
-                            std::vector<std::string> startup_notices = {});
+                            application::SessionCoordinator *sessions, session::SessionWorkspace workspace,
+                            std::vector<Block> initial_transcript, std::vector<std::string> startup_notices = {});
 
 } // namespace liminal::tui

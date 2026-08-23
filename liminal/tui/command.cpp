@@ -24,13 +24,14 @@ std::string_view trim(std::string_view text) {
 
 constexpr std::array<std::string_view, 1> k_quit_aliases{"exit"};
 
-constexpr std::array<CommandSpec, 9> k_command_registry{{
+constexpr std::array<CommandSpec, 10> k_command_registry{{
     {.kind = CommandKind::HELP, .name = "help", .synopsis = "", .description = "list every command"},
     {.kind = CommandKind::MODEL, .name = "model", .synopsis = "[selector]", .description = "select the agent model"},
     {.kind = CommandKind::CONTEXT, .name = "context", .synopsis = "", .description = "show what occupies the model context"},
     {.kind = CommandKind::COMPACT, .name = "compact", .synopsis = "[instructions]", .description = "compact the conversation history"},
     {.kind = CommandKind::COPY, .name = "copy", .synopsis = "[reply number]", .description = "copy an assistant reply to the clipboard"},
     {.kind = CommandKind::NAME, .name = "name", .synopsis = "<title> | --clear", .description = "set or clear the session title"},
+    {.kind = CommandKind::NEW, .name = "new", .synopsis = "", .description = "start a fresh session", .idle_only = true},
     {.kind = CommandKind::RESUME,
      .name = "resume",
      .synopsis = "",
