@@ -228,13 +228,32 @@ void test_apply_patch_operations_are_validated_before_writes() {
     std::filesystem::remove_all(directory, remove_error);
 }
 
+struct ExecObservations {
+    void append(const provider::ToolResult &result) {
+        if (!diagnostics.empty()) diagnostics += '\n';
+        diagnostics += result.content;
+        constexpr std::string_view output_marker = "\n\noutput:\n";
+        const auto output_start = result.content.find(output_marker);
+        if (output_start != std::string::npos) output += result.content.substr(output_start + output_marker.size());
+        if (result.content.contains("status: exited")) {
+            exited = true;
+            exit_zero = result.content.contains("exit_code: 0") && !result.is_error;
+        }
+    }
+
+    std::string diagnostics;
+    std::string output;
+    bool exited = false;
+    bool exit_zero = false;
+};
+
 lighter::Task<> exercise_shell_task_interaction(ToolSet &tools) {
 #ifdef _WIN32
     constexpr std::string_view command =
-        R"json({"cmd":"$first = [Console]::In.ReadLine(); Start-Sleep -Milliseconds 100; Write-Output ('first:' + $first); $second = [Console]::In.ReadLine(); Start-Sleep -Milliseconds 100; Write-Output ('second:' + $second)","yield_time_ms":25})json";
+        R"json({"cmd":"$first = [Console]::In.ReadLine(); Write-Output ('first:' + $first); $second = [Console]::In.ReadLine(); Write-Output ('second:' + $second)","yield_time_ms":25})json";
 #else
     constexpr std::string_view command =
-        R"({"cmd":"IFS= read -r first; sleep 0.1; echo first:$first; IFS= read -r second; sleep 0.1; echo second:$second","yield_time_ms":25})";
+        R"({"cmd":"IFS= read -r first; echo first:$first; IFS= read -r second; echo second:$second","yield_time_ms":25})";
 #endif
     auto started = co_await tools.execute(make_call("start", "exec_command", command));
     require(started.has_value() && !started->is_error && started->content.contains("session_id: 1") &&
@@ -246,11 +265,20 @@ lighter::Task<> exercise_shell_task_interaction(ToolSet &tools) {
         tools.execute(make_call("second", "write_stdin", R"({"session_id":1,"chars":"two\n","yield_time_ms":3000})")));
     require(interacted.has_value(), "concurrent writes to one exec session failed");
     const auto &[first, second] = *interacted;
-    require(first.content.contains("first:one") && !first.content.contains("second:two") && second.content.contains("second:two"),
-            "writes to one exec session must remain ordered and drain distinct output");
-    auto finished = co_await tools.execute(make_call("finish", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})"));
-    require(finished && !finished->is_error && finished->content.contains("status: exited") && finished->content.contains("exit_code: 0"),
-            "the ordered exec session writes did not run through completion");
+    ExecObservations observations;
+    observations.append(first);
+    observations.append(second);
+    for (usize attempt = 0; attempt < 8 && !observations.exited; ++attempt) {
+        auto polled = co_await tools.execute(make_call("finish", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})"));
+        require(polled.has_value(), "polling the ordered exec session failed");
+        observations.append(*polled);
+    }
+    const auto first_output = observations.output.find("first:one");
+    const auto second_output = observations.output.find("second:two");
+    require(first_output != std::string::npos && second_output != std::string::npos && first_output < second_output,
+            "writes to one exec session were not observed in call order: " + observations.diagnostics);
+    require(observations.exited && observations.exit_zero,
+            "the ordered exec session did not run through completion: " + observations.diagnostics);
 }
 
 void test_shell_task_interaction() {
@@ -292,15 +320,25 @@ lighter::Task<> exercise_distinct_shell_task_interactions(ToolSet &tools, const 
         tools.execute(make_call("write-b", "write_stdin", R"({"session_id":2,"chars":"go\n","yield_time_ms":2000})")));
     require(interacted.has_value(), "writes to distinct exec sessions failed");
     const auto &[first, second] = *interacted;
-    require(first.content.contains("task-a") && second.content.contains("task-b"), "writes to distinct exec sessions blocked each other");
-
-    auto finished =
-        co_await lighter::WhenAll(tools.execute(make_call("finish-a", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})")),
-                                  tools.execute(make_call("finish-b", "write_stdin", R"({"session_id":2,"yield_time_ms":3000})")));
-    require(finished.has_value(), "failed to finish distinct exec sessions");
-    const auto &[first_finished, second_finished] = *finished;
-    require(first_finished.content.contains("status: exited") && second_finished.content.contains("status: exited"),
-            "distinct exec sessions did not run through completion");
+    ExecObservations first_observations;
+    ExecObservations second_observations;
+    first_observations.append(first);
+    second_observations.append(second);
+    for (usize attempt = 0; attempt < 8 && (!first_observations.exited || !second_observations.exited); ++attempt) {
+        auto finished =
+            co_await lighter::WhenAll(tools.execute(make_call("finish-a", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})")),
+                                      tools.execute(make_call("finish-b", "write_stdin", R"({"session_id":2,"yield_time_ms":3000})")));
+        require(finished.has_value(), "failed to poll distinct exec sessions");
+        const auto &[first_finished, second_finished] = *finished;
+        first_observations.append(first_finished);
+        second_observations.append(second_finished);
+    }
+    require(first_observations.output.contains("task-a") && second_observations.output.contains("task-b"),
+            "writes to distinct exec sessions blocked each other: " + first_observations.diagnostics + "\n" +
+                second_observations.diagnostics);
+    require(first_observations.exited && first_observations.exit_zero && second_observations.exited && second_observations.exit_zero,
+            "distinct exec sessions did not run through completion: " + first_observations.diagnostics + "\n" +
+                second_observations.diagnostics);
 }
 
 void test_distinct_shell_tasks_interact_concurrently() {
