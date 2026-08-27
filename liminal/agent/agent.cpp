@@ -1,7 +1,8 @@
 #include "agent.h"
 
 #include "default_instructions.h"
-#include "tool_scheduler.h"
+#include "tool_executor.h"
+#include "tool_planner.h"
 
 #include <algorithm>
 #include <chrono>
@@ -60,8 +61,8 @@ bool needs_automatic_compaction(const context::ContextManifest &manifest) {
     return manifest.usage.estimated_input_tokens >= threshold;
 }
 
-ToolExecutionContext tool_execution_context(const context::ContextManifest &manifest) {
-    if (!manifest.budget.context_window_tokens || !manifest.usage.remaining_input_tokens) return {};
+usize tool_payload_capacity(const context::ContextManifest &manifest) {
+    if (!manifest.budget.context_window_tokens || !manifest.usage.remaining_input_tokens) return k_max_tool_payload_bytes;
 
     // Match KimiX's context-aware shape: at most half of the total context,
     // at most 90% of the currently remaining input capacity, and always below
@@ -71,11 +72,19 @@ ToolExecutionContext tool_execution_context(const context::ContextManifest &mani
     const auto remaining_tokens = static_cast<u64>(std::max<i64>(*manifest.usage.remaining_input_tokens, 0));
     const auto remaining_bytes =
         remaining_tokens * k_tool_output_bytes_per_token * k_tool_output_remaining_numerator / k_tool_output_remaining_denominator;
-    const auto maximum = std::min<u64>({context_bytes, remaining_bytes, k_max_tool_output_bytes});
-    return {.max_output_bytes = static_cast<usize>(maximum)};
+    return static_cast<usize>(std::min<u64>({context_bytes, remaining_bytes, k_max_tool_payload_bytes}));
 }
 
 std::string bounded_diagnostic(std::string detail) { return bounded_utf8(detail, k_provider_diagnostic_limit); }
+
+std::vector<ToolOutcome> not_started_outcomes(const std::vector<provider::ToolCall> &calls, std::string_view reason) {
+    std::vector<ToolOutcome> outcomes;
+    outcomes.reserve(calls.size());
+    for (const auto &call : calls) {
+        outcomes.push_back({.call_id = call.id, .kind = ToolOutcomeKind::NOT_STARTED, .receipt = "reason: " + std::string(reason)});
+    }
+    return outcomes;
+}
 
 session::ProviderCallLoopOutcome loop_outcome(const provider::ProviderCallCompletion &completion, usize call_count,
                                               bool has_terminal_answer) {
@@ -185,25 +194,15 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
             .task_generation = activity_task_generation,
             .provider_call_generation = next_activity_provider_call_generation++,
         };
-        usize call_count = 0;
+        std::vector<provider::ToolCall> tool_calls;
         bool has_terminal_answer = false;
-        agent::detail::ToolScheduler scheduler(
-            *tools,
-            [this](std::span<const std::string> call_ids) {
-                std::vector<provider::ToolResult> projected_results;
-                projected_results.reserve(call_ids.size());
-                for (const auto &call_id : call_ids) projected_results.push_back({.call_id = call_id});
-                auto current = context::ContextBuilder{}.build(instructions, session, context_budget(model.entry), projected_results);
-                return current ? tool_execution_context(*current) : ToolExecutionContext{.max_output_bytes = 0};
-            },
-            events, activity_scope);
         provider::StreamCallbacks stream{
             .on_assistant_text_delta =
                 [&events, activity_scope](const provider::OutputItemId &item_id, std::string_view text) {
                     emit(events, AssistantTextDelta{.item_id = item_id.value, .text = std::string(text), .activity_scope = activity_scope});
                 },
             .on_item_completed =
-                [this, task_id, provider_call_id, activity_scope, &events, &scheduler, &call_count,
+                [this, task_id, provider_call_id, activity_scope, &events, &tool_calls,
                  &has_terminal_answer](const provider::OutputItem &item) {
                     session.append(session::OutputItemCompleted{
                         .task_id = task_id,
@@ -225,8 +224,7 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
                         }
                     }
                     if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) {
-                        ++call_count;
-                        scheduler.submit(call->call);
+                        tool_calls.push_back(call->call);
                     }
                 },
         };
@@ -239,18 +237,19 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
                 .reason = session::ProviderCallAbortReason::CANCELLED,
                 .detail = "provider call cancelled",
             });
-            auto cancelled = co_await scheduler.cancel_and_finish(k_tool_cancel_grace_period);
-            if (!cancelled) {
-                co_await fail(std::move(cancelled).error());
-            }
-            auto results = *std::move(cancelled);
-            if (!results.empty()) {
-                session.append(session::ToolResults{
+            auto outcomes = not_started_outcomes(tool_calls, "provider_call_cancelled");
+            if (!outcomes.empty()) {
+                session.append(session::ToolOutcomes{
                     .task_id = task_id,
                     .provider_call_id = provider_call_id,
-                    .results = std::move(results),
+                    .outcomes = std::move(outcomes),
                 });
             }
+            session.append(session::ProviderRoundSettled{
+                .task_id = task_id,
+                .provider_call_id = provider_call_id,
+                .replay = session::ProviderRoundReplay::OMIT,
+            });
             co_await cancel();
         }
         if (completed.has_error()) {
@@ -261,21 +260,23 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
                 .reason = session::ProviderCallAbortReason::FAILED,
                 .detail = failure_detail,
             });
-            auto cancelled = co_await scheduler.cancel_and_finish(k_tool_cancel_grace_period);
-            if (!cancelled) {
-                co_await fail(std::move(cancelled).error());
-            }
-            auto results = *std::move(cancelled);
-            if (!results.empty()) {
-                session.append(session::ToolResults{
+            auto outcomes = not_started_outcomes(tool_calls, "provider_call_failed");
+            if (!outcomes.empty()) {
+                session.append(session::ToolOutcomes{
                     .task_id = task_id,
                     .provider_call_id = provider_call_id,
-                    .results = std::move(results),
+                    .outcomes = std::move(outcomes),
                 });
             }
+            session.append(session::ProviderRoundSettled{
+                .task_id = task_id,
+                .provider_call_id = provider_call_id,
+                .replay = session::ProviderRoundReplay::OMIT,
+            });
             co_await fail(std::move(completed).error());
         }
         auto completion = *std::move(completed);
+        const auto call_count = tool_calls.size();
         session.metadata.working_directory = tools->working_directory.generic_string();
         session.append(session::ProviderCallCompleted{
             .task_id = task_id,
@@ -283,41 +284,64 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
             .completion = completion,
             .loop_outcome = loop_outcome(completion, call_count, has_terminal_answer),
         });
-        if (call_count != 0) {
-            scheduler.finish_accepting();
-            if (!scheduler.has_output_capacity()) {
-                auto cancelled = co_await scheduler.cancel_and_finish(k_tool_cancel_grace_period);
-                if (!cancelled) co_await fail(std::move(cancelled).error());
-                auto results = *std::move(cancelled);
-                if (!results.empty()) {
-                    session.append(session::ToolResults{
-                        .task_id = task_id,
-                        .provider_call_id = provider_call_id,
-                        .results = std::move(results),
-                    });
-                }
-                co_await fail(Error::protocol("insufficient output capacity for tool results; compact first"));
-            }
-            auto settled = co_await observe_cancellation(scheduler.finish(), cancellation);
-            const bool cancelled_while_settling = settled.is_cancelled();
-            std::vector<provider::ToolResult> results;
-            if (settled.is_cancelled()) {
-                auto cancelled = co_await scheduler.cancel_and_finish(k_tool_cancel_grace_period);
-                if (!cancelled) {
-                    co_await fail(std::move(cancelled).error());
-                }
-                results = *std::move(cancelled);
-            } else if (settled.has_value()) {
-                results = *std::move(settled);
-            }
-            if (!results.empty()) {
-                session.append(session::ToolResults{
+        const auto round_outcome = loop_outcome(completion, call_count, has_terminal_answer);
+        if (call_count != 0 && round_outcome != session::ProviderCallLoopOutcome::FAILED) {
+            agent::detail::ToolBatchPlanner planner(*tools, [this](std::span<const ToolOutcome> projected) -> std::optional<usize> {
+                auto current = context::ContextBuilder{}.build(instructions, session, context_budget(model.entry), projected);
+                if (!current) return std::nullopt;
+                return tool_payload_capacity(*current);
+            });
+            auto admission = planner.plan(std::move(tool_calls));
+            if (auto *rejected = std::get_if<agent::detail::ToolBatchRejected>(&admission)) {
+                session.append(session::ToolOutcomes{
                     .task_id = task_id,
                     .provider_call_id = provider_call_id,
-                    .results = std::move(results),
+                    .outcomes = std::move(rejected->outcomes),
+                });
+                session.append(session::ProviderRoundSettled{
+                    .task_id = task_id,
+                    .provider_call_id = provider_call_id,
+                    .replay = session::ProviderRoundReplay::OMIT,
+                });
+                co_await fail(Error::protocol("insufficient output capacity for tool outcomes; compact first"));
+            }
+            agent::detail::ToolExecutor executor(*tools, std::move(*std::get_if<agent::detail::ToolBatchPlan>(&admission)), events,
+                                                 activity_scope);
+            auto settled = co_await observe_cancellation(executor.finish(), cancellation);
+            const bool cancelled_while_settling = settled.is_cancelled();
+            std::vector<ToolOutcome> outcomes;
+            if (settled.is_cancelled()) {
+                outcomes = co_await executor.cancel_and_finish(k_tool_cancel_grace_period);
+            } else if (settled.has_value()) {
+                outcomes = *std::move(settled);
+            }
+            if (!outcomes.empty()) {
+                session.append(session::ToolOutcomes{
+                    .task_id = task_id,
+                    .provider_call_id = provider_call_id,
+                    .outcomes = std::move(outcomes),
                 });
             }
+            session.append(session::ProviderRoundSettled{
+                .task_id = task_id,
+                .provider_call_id = provider_call_id,
+                .replay = session::ProviderRoundReplay::REPLAY,
+            });
             if (cancelled_while_settling) co_await cancel();
+        } else {
+            if (call_count != 0) {
+                session.append(session::ToolOutcomes{
+                    .task_id = task_id,
+                    .provider_call_id = provider_call_id,
+                    .outcomes = not_started_outcomes(tool_calls, "provider_round_failed"),
+                });
+            }
+            session.append(session::ProviderRoundSettled{
+                .task_id = task_id,
+                .provider_call_id = provider_call_id,
+                .replay = round_outcome == session::ProviderCallLoopOutcome::FAILED ? session::ProviderRoundReplay::OMIT :
+                                                                                      session::ProviderRoundReplay::REPLAY,
+            });
         }
 
         switch (completion.stop) {

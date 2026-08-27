@@ -9,6 +9,7 @@
 #include <lighter/encoding/utf8.h>
 
 #include <liminal/context/context.h>
+#include <liminal/session/recovery.h>
 #include <liminal/session/session.h>
 #include <liminal/text.h>
 
@@ -35,15 +36,22 @@ session::EntryId append_message(session::Session &log, session::TaskId task_id, 
 
 session::ConversationCheckpointId checkpoint_id(session::EntryId entry) { return {entry}; }
 
+void settle_round(session::Session &log, session::TaskId task_id, session::ProviderCallId call_id,
+                  session::ProviderRoundReplay replay = session::ProviderRoundReplay::REPLAY) {
+    log.append(session::ProviderRoundSettled{.task_id = task_id, .provider_call_id = call_id, .replay = replay});
+}
+
 void test_append_only_branching() {
     session::Session log;
     const auto first_task = log.start_task("first task");
     append_message(log, first_task, "first answer");
+    const auto first_call = log.next_provider_call();
     log.append(session::ProviderCallCompleted{
         .task_id = first_task,
-        .id = log.next_provider_call(),
+        .id = first_call,
         .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
     });
+    settle_round(log, first_task, first_call);
     const auto root = log.append(session::TaskFinished{.id = first_task});
     const auto original_task = log.start_task("original continuation");
     const auto original_leaf = log.append(session::TaskFinished{.id = original_task});
@@ -53,12 +61,12 @@ void test_append_only_branching() {
     const auto alternate_task = log.start_task("alternate task");
     const auto alternate_leaf = log.append(session::TaskFinished{.id = alternate_task});
 
-    require(log.entries.size() == 8, "branching changed the session identity or deleted entries");
+    require(log.entries.size() == 9, "branching changed the session identity or deleted entries");
     require(log.find(original_leaf) != nullptr, "branching deleted the original leaf");
-    require(log.entries[6].parent_id == root, "alternate branch has the wrong parent");
+    require(log.entries[7].parent_id == root, "alternate branch has the wrong parent");
 
     auto branch = log.active_branch();
-    require(branch.size() == 6 && branch.back()->id == alternate_leaf, "active branch did not follow parent links to the new leaf");
+    require(branch.size() == 7 && branch.back()->id == alternate_leaf, "active branch did not follow parent links to the new leaf");
     auto manifest = context::ContextBuilder{}.build({}, log);
     require(manifest &&
                 std::ranges::none_of(manifest->session_entries, [original_leaf](session::EntryId id) { return id == original_leaf; }) &&
@@ -91,8 +99,9 @@ void test_monotonic_timestamps_and_utf8_bounds() {
             "model preference mutation produced an unloadable timestamp");
     log.set_title("Named session");
     require(log.metadata.title == "Named session" && log.metadata.updated_at_ms == future, "rename advanced conversation recency");
-    log.start_task("older admission", future - 1);
+    const auto older_task = log.start_task("older admission", future - 1);
     require(log.metadata.updated_at_ms == future, "an older task admission regressed conversation recency");
+    log.append(session::TaskFinished{.id = older_task});
     log.start_task("newer admission", future + 1);
     require(log.metadata.updated_at_ms == future + 1 && log.validate().has_value(),
             "a newer task admission did not advance conversation recency");
@@ -137,24 +146,114 @@ void test_checkpoint_projection() {
 void test_cumulative_token_usage() {
     session::Session log;
     const auto first_task = log.start_task("first");
+    const auto first_call = log.next_provider_call();
     log.append(session::ProviderCallCompleted{
         .task_id = first_task,
-        .id = log.next_provider_call(),
+        .id = first_call,
         .completion = {.usage = {.input_tokens = 30, .output_tokens = 5, .context_tokens = 40}},
     });
+    settle_round(log, first_task, first_call);
     const auto first = log.append(session::TaskFinished{.id = first_task});
     const auto second_task = log.start_task("continue");
+    const auto second_call = log.next_provider_call();
     log.append(session::ProviderCallCompleted{
         .task_id = second_task,
-        .id = log.next_provider_call(),
+        .id = second_call,
         .completion = {.usage = {.input_tokens = 50, .output_tokens = 7}},
     });
+    settle_round(log, second_task, second_call);
     log.append(session::TaskFinished{.id = second_task});
 
     require(log.tokens_used() == 97, "session token usage did not prefer normalized response totals");
 
     auto selected = log.checkout(checkpoint_id(first));
     require(selected.has_value() && log.tokens_used() == 97, "branch selection changed tokens already consumed by the session");
+}
+
+void test_provider_round_coherence_validation() {
+    session::Session incomplete;
+    const auto task = incomplete.start_task("inspect");
+    const auto call = incomplete.next_provider_call();
+    incomplete.append(session::OutputItemCompleted{
+        .task_id = task,
+        .provider_call_id = call,
+        .item = provider::ToolCallItem{.id = {.value = "tool"}, .call = {.id = "call", .name = "read_file"}},
+    });
+    incomplete.append(session::ProviderCallCompleted{
+        .task_id = task,
+        .id = call,
+        .loop_outcome = session::ProviderCallLoopOutcome::FOLLOW_UP,
+    });
+    incomplete.append(session::ProviderRoundSettled{
+        .task_id = task,
+        .provider_call_id = call,
+        .replay = session::ProviderRoundReplay::REPLAY,
+    });
+    require(!incomplete.validate(), "session validation accepted a replayed tool call without an outcome");
+
+    session::Session coherent;
+    const auto coherent_task = coherent.start_task("inspect");
+    const auto coherent_call = coherent.next_provider_call();
+    coherent.append(session::OutputItemCompleted{
+        .task_id = coherent_task,
+        .provider_call_id = coherent_call,
+        .item = provider::ToolCallItem{.id = {.value = "tool"}, .call = {.id = "call", .name = "read_file"}},
+    });
+    coherent.append(session::ProviderCallCompleted{
+        .task_id = coherent_task,
+        .id = coherent_call,
+        .loop_outcome = session::ProviderCallLoopOutcome::FOLLOW_UP,
+    });
+    coherent.append(session::ToolOutcomes{
+        .task_id = coherent_task,
+        .provider_call_id = coherent_call,
+        .outcomes = {{.call_id = "call", .kind = ToolOutcomeKind::NOT_STARTED, .receipt = "reason: fixture"}},
+    });
+    settle_round(coherent, coherent_task, coherent_call);
+    coherent.append(session::TaskFinished{.id = coherent_task, .outcome = session::TaskOutcome::INTERRUPTED});
+    require(coherent.validate().has_value(), "session validation rejected an exactly settled provider round");
+
+    session::Session failed_replay;
+    const auto failed_task = failed_replay.start_task("reject failed replay");
+    const auto failed_call = failed_replay.next_provider_call();
+    append_message(failed_replay, failed_task, "partial output", failed_call);
+    failed_replay.append(session::ProviderCallCompleted{
+        .task_id = failed_task,
+        .id = failed_call,
+        .completion = {.stop = provider::StopKind::TRUNCATED},
+        .loop_outcome = session::ProviderCallLoopOutcome::FAILED,
+    });
+    settle_round(failed_replay, failed_task, failed_call, session::ProviderRoundReplay::REPLAY);
+    failed_replay.append(session::TaskFinished{.id = failed_task, .outcome = session::TaskOutcome::FAILED});
+    require(!failed_replay.validate(), "session validation accepted replay of a failed provider round");
+}
+
+void test_recovery_omits_failed_completed_provider_round() {
+    session::Session log;
+    const auto task = log.start_task("recover failed round");
+    const auto call = log.next_provider_call();
+    log.append(session::OutputItemCompleted{
+        .task_id = task,
+        .provider_call_id = call,
+        .item = provider::ToolCallItem{.id = {.value = "tool"}, .call = {.id = "failed-call", .name = "read_file"}},
+    });
+    log.append(session::ProviderCallCompleted{
+        .task_id = task,
+        .id = call,
+        .completion = {.stop = provider::StopKind::TRUNCATED},
+        .loop_outcome = session::ProviderCallLoopOutcome::FAILED,
+    });
+
+    const auto recovered = session::recover_interrupted(log);
+    require(recovered.recovered_tasks == 1 && recovered.unknown_tool_outcomes == 1,
+            "recovery did not close the interrupted failed provider round");
+    const auto settled = std::ranges::find_if(log.entries, [](const session::SessionEntry &entry) {
+        return std::holds_alternative<session::ProviderRoundSettled>(entry.payload);
+    });
+    require(settled != log.entries.end() &&
+                std::get<session::ProviderRoundSettled>(settled->payload).replay == session::ProviderRoundReplay::OMIT,
+            "recovery replayed a provider round already classified as failed");
+    require(log.validate().has_value(), "recovered failed provider round is not durable-session coherent");
 }
 
 void test_reply_selection() {
@@ -166,6 +265,7 @@ void test_reply_selection() {
         .id = {.value = 1},
         .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
     });
+    settle_round(log, first_task, {.value = 1});
     log.append(session::TaskFinished{.id = first_task});
     const auto first_leaf = *log.active_leaf;
     const auto second_task = log.start_task("second");
@@ -185,7 +285,12 @@ void test_reply_selection() {
         .id = {.value = 2},
         .loop_outcome = session::ProviderCallLoopOutcome::FOLLOW_UP,
     });
-    log.append(session::ToolResults{.task_id = second_task, .provider_call_id = {.value = 2}});
+    log.append(session::ToolOutcomes{
+        .task_id = second_task,
+        .provider_call_id = {.value = 2},
+        .outcomes = {{.call_id = "call", .kind = ToolOutcomeKind::FAILED, .receipt = "reason: fixture"}},
+    });
+    settle_round(log, second_task, {.value = 2});
     log.append(session::OutputItemCompleted{
         .task_id = second_task,
         .provider_call_id = {.value = 3},
@@ -203,6 +308,7 @@ void test_reply_selection() {
         .id = {.value = 3},
         .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
     });
+    settle_round(log, second_task, {.value = 3});
     log.append(session::TaskFinished{.id = second_task});
 
     require(log.reply_from_latest() == "second answer", "latest reply did not select only the explicit final answer");
@@ -219,6 +325,7 @@ void test_reply_selection() {
         .id = {.value = 1},
         .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
     });
+    settle_round(log, failed_task, {.value = 1}, session::ProviderRoundReplay::OMIT);
     log.append(session::TaskFinished{.id = failed_task, .outcome = session::TaskOutcome::FAILED});
     require(log.reply_from_latest() == "first answer", "failed task displaced the newest completed reply");
 
@@ -229,6 +336,7 @@ void test_reply_selection() {
         .id = {.value = 1},
         .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
     });
+    settle_round(log, cancelled_task, {.value = 1}, session::ProviderRoundReplay::OMIT);
     log.append(session::TaskFinished{.id = cancelled_task, .outcome = session::TaskOutcome::CANCELLED});
     require(log.reply_from_latest() == "first answer", "cancelled task displaced the newest completed reply");
 }
@@ -237,11 +345,13 @@ void test_checkpoint_tree_projection() {
     session::Session log;
     const auto first_task = log.start_task("shared root");
     const auto unsafe_output = append_message(log, first_task, "root answer");
+    const auto first_call = log.next_provider_call();
     log.append(session::ProviderCallCompleted{
         .task_id = first_task,
-        .id = log.next_provider_call(),
+        .id = first_call,
         .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
     });
+    settle_round(log, first_task, first_call);
     const auto first = log.append(session::TaskFinished{.id = first_task});
 
     const auto old_task = log.start_task("old branch");
@@ -319,11 +429,13 @@ void test_fork_remaps_lifecycle_and_preserves_private_items() {
         .id = first_call,
         .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
     });
+    settle_round(source, first_task, first_call);
     const auto first = source.append(session::TaskFinished{.id = first_task});
 
     const auto discarded_task = source.start_task("discarded branch");
     const auto discarded_call = source.next_provider_call();
     source.append(session::ProviderCallAborted{.task_id = discarded_task, .id = discarded_call});
+    settle_round(source, discarded_task, discarded_call, session::ProviderRoundReplay::OMIT);
     source.append(session::TaskFinished{.id = discarded_task, .outcome = session::TaskOutcome::FAILED});
     require(source.checkout(checkpoint_id(first)).has_value(), "failed to select fork source branch");
 
@@ -343,6 +455,7 @@ void test_fork_remaps_lifecycle_and_preserves_private_items() {
         .id = selected_call,
         .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
     });
+    settle_round(source, selected_task, selected_call);
     const auto selected = source.append(session::TaskFinished{.id = selected_task});
 
     auto fork = source.fork_at(checkpoint_id(selected));
@@ -352,12 +465,12 @@ void test_fork_remaps_lifecycle_and_preserves_private_items() {
     require(!fork->metadata.title && fork->metadata.workspace == source.metadata.workspace &&
                 fork->metadata.working_directory == source.metadata.working_directory,
             "fork catalog metadata did not follow copy policy");
-    require(fork->entries.size() == 8 && fork->next_entry_id == 9 && fork->next_task_id == 3 && fork->next_provider_call_id == 3,
+    require(fork->entries.size() == 10 && fork->next_entry_id == 11 && fork->next_task_id == 3 && fork->next_provider_call_id == 3,
             "fork did not produce dense local lifecycle identifiers");
     for (usize index = 0; index < fork->entries.size(); ++index) {
         require(fork->entries[index].id.value == index + 1, "fork entry identifiers were not remapped into a dense local sequence");
     }
-    const auto *opaque = std::get_if<session::OutputItemCompleted>(&fork->entries[5].payload);
+    const auto *opaque = std::get_if<session::OutputItemCompleted>(&fork->entries[6].payload);
     require(opaque && opaque->task_id.value == 2 && opaque->provider_call_id.value == 2,
             "fork payload lifecycle references were not remapped");
     const auto *private_item = opaque ? std::get_if<provider::ProviderOpaqueItem>(&opaque->item) : nullptr;
@@ -372,6 +485,8 @@ i32 run_all() {
     test_monotonic_timestamps_and_utf8_bounds();
     test_checkpoint_projection();
     test_cumulative_token_usage();
+    test_provider_round_coherence_validation();
+    test_recovery_omits_failed_completed_provider_round();
     test_reply_selection();
     test_checkpoint_tree_projection();
     test_checkpoint_branch_summaries_are_bounded();

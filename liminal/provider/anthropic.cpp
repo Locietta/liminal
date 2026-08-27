@@ -38,7 +38,7 @@ struct TextBlock {
 // names, so it serializes as the tool_use block directly.
 using ToolUseBlock = provider::ToolCall;
 
-/// `tool_use_id` is Anthropic's spelling of the neutral ToolResult's
+/// `tool_use_id` is Anthropic's spelling of the neutral ToolOutcome's
 /// `call_id`. Requests only - responses never carry tool_result blocks.
 struct ToolResultBlock {
     std::string tool_use_id;
@@ -254,11 +254,11 @@ Result<WireHistory> to_wire(const provider::History &history) {
                 message.content.push_back(wire::TextBlock{.text = text->text});
             } else if (const auto *call = std::get_if<provider::ToolCall>(&part)) {
                 message.content.push_back(*call);
-            } else if (const auto *result = std::get_if<provider::ToolResult>(&part)) {
+            } else if (const auto *result = std::get_if<ToolOutcome>(&part)) {
                 message.content.push_back(wire::ToolResultBlock{
                     .tool_use_id = result->call_id,
-                    .content = result->content,
-                    .is_error = result->is_error,
+                    .content = render_tool_outcome(*result),
+                    .is_error = tool_outcome_is_error(result->kind),
                 });
             } else if (const auto *opaque = std::get_if<provider::OpaquePart>(&part)) {
                 if (opaque->provider_tag != k_provider_tag) {

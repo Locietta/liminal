@@ -40,7 +40,6 @@ constexpr usize k_default_output_chars = 32 * 1024;
 constexpr usize k_min_output_chars = 1024;
 constexpr usize k_max_output_chars = 128 * 1024;
 constexpr usize k_response_envelope_reserve_bytes = 512;
-constexpr std::string_view k_insufficient_output_capacity = "Error: insufficient output capacity; compact first";
 constexpr usize k_shell_task_buffer_bytes = 1024 * 1024;
 constexpr usize k_max_shell_tasks = 32;
 
@@ -59,8 +58,15 @@ struct WriteStdinInput {
 };
 
 struct ShellTaskResponse {
-    std::string content;
-    bool is_error = false;
+    std::string receipt;
+    std::string payload;
+    ToolOutcomeKind kind = ToolOutcomeKind::SUCCEEDED;
+};
+
+struct ShellOutputSlice {
+    std::string payload;
+    u64 dropped_bytes = 0;
+    u64 remaining_bytes = 0;
 };
 
 struct MutexUnlockGuard {
@@ -98,10 +104,7 @@ Result<usize> output_limit(std::optional<usize> requested) {
     return value;
 }
 
-usize budgeted_output_limit(usize requested, usize output_budget) {
-    const auto payload_budget = output_budget > k_response_envelope_reserve_bytes ? output_budget - k_response_envelope_reserve_bytes : 0;
-    return std::min(requested, payload_budget);
-}
+usize budgeted_output_limit(usize requested, usize output_budget) { return std::min(requested, output_budget); }
 
 std::string bounded_text(std::string_view text, usize limit = 2 * 1024) {
     if (text.size() <= limit) return std::string(text);
@@ -119,19 +122,16 @@ std::optional<std::string_view> field(std::string_view content, std::string_view
     return content.substr(value, end == std::string_view::npos ? content.size() - value : end - value);
 }
 
-std::string summarize_exec(const provider::ToolResult &result) {
-    const auto session = field(result.content, "session_id").value_or("?");
-    const auto status = field(result.content, "status").value_or(result.is_error ? "failed" : "completed");
+std::string summarize_exec(const ToolOutcome &result) {
+    const auto session = field(result.receipt, "session_id").value_or("?");
+    const auto status = field(result.receipt, "status").value_or(tool_outcome_is_error(result.kind) ? "failed" : "completed");
     std::string summary = "exec session " + std::string(session) + " · ";
-    if (const auto code = field(result.content, "exit_code")) {
+    if (const auto code = field(result.receipt, "exit_code")) {
         summary += "exit " + std::string(*code);
     } else {
         summary += status;
     }
-    constexpr std::string_view marker = "\n\noutput:\n";
-    if (const auto output = result.content.find(marker); output != std::string_view::npos) {
-        summary += "\n" + bounded_text(std::string_view(result.content).substr(output + marker.size()));
-    }
+    if (!result.payload.empty()) summary += "\n" + bounded_text(result.payload);
     return summary;
 }
 
@@ -301,10 +301,10 @@ std::string visible_output(std::string_view raw) {
     return result;
 }
 
-std::string take_output(ShellTaskManager::ShellTask &task, usize limit) {
-    std::string result;
+ShellOutputSlice take_output(ShellTaskManager::ShellTask &task, usize limit) {
+    ShellOutputSlice result;
     if (task.delivered_offset < task.output_offset) {
-        result = "[" + std::to_string(task.output_offset - task.delivered_offset) + " earlier bytes were truncated]\n";
+        result.dropped_bytes = task.output_offset - task.delivered_offset;
         task.delivered_offset = task.output_offset;
     }
     const auto available = task.output_offset + task.output.size();
@@ -313,32 +313,39 @@ std::string take_output(ShellTaskManager::ShellTask &task, usize limit) {
     const auto index = static_cast<usize>(task.delivered_offset - task.output_offset);
     auto count = std::min(limit, task.output.size() - index);
     count = lighter::encoding::utf8::complete_prefix_len(std::string_view(task.output).substr(index, count));
-    result += visible_output(std::string_view(task.output).substr(index, count));
+    result.payload = visible_output(std::string_view(task.output).substr(index, count));
     task.delivered_offset += count;
-    if (task.delivered_offset < available) {
-        result += "\n[" + std::to_string(available - task.delivered_offset) + " bytes remain; poll with write_stdin and empty chars]\n";
-    }
+    result.remaining_bytes = available - task.delivered_offset;
     return result;
 }
 
 ShellTaskResponse response_for(ShellTaskManager::ShellTask &task, usize limit) {
-    std::string result = "session_id: " + std::to_string(task.session_id);
-    bool is_error = false;
+    std::string receipt = "session_id: " + std::to_string(task.session_id);
+    auto kind = ToolOutcomeKind::SUCCEEDED;
     if (task.running) {
-        result += "\nstatus: running";
+        receipt += "\nstatus: running";
     } else if (task.error) {
-        result += "\nstatus: failed\nerror: " + *task.error;
-        is_error = true;
+        receipt += "\nstatus: failed\nreason: shell_task_failed";
+        kind = ToolOutcomeKind::FAILED;
     } else {
-        result += "\nstatus: exited\nexit_code: " + std::to_string(task.exit_status->status);
+        receipt += "\nstatus: exited\nexit_code: " + std::to_string(task.exit_status->status);
         if (task.exit_status->term_signal != 0) {
-            result += "\nterm_signal: " + std::to_string(task.exit_status->term_signal);
+            receipt += "\nterm_signal: " + std::to_string(task.exit_status->term_signal);
         }
-        is_error = task.exit_status->status != 0 || task.exit_status->term_signal != 0;
+        if (task.exit_status->status != 0 || task.exit_status->term_signal != 0) kind = ToolOutcomeKind::FAILED;
     }
     auto output = take_output(task, limit);
-    if (!output.empty()) result += "\n\noutput:\n" + output;
-    return {.content = std::move(result), .is_error = is_error};
+    if (output.dropped_bytes != 0) receipt += "\noutput_dropped_bytes: " + std::to_string(output.dropped_bytes);
+    if (output.remaining_bytes != 0) {
+        receipt += "\noutput_remaining_bytes: " + std::to_string(output.remaining_bytes);
+        receipt += "\nnext_action: poll_with_write_stdin";
+    }
+    auto payload = std::move(output.payload);
+    if (task.error) {
+        if (!payload.empty()) payload += '\n';
+        payload += "error: " + *task.error;
+    }
+    return {.receipt = std::move(receipt), .payload = std::move(payload), .kind = kind};
 }
 
 } // namespace
@@ -347,9 +354,6 @@ Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input, u
     if (input.cmd.empty()) co_await fail(Error::tool("cmd cannot be empty"));
     auto duration = co_await or_fail(yield_duration(input.yield_time_ms));
     const auto requested_limit = co_await or_fail(output_limit(input.max_output_chars));
-    if (output_budget <= k_response_envelope_reserve_bytes) {
-        co_return ShellTaskResponse{.content = std::string(k_insufficient_output_capacity), .is_error = true};
-    }
     const auto limit = budgeted_output_limit(requested_limit, output_budget);
     auto directory = co_await or_fail(resolve_working_directory(*this, input.workdir));
     prune_shell_tasks(*this);
@@ -390,9 +394,6 @@ Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input, u
 Task<ShellTaskResponse, Error> ShellTaskManager::write_stdin(WriteStdinInput input, usize output_budget) {
     auto duration = co_await or_fail(yield_duration(input.yield_time_ms));
     const auto requested_limit = co_await or_fail(output_limit(input.max_output_chars));
-    if (output_budget <= k_response_envelope_reserve_bytes) {
-        co_return ShellTaskResponse{.content = std::string(k_insufficient_output_capacity), .is_error = true};
-    }
     const auto limit = budgeted_output_limit(requested_limit, output_budget);
     const auto found = tasks.find(input.session_id);
     if (found == tasks.end()) co_await fail(Error::tool("unknown exec session: " + std::to_string(input.session_id)));
@@ -448,16 +449,17 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
                     },
             },
         .execution_mode = ToolExecutionMode::PARALLEL,
+        .receipt_bytes = k_response_envelope_reserve_bytes,
         .validate = [](const provider::ToolCall &call) -> Result<void> {
             auto input = parse_input<ExecCommandInput>(call.input);
             if (!input) return lighter::outcome_error(std::move(input).error());
             return {};
         },
-        .execute = [&tasks](const ToolSet &, const provider::ToolCall &call,
-                            const ToolExecutionContext &context) -> Task<provider::ToolResult, Error> {
+        .execute = [&tasks](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant grant) -> Task<ToolOutcome, Error> {
             auto input = co_await or_fail(parse_input<ExecCommandInput>(call.input));
-            auto response = co_await tasks.start(std::move(input), context.max_output_bytes).or_fail();
-            co_return provider::ToolResult{.call_id = call.id, .content = std::move(response.content), .is_error = response.is_error};
+            auto response = co_await tasks.start(std::move(input), grant.payload_bytes).or_fail();
+            co_return ToolOutcome{
+                .call_id = call.id, .kind = response.kind, .receipt = std::move(response.receipt), .payload = std::move(response.payload)};
         },
         .describe =
             [](const provider::ToolCall &call) {
@@ -465,7 +467,7 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
                 return input ? ToolCallPresentation{.command = bounded_text(input->cmd)} :
                                ToolCallPresentation{.description = "Run command"};
             },
-        .summarize = [](const provider::ToolCall &, const provider::ToolResult &result) { return summarize_exec(result); },
+        .summarize = [](const provider::ToolCall &, const ToolOutcome &result) { return summarize_exec(result); },
     };
 
     auto write_stdin = ToolRegistration{
@@ -488,16 +490,17 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
                     },
             },
         .execution_mode = ToolExecutionMode::PARALLEL,
+        .receipt_bytes = k_response_envelope_reserve_bytes,
         .validate = [](const provider::ToolCall &call) -> Result<void> {
             auto input = parse_input<WriteStdinInput>(call.input);
             if (!input) return lighter::outcome_error(std::move(input).error());
             return {};
         },
-        .execute = [&tasks](const ToolSet &, const provider::ToolCall &call,
-                            const ToolExecutionContext &context) -> Task<provider::ToolResult, Error> {
+        .execute = [&tasks](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant grant) -> Task<ToolOutcome, Error> {
             auto input = co_await or_fail(parse_input<WriteStdinInput>(call.input));
-            auto response = co_await tasks.write_stdin(std::move(input), context.max_output_bytes).or_fail();
-            co_return provider::ToolResult{.call_id = call.id, .content = std::move(response.content), .is_error = response.is_error};
+            auto response = co_await tasks.write_stdin(std::move(input), grant.payload_bytes).or_fail();
+            co_return ToolOutcome{
+                .call_id = call.id, .kind = response.kind, .receipt = std::move(response.receipt), .payload = std::move(response.payload)};
         },
         .describe =
             [](const provider::ToolCall &call) {
@@ -506,7 +509,7 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
                 const auto action = input->chars && !input->chars->empty() ? "Write to exec session " : "Poll exec session ";
                 return ToolCallPresentation{.description = action + std::to_string(input->session_id)};
             },
-        .summarize = [](const provider::ToolCall &, const provider::ToolResult &result) { return summarize_exec(result); },
+        .summarize = [](const provider::ToolCall &, const ToolOutcome &result) { return summarize_exec(result); },
     };
     return {std::move(exec), std::move(write_stdin)};
 }

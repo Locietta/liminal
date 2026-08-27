@@ -14,6 +14,7 @@
 
 #include <liminal/error.h>
 #include <liminal/provider/history.h>
+#include <liminal/tools/outcome.h>
 
 namespace liminal::session {
 
@@ -84,10 +85,23 @@ struct ProviderCallAborted {
     std::string detail;
 };
 
-struct ToolResults {
+struct ToolOutcomes {
     TaskId task_id;
     ProviderCallId provider_call_id;
-    std::vector<provider::ToolResult> results;
+    std::vector<ToolOutcome> outcomes;
+};
+
+enum struct ProviderRoundReplay {
+    REPLAY,
+    OMIT,
+};
+
+/// Final local disposition of one provider response. Context projection never
+/// replays output from a round until this entry makes its coherence explicit.
+struct ProviderRoundSettled {
+    TaskId task_id;
+    ProviderCallId provider_call_id;
+    ProviderRoundReplay replay = ProviderRoundReplay::OMIT;
 };
 
 enum struct TaskOutcome {
@@ -120,8 +134,8 @@ struct ContextCheckpoint {
     std::vector<CheckpointItem> items;
 };
 
-using EntryPayload = std::variant<TaskStarted, OutputItemCompleted, ProviderCallCompleted, ProviderCallAborted, ToolResults, TaskFinished,
-                                  ContextCheckpoint>;
+using EntryPayload = std::variant<TaskStarted, OutputItemCompleted, ProviderCallCompleted, ProviderCallAborted, ToolOutcomes,
+                                  ProviderRoundSettled, TaskFinished, ContextCheckpoint>;
 
 struct SessionEntry {
     EntryId id;

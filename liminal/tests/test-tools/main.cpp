@@ -38,12 +38,24 @@ provider::ToolCall make_call(std::string id, std::string name, std::string_view 
     };
 }
 
-Result<provider::ToolResult> execute(ToolSet &tools, provider::ToolCall call, ToolExecutionContext context = {}) {
+constexpr ToolOutputGrant k_test_grant{.receipt_bytes = 64 * 1024, .payload_bytes = k_max_tool_payload_bytes};
+
+Result<ToolOutcome> execute(ToolSet &tools, provider::ToolCall call, ToolOutputGrant grant = k_test_grant) {
     lighter::EventLoop loop;
-    auto task = tools.execute(call, context);
+    auto task = tools.execute(std::move(call), grant);
     loop.schedule(task);
     loop.run();
     return task.result();
+}
+
+Result<ToolOutcome> execute_prepared(PreparedToolCall call, ToolOutputGrant grant = k_test_grant) {
+    lighter::EventLoop loop;
+    auto task = call.execute(grant);
+    loop.schedule(task);
+    loop.run();
+    auto outcome = task.result();
+    if (outcome) finalize_tool_outcome(*outcome, grant);
+    return outcome;
 }
 
 void test_tools_are_available_by_default() {
@@ -71,65 +83,71 @@ void test_tools_are_available_by_default() {
             "built-in and unknown tools must expose conservative execution semantics");
 
     auto readme = execute(tools, make_call("read", "read_file", R"({"path":"../README.md"})"));
-    require(readme.has_value() && !readme->is_error && readme->content.contains("Liminal"),
+    require(readme.has_value() && !tool_outcome_is_error(readme->kind) && readme->payload.contains("Liminal"),
             "read_file must allow paths outside the working directory");
 
     auto command = execute(tools, make_call("command", "exec_command", R"({"cmd":"pwd"})"));
-    require(command.has_value() && command->call_id == "command" && !command->is_error && command->content.contains("exit_code: 0") &&
-                command->content.contains("output:\n"),
+    require(command.has_value() && command->call_id == "command" && !tool_outcome_is_error(command->kind) &&
+                command->receipt.contains("exit_code: 0") && !command->payload.empty(),
             "exec_command must execute a short command without an opt-in mode");
-    auto insufficient =
-        execute(tools, make_call("insufficient", "exec_command", R"({"cmd":"echo should-not-run"})"), {.max_output_bytes = 128});
-    require(insufficient && insufficient->is_error && insufficient->content.contains("compact first") &&
-                !insufficient->content.contains("session_id"),
-            "exec_command must reject insufficient output capacity before creating an undisclosable session");
 }
 
 void test_tool_registry_dispatches_extensions() {
     ToolSet tools(std::filesystem::current_path());
     auto registered = tools.register_tool({
         .definition = {.name = "echo_extension", .description = "Test extension"},
-        .execute = [](const ToolSet &, const provider::ToolCall &call, const ToolExecutionContext &)
-            -> lighter::Task<provider::ToolResult, Error> { co_return provider::ToolResult{.call_id = call.id, .content = "extended"}; },
+        .execute = [](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
+            co_return ToolOutcome{.call_id = call.id, .payload = "extended"};
+        },
     });
     require(registered.has_value(), "tool registry rejected a valid extension");
     require(tools.execution_mode("echo_extension") == ToolExecutionMode::EXCLUSIVE,
             "extensions must default to exclusive execution until they opt into parallelism");
 
     auto result = execute(tools, make_call("extension", "echo_extension", R"({})"));
-    require(result.has_value() && result->content == "extended", "tool registry did not dispatch an extension");
+    require(result.has_value() && result->payload == "extended", "tool registry did not dispatch an extension");
+
+    auto empty_prepared_registered = tools.register_tool({
+        .definition = {.name = "empty_prepared_extension"},
+        .prepare = [](const ToolSet &, const provider::ToolCall &) -> Result<PreparedToolExecution> {
+            return PreparedToolExecution{.receipt_bytes = 32};
+        },
+    });
+    require(empty_prepared_registered.has_value(), "tool registry rejected the empty prepared-executor fixture");
+    auto empty_prepared = tools.prepare(make_call("empty-prepared", "empty_prepared_extension", R"({})"));
+    require(!empty_prepared && empty_prepared.error().detail.contains("prepared no executor"),
+            "ToolSet admitted a prepared invocation without an executor");
 
     auto bounded_registered = tools.register_tool({
         .definition = {.name = "large_extension"},
-        .execute = [](const ToolSet &, const provider::ToolCall &call,
-                      const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
-            co_return provider::ToolResult{.call_id = call.id, .content = std::string(128 * 1024, 'x')};
+        .execute = [](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
+            co_return ToolOutcome{.call_id = call.id, .payload = std::string(128 * 1024, 'x')};
         },
     });
     require(bounded_registered.has_value(), "tool registry rejected the bounded-output test extension");
-    auto bounded = execute(tools, make_call("bounded", "large_extension", R"({})"), {.max_output_bytes = 128});
-    require(bounded.has_value() && bounded->is_error && bounded->content.size() <= 128 && bounded->content.contains("truncated"),
-            "ToolSet must enforce the execution output budget for extension tools");
-    auto ceiling = execute(tools, make_call("ceiling", "large_extension", R"({})"), {.max_output_bytes = 128 * 1024});
-    require(ceiling.has_value() && ceiling->is_error && ceiling->content.size() == k_max_tool_output_bytes,
+    auto bounded = execute(tools, make_call("bounded", "large_extension", R"({})"), {.receipt_bytes = 128, .payload_bytes = 128});
+    require(bounded.has_value() && !tool_outcome_is_error(bounded->kind) && bounded->payload.size() <= 128 && bounded->payload_truncated,
+            "ToolSet must bound extension payload without changing success semantics");
+    auto ceiling = execute(tools, make_call("ceiling", "large_extension", R"({})"), {.receipt_bytes = 128, .payload_bytes = 128 * 1024});
+    require(ceiling.has_value() && !tool_outcome_is_error(ceiling->kind) && ceiling->payload.size() == k_max_tool_payload_bytes,
             "ToolSet must enforce the absolute local-tool output ceiling");
 
     auto invalid_registered = tools.register_tool({
         .definition = {.name = "invalid_utf8_extension"},
-        .execute = [](const ToolSet &, const provider::ToolCall &call,
-                      const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
-            co_return provider::ToolResult{.call_id = call.id, .content = std::string("\xf0\x9f", 2)};
+        .execute = [](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
+            co_return ToolOutcome{.call_id = call.id, .payload = std::string("\xf0\x9f", 2)};
         },
     });
     require(invalid_registered.has_value(), "failed to register invalid UTF-8 extension fixture");
     auto sanitized = execute(tools, make_call("sanitize", "invalid_utf8_extension", R"({})"));
-    require(sanitized && lighter::encoding::utf8::is_valid(sanitized->content),
+    require(sanitized && lighter::encoding::utf8::is_valid(sanitized->payload),
             "ToolSet must sanitize every successful local result even when it is under budget");
 
     auto duplicate = tools.register_tool({
         .definition = {.name = "echo_extension"},
-        .execute = [](const ToolSet &, const provider::ToolCall &call, const ToolExecutionContext &)
-            -> lighter::Task<provider::ToolResult, Error> { co_return provider::ToolResult{.call_id = call.id}; },
+        .execute = [](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
+            co_return ToolOutcome{.call_id = call.id};
+        },
     });
     require(!duplicate && duplicate.error().detail.contains("duplicate"), "tool registry must reject duplicate names");
 }
@@ -140,7 +158,7 @@ void test_tool_presentations_are_specific_and_bounded() {
     const auto read_presentation = tools.describe(read);
     require(read_presentation.description == "Read docs/code-style-guide.md" && read_presentation.command.empty(),
             "read_file presentation must name the requested path without pretending it is a shell command");
-    const provider::ToolResult read_result{.call_id = "read", .content = "first\nsecond\n"};
+    const ToolOutcome read_result{.call_id = "read", .payload = "first\nsecond\n"};
     require(tools.summarize(read, read_result) == "2 lines · 13 bytes",
             "read_file completion must summarize line and byte counts without echoing file contents");
 
@@ -148,10 +166,11 @@ void test_tool_presentations_are_specific_and_bounded() {
     const auto presentation = tools.describe(command);
     require(presentation.description.empty() && presentation.command == "pixi run build\npixi run test-unit",
             "exec_command presentation must retain the exact multiline command as semantic data");
-    const provider::ToolResult command_result{
+    const ToolOutcome command_result{
         .call_id = "command",
-        .content = "session_id: 2\nstatus: exited\nexit_code: 7\n\noutput:\nconfigured\nbuilt\none test failed\n",
-        .is_error = true,
+        .kind = ToolOutcomeKind::FAILED,
+        .receipt = "session_id: 2\nstatus: exited\nexit_code: 7",
+        .payload = "configured\nbuilt\none test failed\n",
     };
     const auto summary = tools.summarize(command, command_result);
     require(summary.contains("exec session 2 · exit 7") && summary.contains("configured") && summary.contains("one test failed"),
@@ -159,7 +178,7 @@ void test_tool_presentations_are_specific_and_bounded() {
 }
 
 void test_read_file_is_bounded_and_regular() {
-    constexpr usize k_read_payload_limit = k_max_tool_output_bytes - 256;
+    constexpr usize k_read_payload_limit = k_max_tool_payload_bytes;
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto directory = std::filesystem::temp_directory_path() / ("liminal-tools-" + std::to_string(nonce));
     std::filesystem::create_directories(directory / "folder");
@@ -171,9 +190,8 @@ void test_read_file_is_bounded_and_regular() {
 
     ToolSet tools(directory);
     auto large = execute(tools, make_call("large", "read_file_bytes", R"({"path":"large.txt"})"));
-    require(large.has_value() && !large->is_error && large->content.size() <= k_max_tool_output_bytes &&
-                large->content.starts_with(std::string(k_read_payload_limit, 'x')) &&
-                large->content.ends_with("[truncated after 65280 bytes; next byte_offset 65280]"),
+    require(large.has_value() && !tool_outcome_is_error(large->kind) && large->payload == std::string(k_read_payload_limit, 'x') &&
+                large->receipt.contains("next byte_offset 65536"),
             "read_file_bytes did not return a bounded prefix for a large file");
 
     {
@@ -181,16 +199,17 @@ void test_read_file_is_bounded_and_regular() {
         output << "one\r\ntwo\r\nthree\r\nfour\r\n";
     }
     auto whole = execute(tools, make_call("whole", "read_file", R"({"path":"lines.txt"})"));
-    require(whole.has_value() && !whole->is_error && whole->content == "one\ntwo\nthree\nfour\n",
+    require(whole.has_value() && !tool_outcome_is_error(whole->kind) && whole->payload == "one\ntwo\nthree\nfour\n",
             "read_file must use normalized line-oriented reads by default");
 
     auto lines = execute(tools, make_call("lines", "read_file", R"({"path":"lines.txt","offset":2,"limit":2})"));
-    require(lines.has_value() && !lines->is_error && lines->content.starts_with("two\nthree\n") &&
-                lines->content.ends_with("[line limit reached before line 4; continue with offset 4]"),
+    require(lines.has_value() && !tool_outcome_is_error(lines->kind) && lines->payload == "two\nthree\n" &&
+                lines->receipt.contains("continue with offset 4"),
             "read_file must support conventional one-based offset and line-count ranges with resumable output");
 
     auto bytes = execute(tools, make_call("bytes", "read_file_bytes", R"({"path":"lines.txt","byte_offset":5,"byte_count":3})"));
-    require(bytes.has_value() && !bytes->is_error && bytes->content.starts_with("two") && bytes->content.contains("next byte_offset 8"),
+    require(bytes.has_value() && !tool_outcome_is_error(bytes->kind) && bytes->payload.starts_with("two") &&
+                bytes->receipt.contains("next byte_offset 8"),
             "read_file_bytes must support resumable byte ranges");
 
     {
@@ -198,47 +217,43 @@ void test_read_file_is_bounded_and_regular() {
         output << "A\xf0\x9f\x98\x80Z";
     }
     auto aligned = execute(tools, make_call("aligned", "read_file_bytes", R"({"path":"utf8.txt","byte_count":3})"));
-    require(aligned && !aligned->is_error && aligned->content.starts_with("A\n... [truncated after 1 bytes") &&
-                lighter::encoding::utf8::is_valid(aligned->content),
+    require(aligned && !tool_outcome_is_error(aligned->kind) && aligned->payload == "A" &&
+                aligned->receipt.contains("truncated after 1 bytes") && lighter::encoding::utf8::is_valid(aligned->payload),
             "read_file_bytes must end chunks at a complete UTF-8 prefix");
     auto resumed = execute(tools, make_call("resumed", "read_file_bytes", R"({"path":"utf8.txt","byte_offset":1,"byte_count":4})"));
-    require(resumed && !resumed->is_error && resumed->content.starts_with("\xf0\x9f\x98\x80") &&
-                resumed->content.contains("next byte_offset 5") && lighter::encoding::utf8::is_valid(resumed->content),
+    require(resumed && !tool_outcome_is_error(resumed->kind) && resumed->payload.starts_with("\xf0\x9f\x98\x80") &&
+                resumed->receipt.contains("next byte_offset 5") && lighter::encoding::utf8::is_valid(resumed->payload),
             "read_file_bytes must resume on a UTF-8 boundary");
     auto misaligned = execute(tools, make_call("misaligned", "read_file_bytes", R"({"path":"utf8.txt","byte_offset":2,"byte_count":3})"));
-    require(misaligned && misaligned->is_error && misaligned->content.contains("falls inside a UTF-8 code point"),
+    require(misaligned && tool_outcome_is_error(misaligned->kind) && misaligned->payload.contains("falls inside a UTF-8 code point"),
             "read_file_bytes must reject a starting offset inside a UTF-8 code point");
-    auto insufficient = execute(tools, make_call("insufficient", "read_file_bytes", R"({"path":"utf8.txt"})"), {.max_output_bytes = 128});
-    require(insufficient && insufficient->is_error && insufficient->content.contains("compact first") &&
-                !insufficient->content.contains("next byte_offset"),
-            "read_file_bytes must reject a budget that cannot advance its byte cursor");
 
-    auto obsolete_range = tools.validate(make_call("old-range", "read_file", R"({"path":"lines.txt","line_start":2})"));
+    auto obsolete_range = tools.prepare(make_call("old-range", "read_file", R"({"path":"lines.txt","line_start":2})"));
     require(!obsolete_range, "read_file must reject obsolete line range parameter names");
 
     auto empty = execute(tools, make_call("empty", "read_file_bytes", R"({"path":"lines.txt","byte_count":0})"));
-    require(empty.has_value() && empty->is_error && empty->content.contains("at least 1"),
+    require(empty.has_error() && empty.error().message().contains("at least 1"),
             "read_file_bytes must reject a byte count that cannot advance a resumed read");
 
-    auto missing_path = tools.validate(make_call("missing-path", "read_file", R"({})"));
+    auto missing_path = tools.prepare(make_call("missing-path", "read_file", R"({})"));
     require(!missing_path && missing_path.error().message().contains("path must not be empty"),
             "read_file must reject a missing path before dispatch");
 
-    auto zero_offset = tools.validate(make_call("zero-offset", "read_file", R"({"path":"lines.txt","offset":0})"));
+    auto zero_offset = tools.prepare(make_call("zero-offset", "read_file", R"({"path":"lines.txt","offset":0})"));
     require(!zero_offset && zero_offset.error().message().contains("offset must be at least 1"),
             "read_file must reject a zero line offset before dispatch");
 
-    auto zero_limit = tools.validate(make_call("zero-limit", "read_file", R"({"path":"lines.txt","limit":0})"));
+    auto zero_limit = tools.prepare(make_call("zero-limit", "read_file", R"({"path":"lines.txt","limit":0})"));
     require(!zero_limit && zero_limit.error().message().contains("limit must be at least 1"),
             "read_file must reject a zero line limit before dispatch");
 
     auto oversized_line = execute(tools, make_call("oversized-line", "read_file", R"({"path":"large.txt"})"));
-    require(oversized_line.has_value() && oversized_line->is_error && oversized_line->content.contains("use read_file_bytes") &&
-                oversized_line->content.contains("byte_offset 0"),
+    require(oversized_line.has_value() && tool_outcome_is_error(oversized_line->kind) &&
+                oversized_line->payload.contains("use read_file_bytes") && oversized_line->payload.contains("byte_offset 0"),
             "read_file must redirect oversized generated lines to read_file_bytes without a looping line continuation");
 
     auto folder = execute(tools, make_call("folder", "read_file", R"({"path":"folder"})"));
-    require(folder.has_value() && folder->is_error && folder->content.contains("is not a regular file"),
+    require(folder.has_value() && tool_outcome_is_error(folder->kind) && folder->payload.contains("is not a regular file"),
             "read_file did not reject a directory");
 
     std::error_code remove_error;
@@ -259,18 +274,15 @@ void test_apply_patch_operations_are_validated_before_writes() {
         make_call(
             "patch", "apply_patch",
             R"json({"patch":"*** Begin Patch\n*** Add File: added.txt\n+created\n*** Update File: source.txt\n@@ missing context\n-beta\n+changed\n*** End Patch"})json"));
-    require(changed.has_value() && changed->is_error && changed->content.contains("context not found"),
+    require(changed.has_value() && tool_outcome_is_error(changed->kind) && changed->payload.contains("context not found"),
             "apply_patch must validate every file hunk before writing any operation");
     require(!std::filesystem::exists(directory / "added.txt"), "apply_patch wrote an earlier operation before validation completed");
 
-    auto no_capacity = execute(
-        tools,
-        make_call(
-            "capacity", "apply_patch",
-            R"json({"patch":"*** Begin Patch\n*** Add File: capacity-receipt-that-cannot-fit-within-the-committed-output-budget.txt\n+must not be written\n*** End Patch"})json"),
-        {.max_output_bytes = 64});
-    require(no_capacity.has_value() && no_capacity->is_error && no_capacity->content.contains("compact first"),
-            "apply_patch must report insufficient success-receipt capacity before writing");
+    auto no_capacity = tools.prepare(make_call(
+        "capacity", "apply_patch",
+        R"json({"patch":"*** Begin Patch\n*** Add File: capacity-receipt-that-cannot-fit-within-the-committed-output-budget.txt\n+must not be written\n*** End Patch"})json"));
+    require(no_capacity.has_value() && no_capacity->receipt_bytes > 64,
+            "apply_patch preparation must expose its exact success-receipt requirement before writing");
     require(!std::filesystem::exists(directory / "capacity-receipt-that-cannot-fit-within-the-committed-output-budget.txt"),
             "apply_patch mutated files without capacity for its success receipt");
 
@@ -279,8 +291,8 @@ void test_apply_patch_operations_are_validated_before_writes() {
         make_call(
             "patch", "apply_patch",
             R"json({"patch":"*** Begin Patch\n*** Add File: added.txt\n+created\n*** Update File: source.txt\n@@ alpha\n-beta\n+changed\n*** End Patch"})json"));
-    require(applied.has_value() && !applied->is_error && applied->content.contains("Added: added.txt") &&
-                applied->content.contains("Updated: source.txt"),
+    require(applied.has_value() && !tool_outcome_is_error(applied->kind) && applied->receipt.contains("Added: added.txt") &&
+                applied->receipt.contains("Updated: source.txt"),
             "apply_patch did not report added and updated files");
 
     std::ifstream source(directory / "source.txt", std::ios::binary);
@@ -296,7 +308,7 @@ void test_apply_patch_operations_are_validated_before_writes() {
         make_call(
             "fuzzy", "apply_patch",
             R"json({"patch":"*** Begin Patch\n*** Update File: fuzzy.txt\n@@\n repeated\n-old\n+last\n*** End of File\n*** End Patch"})json"));
-    require(fuzzy.has_value() && !fuzzy->is_error, "apply_patch must tolerate surrounding whitespace in hunk matches");
+    require(fuzzy.has_value() && !tool_outcome_is_error(fuzzy->kind), "apply_patch must tolerate surrounding whitespace in hunk matches");
     std::ifstream fuzzy_file(directory / "fuzzy.txt", std::ios::binary);
     const std::string fuzzy_text((std::istreambuf_iterator<char>(fuzzy_file)), std::istreambuf_iterator<char>());
     require(fuzzy_text == "start\n  repeated  \nold\n  repeated  \nlast\n",
@@ -305,29 +317,56 @@ void test_apply_patch_operations_are_validated_before_writes() {
     auto moved = execute(
         tools, make_call("move", "apply_patch",
                          R"json({"patch":"*** Begin Patch\n*** Update File: added.txt\n*** Move to: moved.txt\n*** End Patch"})json"));
-    require(moved.has_value() && !moved->is_error && !std::filesystem::exists(directory / "added.txt") &&
+    require(moved.has_value() && !tool_outcome_is_error(moved->kind) && !std::filesystem::exists(directory / "added.txt") &&
                 std::filesystem::exists(directory / "moved.txt"),
             "apply_patch must support move-only updates");
 
     auto removed = execute(
         tools, make_call("delete", "apply_patch", R"json({"patch":"*** Begin Patch\n*** Delete File: moved.txt\n*** End Patch"})json"));
-    require(removed.has_value() && !removed->is_error && !std::filesystem::exists(directory / "moved.txt"),
+    require(removed.has_value() && !tool_outcome_is_error(removed->kind) && !std::filesystem::exists(directory / "moved.txt"),
             "apply_patch must delete existing files");
 
     std::error_code remove_error;
     std::filesystem::remove_all(directory, remove_error);
 }
 
+void test_apply_patch_resolves_files_when_executed() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto directory = std::filesystem::temp_directory_path() / ("liminal-patch-order-" + std::to_string(nonce));
+    std::filesystem::create_directories(directory);
+    {
+        std::ofstream output(directory / "source.txt", std::ios::binary);
+        output << "alpha\nbeta\n";
+    }
+
+    ToolSet tools(directory);
+    auto first = tools.prepare(make_call(
+        "first", "apply_patch", R"json({"patch":"*** Begin Patch\n*** Update File: source.txt\n@@\n-alpha\n+first\n*** End Patch"})json"));
+    auto second = tools.prepare(make_call(
+        "second", "apply_patch", R"json({"patch":"*** Begin Patch\n*** Update File: source.txt\n@@\n-beta\n+second\n*** End Patch"})json"));
+    require(first.has_value() && second.has_value(), "apply_patch calls were not prepared from parsed operations");
+
+    auto first_outcome = execute_prepared(*std::move(first));
+    auto second_outcome = execute_prepared(*std::move(second));
+    require(first_outcome && second_outcome && !tool_outcome_is_error(first_outcome->kind) && !tool_outcome_is_error(second_outcome->kind),
+            "sequential prepared patches did not execute successfully");
+
+    std::ifstream source(directory / "source.txt", std::ios::binary);
+    const std::string source_text((std::istreambuf_iterator<char>(source)), std::istreambuf_iterator<char>());
+    require(source_text == "first\nsecond\n", "a prepared patch overwrote changes committed by an earlier exclusive call");
+
+    std::error_code remove_error;
+    std::filesystem::remove_all(directory, remove_error);
+}
+
 struct ExecObservations {
-    void append(const provider::ToolResult &result) {
+    void append(const ToolOutcome &result) {
         if (!diagnostics.empty()) diagnostics += '\n';
-        diagnostics += result.content;
-        constexpr std::string_view output_marker = "\n\noutput:\n";
-        const auto output_start = result.content.find(output_marker);
-        if (output_start != std::string::npos) output += result.content.substr(output_start + output_marker.size());
-        if (result.content.contains("status: exited")) {
+        diagnostics += render_tool_outcome(result);
+        output += result.payload;
+        if (result.receipt.contains("status: exited")) {
             exited = true;
-            exit_zero = result.content.contains("exit_code: 0") && !result.is_error;
+            exit_zero = result.receipt.contains("exit_code: 0") && !tool_outcome_is_error(result.kind);
         }
     }
 
@@ -345,21 +384,21 @@ lighter::Task<> exercise_shell_task_interaction(ToolSet &tools) {
     constexpr std::string_view command =
         R"({"cmd":"IFS= read -r first; echo first:$first; IFS= read -r second; echo second:$second","yield_time_ms":25})";
 #endif
-    auto started = co_await tools.execute(make_call("start", "exec_command", command));
-    require(started.has_value() && !started->is_error && started->content.contains("session_id: 1") &&
-                started->content.contains("status: running"),
+    auto started = co_await tools.execute(make_call("start", "exec_command", command), k_test_grant);
+    require(started.has_value() && !tool_outcome_is_error(started->kind) && started->receipt.contains("session_id: 1") &&
+                started->receipt.contains("status: running"),
             "exec_command must return a session ID for a command awaiting input");
 
     auto interacted = co_await lighter::WhenAll(
-        tools.execute(make_call("first", "write_stdin", R"({"session_id":1,"chars":"one\n","yield_time_ms":3000})")),
-        tools.execute(make_call("second", "write_stdin", R"({"session_id":1,"chars":"two\n","yield_time_ms":3000})")));
+        tools.execute(make_call("first", "write_stdin", R"({"session_id":1,"chars":"one\n","yield_time_ms":3000})"), k_test_grant),
+        tools.execute(make_call("second", "write_stdin", R"({"session_id":1,"chars":"two\n","yield_time_ms":3000})"), k_test_grant));
     require(interacted.has_value(), "concurrent writes to one exec session failed");
     const auto &[first, second] = *interacted;
     ExecObservations observations;
     observations.append(first);
     observations.append(second);
     for (usize attempt = 0; attempt < 8 && !observations.exited; ++attempt) {
-        auto polled = co_await tools.execute(make_call("finish", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})"));
+        auto polled = co_await tools.execute(make_call("finish", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})"), k_test_grant);
         require(polled.has_value(), "polling the ordered exec session failed");
         observations.append(*polled);
     }
@@ -375,6 +414,37 @@ void test_shell_task_interaction() {
     lighter::EventLoop loop;
     ToolSet tools(std::filesystem::current_path());
     auto task = exercise_shell_task_interaction(tools);
+    loop.schedule(task);
+    loop.run();
+    std::ignore = task.result();
+}
+
+lighter::Task<> exercise_shell_output_receipt(ToolSet &tools) {
+#ifdef _WIN32
+    constexpr std::string_view command = R"json({"cmd":"Write-Output ('x' * 96)","yield_time_ms":30000})json";
+#else
+    constexpr std::string_view command = R"json({"cmd":"printf '%096d' 0","yield_time_ms":30000})json";
+#endif
+    constexpr ToolOutputGrant small_grant{.receipt_bytes = 512, .payload_bytes = 32};
+    auto result = co_await tools.execute(make_call("start", "exec_command", command), small_grant);
+    require(result && result->receipt.contains("session_id: 1") && result->receipt.contains("output_remaining_bytes:") &&
+                result->receipt.contains("next_action: poll_with_write_stdin") && result->payload.size() <= small_grant.payload_bytes,
+            "bounded shell output did not preserve its resumable control receipt");
+    auto output = result->payload;
+    for (usize attempt = 0; attempt < 8 && result->receipt.contains("output_remaining_bytes:"); ++attempt) {
+        result = co_await tools.execute(make_call("poll", "write_stdin", R"({"session_id":1,"yield_time_ms":0})"), small_grant);
+        require(result && result->payload.size() <= small_grant.payload_bytes,
+                "polling bounded shell output exceeded its immutable payload grant");
+        output += result->payload;
+    }
+    require(result && !result->receipt.contains("output_remaining_bytes:") && output.size() >= 96,
+            "bounded shell output could not be resumed through its durable session receipt");
+}
+
+void test_shell_output_receipt_is_resumable() {
+    lighter::EventLoop loop;
+    ToolSet tools(std::filesystem::current_path());
+    auto task = exercise_shell_output_receipt(tools);
     loop.schedule(task);
     loop.run();
     std::ignore = task.result();
@@ -398,16 +468,17 @@ lighter::Task<> exercise_distinct_shell_task_interactions(ToolSet &tools, const 
         "IFS= read -r line; : > b.ready; i=0; while [ ! -f a.ready ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done; [ -f "
         "a.ready ] || exit 2; echo task-b";
 #endif
-    auto first_started = co_await tools.execute(make_call("start-a", "exec_command", exec_command_input(first_command, working_directory)));
+    auto first_started =
+        co_await tools.execute(make_call("start-a", "exec_command", exec_command_input(first_command, working_directory)), k_test_grant);
     auto second_started =
-        co_await tools.execute(make_call("start-b", "exec_command", exec_command_input(second_command, working_directory)));
-    require(first_started && second_started && first_started->content.contains("session_id: 1") &&
-                second_started->content.contains("session_id: 2"),
+        co_await tools.execute(make_call("start-b", "exec_command", exec_command_input(second_command, working_directory)), k_test_grant);
+    require(first_started && second_started && first_started->receipt.contains("session_id: 1") &&
+                second_started->receipt.contains("session_id: 2"),
             "failed to start distinct exec sessions for concurrent writes");
 
     auto interacted = co_await lighter::WhenAll(
-        tools.execute(make_call("write-a", "write_stdin", R"({"session_id":1,"chars":"go\n","yield_time_ms":2000})")),
-        tools.execute(make_call("write-b", "write_stdin", R"({"session_id":2,"chars":"go\n","yield_time_ms":2000})")));
+        tools.execute(make_call("write-a", "write_stdin", R"({"session_id":1,"chars":"go\n","yield_time_ms":2000})"), k_test_grant),
+        tools.execute(make_call("write-b", "write_stdin", R"({"session_id":2,"chars":"go\n","yield_time_ms":2000})"), k_test_grant));
     require(interacted.has_value(), "writes to distinct exec sessions failed");
     const auto &[first, second] = *interacted;
     ExecObservations first_observations;
@@ -415,9 +486,9 @@ lighter::Task<> exercise_distinct_shell_task_interactions(ToolSet &tools, const 
     first_observations.append(first);
     second_observations.append(second);
     for (usize attempt = 0; attempt < 8 && (!first_observations.exited || !second_observations.exited); ++attempt) {
-        auto finished =
-            co_await lighter::WhenAll(tools.execute(make_call("finish-a", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})")),
-                                      tools.execute(make_call("finish-b", "write_stdin", R"({"session_id":2,"yield_time_ms":3000})")));
+        auto finished = co_await lighter::WhenAll(
+            tools.execute(make_call("finish-a", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})"), k_test_grant),
+            tools.execute(make_call("finish-b", "write_stdin", R"({"session_id":2,"yield_time_ms":3000})"), k_test_grant));
         require(finished.has_value(), "failed to poll distinct exec sessions");
         const auto &[first_finished, second_finished] = *finished;
         first_observations.append(first_finished);
@@ -455,7 +526,7 @@ void test_nonzero_command_is_an_error_result() {
     auto call = make_call("nonzero", "exec_command", R"({"cmd":"printf 'failed\\n' >&2; exit 7"})");
 #endif
     auto outcome = execute(tools, std::move(call));
-    require(outcome.has_value() && outcome->is_error && outcome->content.contains("exit_code: 7"),
+    require(outcome.has_value() && tool_outcome_is_error(outcome->kind) && outcome->receipt.contains("exit_code: 7"),
             "a nonzero shell exit must remain a tool result while entering the failed UI state");
 }
 
@@ -465,7 +536,9 @@ i32 run_all() {
     test_tool_presentations_are_specific_and_bounded();
     test_read_file_is_bounded_and_regular();
     test_apply_patch_operations_are_validated_before_writes();
+    test_apply_patch_resolves_files_when_executed();
     test_shell_task_interaction();
+    test_shell_output_receipt_is_resumable();
     test_distinct_shell_tasks_interact_concurrently();
     test_nonzero_command_is_an_error_result();
     return 0;

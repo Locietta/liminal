@@ -18,9 +18,10 @@ enum struct EntryKind : u32 {
     OUTPUT_ITEM_COMPLETED = 2,
     PROVIDER_CALL_COMPLETED = 3,
     PROVIDER_CALL_ABORTED = 4,
-    TOOL_RESULTS = 5,
+    TOOL_OUTCOMES = 5,
     TASK_FINISHED = 6,
     CONTEXT_CHECKPOINT = 7,
+    PROVIDER_ROUND_SETTLED = 8,
 };
 
 struct EncodedPayload {

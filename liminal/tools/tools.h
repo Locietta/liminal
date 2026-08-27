@@ -12,6 +12,7 @@
 
 #include <liminal/error.h>
 #include <liminal/provider/common.h>
+#include <liminal/tools/outcome.h>
 
 namespace liminal {
 
@@ -28,18 +29,19 @@ enum struct ToolExecutionMode {
     PARALLEL,
 };
 
-inline constexpr usize k_max_tool_output_bytes = 64 * 1024;
+inline constexpr usize k_max_tool_payload_bytes = 64 * 1024;
+inline constexpr usize k_max_tool_receipt_bytes = 64 * 1024;
 
-/// Bound for one local tool result at the instant it begins executing.
-/// Built-ins should use this while producing resumable output; the scheduler
-/// applies the final shared provider-call allowance after all calls settle.
-struct ToolExecutionContext {
-    usize max_output_bytes = k_max_tool_output_bytes;
+/// Immutable admission issued before a tool may execute. Receipt capacity is
+/// reserved control plane; only payload capacity is distributable output.
+struct ToolOutputGrant {
+    usize receipt_bytes;
+    usize payload_bytes;
 };
 
-/// Replace invalid UTF-8 and enforce a byte bound. This is the universal guard
-/// used after every local tool outcome has been normalized to a ToolResult.
-void sanitize_tool_result(provider::ToolResult &result, usize maximum_bytes);
+/// Sanitize optional output within its grant without changing outcome
+/// semantics. Exceeding reserved receipt capacity is a tool contract failure.
+void finalize_tool_outcome(ToolOutcome &outcome, ToolOutputGrant grant);
 
 /// Bounded, user-facing data for the built-in tool lifecycle. Commands remain
 /// separate so renderers can apply state copy and platform shell highlighting.
@@ -50,6 +52,20 @@ struct ToolCallPresentation {
 
 struct ToolSet;
 
+struct PreparedToolCall {
+    provider::ToolCall call;
+    ToolExecutionMode mode = ToolExecutionMode::EXCLUSIVE;
+    usize receipt_bytes = 0;
+    usize minimum_payload_bytes = 0;
+    std::move_only_function<lighter::Task<ToolOutcome, Error>(ToolOutputGrant)> execute;
+};
+
+struct PreparedToolExecution {
+    usize receipt_bytes = 0;
+    usize minimum_payload_bytes = 0;
+    std::move_only_function<lighter::Task<ToolOutcome, Error>(ToolOutputGrant)> execute;
+};
+
 /// One model-callable tool and its local runtime behavior. Registrations own
 /// their callbacks so future built-ins and extension sources share the same
 /// dispatch path.
@@ -59,12 +75,16 @@ struct ToolRegistration {
     /// tools form an ordering barrier and are the conservative default for
     /// extensions that may touch shared state.
     ToolExecutionMode execution_mode = ToolExecutionMode::EXCLUSIVE;
+    usize receipt_bytes = 0;
+    usize minimum_payload_bytes = 0;
+    /// Optional read-only preparation for stateful tools. It must perform no
+    /// externally visible side effects and returns the exact receipt bound
+    /// needed before its invocation can be admitted.
+    std::move_only_function<Result<PreparedToolExecution>(const ToolSet &, const provider::ToolCall &) const> prepare;
     std::move_only_function<Result<void>(const provider::ToolCall &) const> validate;
-    std::move_only_function<lighter::Task<provider::ToolResult, Error>(const ToolSet &, const provider::ToolCall &,
-                                                                       const ToolExecutionContext &) const>
-        execute;
+    std::move_only_function<lighter::Task<ToolOutcome, Error>(const ToolSet &, const provider::ToolCall &, ToolOutputGrant) const> execute;
     std::move_only_function<ToolCallPresentation(const provider::ToolCall &) const> describe;
-    std::move_only_function<std::string(const provider::ToolCall &, const provider::ToolResult &) const> summarize;
+    std::move_only_function<std::string(const provider::ToolCall &, const ToolOutcome &) const> summarize;
 };
 
 struct ToolSet {
@@ -82,21 +102,19 @@ struct ToolSet {
 
     std::vector<provider::ToolDefinition> definitions() const;
 
-    /// Execute one tool call. Expected tool failures (bad path, nonzero exit)
-    /// come back as a successful ToolResultBlock; only infrastructure
-    /// failures (unknown tool, malformed input, spawn error) use the error
-    /// channel - the agent layer converts those into is_error results.
-    Result<void> validate(const provider::ToolCall &call) const;
-    lighter::Task<provider::ToolResult, Error> execute(const provider::ToolCall &call, ToolExecutionContext context = {}) const;
+    /// Read-only preparation. The returned invocation cannot execute without
+    /// an explicit grant from the batch planner.
+    Result<PreparedToolCall> prepare(provider::ToolCall call) const;
+    lighter::Task<ToolOutcome, Error> execute(provider::ToolCall call, ToolOutputGrant grant) const;
     ToolExecutionMode execution_mode(std::string_view name) const;
     ToolCallPresentation describe(const provider::ToolCall &call) const;
-    std::string summarize(const provider::ToolCall &call, const provider::ToolResult &result) const;
+    std::string summarize(const provider::ToolCall &call, const ToolOutcome &outcome) const;
 
     std::filesystem::path working_directory;
 
 private:
     ShellTaskManagerPtr shell_tasks;
-    std::vector<ToolRegistration> registrations;
+    std::vector<std::unique_ptr<ToolRegistration>> registrations;
 };
 
 } // namespace liminal

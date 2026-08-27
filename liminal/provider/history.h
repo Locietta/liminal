@@ -14,6 +14,7 @@
 #include <lighter/types.hpp>
 
 #include <liminal/provider/common.h>
+#include <liminal/tools/outcome.h>
 
 namespace liminal::provider {
 
@@ -46,7 +47,7 @@ struct OpaquePart {
     std::string payload;
 };
 
-using Part = std::variant<TextPart, ToolCall, ToolResult, OpaquePart>;
+using Part = std::variant<TextPart, ToolCall, ToolOutcome, OpaquePart>;
 
 enum struct MessagePhase {
     UNSPECIFIED,
@@ -182,11 +183,11 @@ inline void append_output_item(History &history, const OutputItem &output) {
 }
 
 /// All tool results of one round travel in a single user item, in call order.
-inline void append_tool_results(History &history, std::vector<ToolResult> results) {
+inline void append_tool_outcomes(History &history, std::vector<ToolOutcome> outcomes) {
     Item item{.role = Role::USER};
-    item.parts.reserve(results.size());
-    for (auto &result : results) {
-        item.parts.push_back(std::move(result));
+    item.parts.reserve(outcomes.size());
+    for (auto &outcome : outcomes) {
+        item.parts.push_back(std::move(outcome));
     }
     history.push_back(std::move(item));
 }
@@ -197,7 +198,7 @@ inline void append_tool_results(History &history, std::vector<ToolResult> result
 template <>
 struct glz::meta<liminal::provider::Part> {
     static constexpr std::string_view tag = "type";
-    static constexpr auto ids = std::array{"text", "tool_call", "tool_result", "opaque"};
+    static constexpr auto ids = std::array{"text", "tool_call", "tool_outcome", "opaque"};
 };
 
 template <>

@@ -342,7 +342,8 @@ Result<void> validate_delta(const SessionDelta &delta, const DurableHead &head) 
                 if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>) {
                     lifecycle_id_out_of_range |= payload.id.value > k_maximum_sqlite_integer;
                     maximum_task_id = std::max(maximum_task_id, payload.id.value);
-                } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolResults>) {
+                } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolOutcomes> ||
+                                     std::same_as<T, ProviderRoundSettled>) {
                     lifecycle_id_out_of_range |=
                         payload.task_id.value > k_maximum_sqlite_integer || payload.provider_call_id.value > k_maximum_sqlite_integer;
                     maximum_task_id = std::max(maximum_task_id, payload.task_id.value);

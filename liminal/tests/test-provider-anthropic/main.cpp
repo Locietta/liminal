@@ -59,7 +59,7 @@ void test_request_encoding() {
                 },
             },
     });
-    provider::append_tool_results(history, {{.call_id = "toolu_1", .content = "Liminal"}});
+    provider::append_tool_outcomes(history, {{.call_id = "toolu_1", .payload = "Liminal"}});
     std::vector<provider::ToolDefinition> tools{{
         .name = "read_file",
         .description = "Read a file",
@@ -80,8 +80,10 @@ void test_request_encoding() {
     require(encoded->contains("[DEVELOPER]\\nTest developer policy."), "developer instruction was not encoded");
     require(encoded->contains(R"("role":"assistant")"), "generated output was not encoded as an assistant message");
     require(encoded->contains(R"("thinking":"I should inspect.","signature":"sig-abc123")"), "thinking block was not replayed bit-exact");
-    require(encoded->contains(R"("type":"tool_result","tool_use_id":"toolu_1","content":"Liminal","is_error":false)"),
-            "tool result was not encoded");
+    require(
+        encoded->contains(
+            R"("type":"tool_result","tool_use_id":"toolu_1","content":"status: succeeded\npayload_truncated: false\n\noutput:\nLiminal","is_error":false)"),
+        "semantic tool outcome was not encoded with its status");
     require(encoded->contains(R"("thinking":{"type":"adaptive"})"), "adaptive thinking was not enabled");
     require(encoded->contains(R"("output_config":{"effort":"high"})"), "reasoning effort was not encoded");
     require(encoded->contains(R"("max_tokens":4096)"), "output token limit was not encoded");
@@ -201,12 +203,13 @@ void test_stream_decoding_and_replay() {
 
     auto history = base_history();
     for (const auto &output : outputs) provider::append_output_item(history, output);
-    provider::append_tool_results(history, {{.call_id = "toolu_1", .content = "Liminal"}});
+    provider::append_tool_outcomes(history, {{.call_id = "toolu_1", .payload = "Liminal"}});
     auto replayed = anthropic::protocol::encode_complete_request(history, {}, options());
     require(replayed && replayed->contains(R"("thinking":"I should inspect.","signature":"sig-abc123")"),
             "decoded thinking did not replay into the next request");
-    require(replayed && replayed->contains(R"("tool_use_id":"toolu_1","content":"Liminal")"),
-            "tool result did not replay into the next request");
+    require(replayed && replayed->contains(
+                            R"("tool_use_id":"toolu_1","content":"status: succeeded\npayload_truncated: false\n\noutput:\nLiminal")"),
+            "semantic tool outcome did not replay into the next request");
 }
 
 void test_invalid_event_order() {

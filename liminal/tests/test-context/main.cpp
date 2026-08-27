@@ -44,6 +44,16 @@ void append_tool_call(session::Session &log, session::TaskId task_id, std::strin
     });
 }
 
+void complete_round(session::Session &log, session::TaskId task_id, session::ProviderCallId call_id,
+                    session::ProviderCallLoopOutcome outcome = session::ProviderCallLoopOutcome::TERMINAL, provider::Usage usage = {}) {
+    log.append(session::ProviderCallCompleted{.task_id = task_id, .id = call_id, .completion = {.usage = usage}, .loop_outcome = outcome});
+    log.append(session::ProviderRoundSettled{
+        .task_id = task_id,
+        .provider_call_id = call_id,
+        .replay = session::ProviderRoundReplay::REPLAY,
+    });
+}
+
 std::vector<context::InstructionSource> resolve_fixture() {
     const std::filesystem::path root = "workspace";
     const auto active = root / "src" / "module";
@@ -207,23 +217,40 @@ void test_bounded_selection_keeps_complete_recent_tasks() {
     session::Session session_log;
     const auto old_task = session_log.start_task(std::string(80, 'a'));
     append_message(session_log, old_task, std::string(80, 'b'));
+    complete_round(session_log, old_task, {.value = 1});
+    session_log.append(session::TaskFinished{.id = old_task});
     const auto tool_task = session_log.start_task("use a tool");
     append_tool_call(session_log, tool_task, "call", "read");
-    session_log.append(session::ToolResults{
+    session_log.append(session::ProviderCallCompleted{
+        .task_id = tool_task,
+        .id = {.value = 1},
+        .loop_outcome = session::ProviderCallLoopOutcome::FOLLOW_UP,
+    });
+    session_log.append(session::ToolOutcomes{
         .task_id = tool_task,
         .provider_call_id = {.value = 1},
-        .results = {{.call_id = "call", .content = std::string(80, 'r')}},
+        .outcomes = {{.call_id = "call", .payload = std::string(80, 'r')}},
+    });
+    session_log.append(session::ProviderRoundSettled{
+        .task_id = tool_task,
+        .provider_call_id = {.value = 1},
+        .replay = session::ProviderRoundReplay::REPLAY,
     });
     append_message(session_log, tool_task, "tool conclusion", {.value = 2});
+    complete_round(session_log, tool_task, {.value = 2});
+    session_log.append(session::TaskFinished{.id = tool_task});
     const auto latest_task = session_log.start_task("latest");
     append_message(session_log, latest_task, "answer", {.value = 3});
+    complete_round(session_log, latest_task, {.value = 3});
+    session_log.append(session::TaskFinished{.id = latest_task});
 
     auto manifest = context::ContextBuilder{}.build({}, session_log,
                                                     {.context_window_tokens = 60, .reserved_output_tokens = 10, .safety_margin_tokens = 0});
     require(manifest.has_value(), "bounded context rejected a valid recent task");
-    require(manifest->session_entries.size() == 2 && manifest->session_entries[0].value == 7 && manifest->session_entries[1].value == 8,
+    require(manifest->session_entries.size() == 5 && manifest->session_entries[0].value == 15 &&
+                manifest->session_entries.back().value == 19,
             "bounded context did not retain the newest complete task");
-    require(manifest->omitted_budget_entries == 6 && manifest->omitted_checkpoint_entries == 0,
+    require(manifest->omitted_budget_entries == 14 && manifest->omitted_checkpoint_entries == 0,
             "bounded context did not report budget omissions separately");
     require(manifest->provider_history.size() == 2 && manifest->usage.remaining_input_tokens >= 0,
             "bounded context emitted an oversized or partial provider history");
@@ -233,28 +260,39 @@ void test_reported_usage_accounts_for_trailing_context() {
     session::Session session_log;
     const auto task_id = session_log.start_task(std::string(200, 'u'));
     append_message(session_log, task_id, std::string(200, 'a'));
+    append_tool_call(session_log, task_id, "c", "read");
     session_log.append(session::ProviderCallCompleted{
         .task_id = task_id,
         .id = {.value = 1},
         .completion = {.usage = {.input_tokens = 50, .output_tokens = 20, .context_tokens = 70}},
     });
-    session_log.append(session::ToolResults{
+    session_log.append(session::ToolOutcomes{
         .task_id = task_id,
         .provider_call_id = {.value = 1},
-        .results = {{.call_id = "c", .content = std::string(15, 'r')}},
+        .outcomes = {{.call_id = "c", .payload = std::string(15, 'r')}},
     });
+    session_log.append(session::ProviderRoundSettled{
+        .task_id = task_id,
+        .provider_call_id = {.value = 1},
+        .replay = session::ProviderRoundReplay::REPLAY,
+    });
+    session_log.append(session::TaskFinished{.id = task_id});
     session_log.start_task("tail");
 
     auto manifest = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 100});
     require(manifest.has_value(), "reported usage rejected a valid context");
-    require(manifest->usage.reported_context_tokens == 70 && manifest->usage.estimated_trailing_tokens == 17 &&
-                manifest->usage.estimated_input_tokens == 87 && manifest->usage.remaining_input_tokens == 13,
-            "context accounting did not combine reported usage with its estimated tail");
+    require(manifest->usage.reported_context_tokens == 70 && manifest->usage.estimated_trailing_tokens == 30 &&
+                manifest->usage.estimated_input_tokens == 100 && manifest->usage.remaining_input_tokens == 0,
+            "context accounting did not combine reported usage with its estimated tail: reported " +
+                std::to_string(manifest->usage.reported_context_tokens.value_or(0)) + ", trailing " +
+                std::to_string(manifest->usage.estimated_trailing_tokens) + ", input " +
+                std::to_string(manifest->usage.estimated_input_tokens) + ", remaining " +
+                std::to_string(manifest->usage.remaining_input_tokens.value_or(0)));
     require(context::describe(*manifest).contains("reported context baseline: 70 tokens"),
             "context inspection omitted its reported usage baseline");
 }
 
-void test_projected_tool_results_charge_exact_envelope_overhead() {
+void test_projected_tool_outcomes_charge_exact_envelope_overhead() {
     session::Session session_log;
     const auto task_id = session_log.start_task("use tools");
     append_tool_call(session_log, task_id, "call0001", "first");
@@ -264,15 +302,17 @@ void test_projected_tool_results_charge_exact_envelope_overhead() {
         .id = {.value = 1},
         .completion = {.usage = {.context_tokens = 100}},
     });
-    const std::vector<provider::ToolResult> empty_results{{.call_id = "call0001"}, {.call_id = "call0002"}};
+    const std::vector<ToolOutcome> empty_results{{.call_id = "call0001"}, {.call_id = "call0002"}};
+    const std::vector<ToolOutcome> payload_results{{.call_id = "call0001", .payload = std::string(40, 'x')},
+                                                   {.call_id = "call0002", .payload = std::string(40, 'x')}};
 
-    auto base = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 1'000});
-    auto projected = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 1'000}, empty_results);
+    auto base = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 1'000}, empty_results);
+    auto projected = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 1'000}, payload_results);
 
-    require(base && projected && projected->usage.estimated_input_tokens == base->usage.estimated_input_tokens + 12 &&
-                projected->usage.tool_bytes == base->usage.tool_bytes + 16 &&
-                projected->provider_history.size() == base->provider_history.size() + 1,
-            "projected tool results must charge call IDs, part overhead, and their enclosing history item");
+    require(base && projected && projected->usage.estimated_input_tokens > base->usage.estimated_input_tokens &&
+                projected->usage.tool_bytes == base->usage.tool_bytes + 100 &&
+                projected->provider_history.size() == base->provider_history.size(),
+            "projected tool outcomes must charge mandatory status, call IDs, payload separators, and enclosing history overhead");
 }
 
 i32 run_all() {
@@ -284,7 +324,7 @@ i32 run_all() {
     test_manifest_deduplication_and_redacted_description();
     test_bounded_selection_keeps_complete_recent_tasks();
     test_reported_usage_accounts_for_trailing_context();
-    test_projected_tool_results_charge_exact_envelope_overhead();
+    test_projected_tool_outcomes_charge_exact_envelope_overhead();
     return 0;
 }
 

@@ -23,12 +23,6 @@ struct ToolCall {
     glz::generic input;
 };
 
-struct ToolResult {
-    std::string call_id;
-    std::string content;
-    bool is_error = false;
-};
-
 struct SchemaProperty {
     std::string type;
     std::string description;

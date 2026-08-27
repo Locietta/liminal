@@ -25,18 +25,14 @@ using lighter::or_fail;
 using lighter::outcome_error;
 using lighter::Task;
 
-void sanitize_tool_result(provider::ToolResult &result, usize maximum_bytes) {
-    maximum_bytes = std::min(maximum_bytes, k_max_tool_output_bytes);
-    result.content = lighter::encoding::utf8::sanitize(result.content);
-    if (result.content.size() <= maximum_bytes) return;
-
-    const auto marker = "\n... [tool output truncated to " + std::to_string(maximum_bytes) + " bytes]";
-    if (marker.size() >= maximum_bytes) {
-        result.content = bounded_utf8(marker, maximum_bytes);
-    } else {
-        result.content = bounded_utf8(result.content, maximum_bytes - marker.size()) + marker;
-    }
-    result.is_error = true;
+void finalize_tool_outcome(ToolOutcome &outcome, ToolOutputGrant grant) {
+    grant.payload_bytes = std::min(grant.payload_bytes, k_max_tool_payload_bytes);
+    outcome.receipt = lighter::encoding::utf8::sanitize(outcome.receipt);
+    lighter::check(outcome.receipt.size() <= grant.receipt_bytes, "tool outcome exceeded its reserved receipt capacity");
+    outcome.payload = lighter::encoding::utf8::sanitize(outcome.payload);
+    if (outcome.payload.size() <= grant.payload_bytes) return;
+    outcome.payload = bounded_utf8(outcome.payload, grant.payload_bytes);
+    outcome.payload_truncated = true;
 }
 
 namespace {
@@ -106,16 +102,13 @@ std::string byte_count(usize bytes) {
     return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + (unit == kibibyte ? " KiB" : " MiB");
 }
 
-std::string generic_result_summary(const provider::ToolResult &result) {
-    const auto lines = content_lines(result.content);
-    if (lines.empty()) return result.is_error ? "No error detail" : "No output";
-    std::string summary = result.is_error ? "Error" : line_count(lines.size());
+std::string generic_result_summary(const ToolOutcome &outcome) {
+    const auto content = outcome.receipt + (outcome.receipt.empty() || outcome.payload.empty() ? "" : "\n") + outcome.payload;
+    const auto lines = content_lines(content);
+    if (lines.empty()) return tool_outcome_is_error(outcome.kind) ? "No error detail" : "No output";
+    std::string summary = tool_outcome_is_error(outcome.kind) ? "Error" : line_count(lines.size());
     for (const auto &line : preview_lines(lines)) summary += "\n" + line;
     return summary;
-}
-
-usize resumable_payload_budget(const ToolExecutionContext &context) {
-    return context.max_output_bytes > k_read_notice_reserve_bytes ? context.max_output_bytes - k_read_notice_reserve_bytes : 0;
 }
 
 /// Decode a tool_use input (already validated as a JSON object) into the
@@ -288,7 +281,7 @@ Result<std::string> read_line_range(const std::filesystem::path &path, usize fir
     return content;
 }
 
-std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input, const ToolExecutionContext &context) {
+std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input, ToolOutputGrant grant) {
     if (auto valid = validate_read_file_input(input); !valid) return "Error: " + valid.error().message();
     auto resolved = resolve_read_path(tools, input.path);
     if (!resolved) return "Error: " + resolved.error().message();
@@ -302,14 +295,12 @@ std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input, con
     if (!std::filesystem::is_regular_file(status)) {
         return "Error: '" + path + "' is not a regular file";
     }
-    if (context.max_output_bytes <= k_read_notice_reserve_bytes) return std::string(k_insufficient_output_capacity);
-
-    auto content = read_line_range(*resolved, input.offset.value_or(1), input.limit, resumable_payload_budget(context));
+    auto content = read_line_range(*resolved, input.offset.value_or(1), input.limit, grant.payload_bytes);
     if (!content) return "Error: " + content.error().message();
     return *std::move(content);
 }
 
-std::string tool_read_file_bytes(const ToolSet &tools, const ReadFileBytesInput &input, const ToolExecutionContext &context) {
+std::string tool_read_file_bytes(const ToolSet &tools, const ReadFileBytesInput &input, ToolOutputGrant grant) {
     if (auto valid = validate_read_file_bytes_input(input); !valid) return "Error: " + valid.error().message();
     auto resolved = resolve_read_path(tools, input.path);
     if (!resolved) return "Error: " + resolved.error().message();
@@ -323,13 +314,28 @@ std::string tool_read_file_bytes(const ToolSet &tools, const ReadFileBytesInput 
     if (!std::filesystem::is_regular_file(status)) {
         return "Error: '" + path + "' is not a regular file";
     }
-    if (context.max_output_bytes <= k_read_notice_reserve_bytes) return std::string(k_insufficient_output_capacity);
-
-    const auto payload_budget = resumable_payload_budget(context);
-    const auto requested_count = input.byte_count.value_or(payload_budget);
-    auto content = read_byte_range(*resolved, input.byte_offset.value_or(0), std::min(requested_count, payload_budget));
+    const auto requested_count = input.byte_count.value_or(grant.payload_bytes);
+    auto content = read_byte_range(*resolved, input.byte_offset.value_or(0), std::min(requested_count, grant.payload_bytes));
     if (!content) return "Error: " + content.error().message();
     return *std::move(content);
+}
+
+ToolOutcome read_outcome(std::string call_id, std::string content, bool preserve_marker_newline) {
+    ToolOutcome outcome{.call_id = std::move(call_id)};
+    if (content.starts_with("Error:")) {
+        outcome.kind = ToolOutcomeKind::FAILED;
+        outcome.payload = std::move(content);
+        return outcome;
+    }
+    auto marker = content.rfind("\n... [");
+    if (marker == std::string::npos && content.starts_with("... [")) marker = 0;
+    if (marker != std::string::npos) {
+        const auto control_start = marker == 0 ? 0 : marker + 1;
+        outcome.receipt = "continuation: " + content.substr(control_start);
+        content.resize(marker + static_cast<usize>(preserve_marker_newline && marker != 0));
+    }
+    outcome.payload = std::move(content);
+    return outcome;
 }
 
 } // namespace
@@ -356,15 +362,15 @@ ToolCallPresentation describe_read_file_bytes(const provider::ToolCall &call) {
     return {.description = std::move(description)};
 }
 
-std::string summarize_read_file(const provider::ToolCall &, const provider::ToolResult &result) {
-    if (result.is_error) return generic_result_summary(result);
+std::string summarize_read_file(const provider::ToolCall &, const ToolOutcome &result) {
+    if (tool_outcome_is_error(result.kind)) return generic_result_summary(result);
     usize lines = 0;
-    if (!result.content.empty()) {
-        lines = static_cast<usize>(std::ranges::count(result.content, '\n'));
-        if (!result.content.ends_with('\n')) ++lines;
+    if (!result.payload.empty()) {
+        lines = static_cast<usize>(std::ranges::count(result.payload, '\n'));
+        if (!result.payload.ends_with('\n')) ++lines;
     }
-    auto summary = line_count(lines) + " · " + byte_count(result.content.size());
-    if (result.content.contains("... [truncated ")) summary += " · truncated";
+    auto summary = line_count(lines) + " · " + byte_count(result.payload.size());
+    if (result.payload_truncated || result.payload.contains("... [truncated ")) summary += " · truncated";
     return summary;
 }
 
@@ -388,18 +394,16 @@ ToolRegistration read_file_registration() {
                     },
             },
         .execution_mode = ToolExecutionMode::PARALLEL,
+        .receipt_bytes = k_read_notice_reserve_bytes,
+        .minimum_payload_bytes = 4,
         .validate = [](const provider::ToolCall &call) -> Result<void> {
             auto input = parse_input<ReadFileInput>(call.input);
             if (!input) return outcome_error(std::move(input).error());
             return validate_read_file_input(*input);
         },
-        .execute = [](const ToolSet &tools, const provider::ToolCall &call,
-                      const ToolExecutionContext &context) -> Task<provider::ToolResult, Error> {
+        .execute = [](const ToolSet &tools, const provider::ToolCall &call, ToolOutputGrant grant) -> Task<ToolOutcome, Error> {
             auto input = co_await or_fail(parse_input<ReadFileInput>(call.input));
-            provider::ToolResult result{.call_id = call.id};
-            result.content = tool_read_file(tools, input, context);
-            result.is_error = result.content.starts_with("Error:");
-            co_return result;
+            co_return read_outcome(call.id, tool_read_file(tools, input, grant), true);
         },
         .describe = describe_read_file,
         .summarize = summarize_read_file,
@@ -427,27 +431,25 @@ ToolRegistration read_file_bytes_registration() {
                     },
             },
         .execution_mode = ToolExecutionMode::PARALLEL,
+        .receipt_bytes = k_read_notice_reserve_bytes,
+        .minimum_payload_bytes = 4,
         .validate = [](const provider::ToolCall &call) -> Result<void> {
             auto input = parse_input<ReadFileBytesInput>(call.input);
             if (!input) return outcome_error(std::move(input).error());
             return validate_read_file_bytes_input(*input);
         },
-        .execute = [](const ToolSet &tools, const provider::ToolCall &call,
-                      const ToolExecutionContext &context) -> Task<provider::ToolResult, Error> {
+        .execute = [](const ToolSet &tools, const provider::ToolCall &call, ToolOutputGrant grant) -> Task<ToolOutcome, Error> {
             auto input = co_await or_fail(parse_input<ReadFileBytesInput>(call.input));
-            provider::ToolResult result{.call_id = call.id};
-            result.content = tool_read_file_bytes(tools, input, context);
-            result.is_error = result.content.starts_with("Error:");
-            co_return result;
+            co_return read_outcome(call.id, tool_read_file_bytes(tools, input, grant), false);
         },
         .describe = describe_read_file_bytes,
         .summarize = summarize_read_file,
     };
 }
 
-const ToolRegistration *find_registration(const std::vector<ToolRegistration> &registrations, std::string_view name) {
-    const auto found = std::ranges::find(registrations, name, [](const auto &tool) { return std::string_view(tool.definition.name); });
-    return found == registrations.end() ? nullptr : &*found;
+const ToolRegistration *find_registration(const std::vector<std::unique_ptr<ToolRegistration>> &registrations, std::string_view name) {
+    const auto found = std::ranges::find(registrations, name, [](const auto &tool) { return std::string_view(tool->definition.name); });
+    return found == registrations.end() ? nullptr : found->get();
 }
 
 ToolCallPresentation fallback_description(const provider::ToolCall &call) {
@@ -476,38 +478,70 @@ ToolSet::~ToolSet() = default;
 
 Result<void> ToolSet::register_tool(ToolRegistration tool) {
     if (tool.definition.name.empty()) return outcome_error(Error::config("tool name cannot be empty"));
-    if (!tool.execute) return outcome_error(Error::config("tool '" + tool.definition.name + "' has no executor"));
+    if (!tool.prepare && !tool.execute) return outcome_error(Error::config("tool '" + tool.definition.name + "' has no executor"));
+    if (tool.receipt_bytes > k_max_tool_receipt_bytes) {
+        return outcome_error(Error::config("tool '" + tool.definition.name + "' reserves too much receipt capacity"));
+    }
+    if (tool.minimum_payload_bytes > k_max_tool_payload_bytes) {
+        return outcome_error(Error::config("tool '" + tool.definition.name + "' requires too much payload capacity"));
+    }
     if (find_registration(registrations, tool.definition.name)) {
         return outcome_error(Error::config("duplicate tool name: " + tool.definition.name));
     }
-    registrations.push_back(std::move(tool));
+    registrations.push_back(std::make_unique<ToolRegistration>(std::move(tool)));
     return {};
 }
 
 std::vector<provider::ToolDefinition> ToolSet::definitions() const {
     std::vector<provider::ToolDefinition> result;
     result.reserve(registrations.size() + 2);
-    for (const auto &tool : registrations) result.push_back(tool.definition);
+    for (const auto &tool : registrations) result.push_back(tool->definition);
     result.push_back({.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search", .description = "Search the public web."});
     result.push_back({.kind = provider::ToolKind::WEB_FETCH, .name = "web_fetch", .description = "Fetch a public web page."});
     return result;
 }
 
-Result<void> ToolSet::validate(const provider::ToolCall &call) const {
+Result<PreparedToolCall> ToolSet::prepare(provider::ToolCall call) const {
     const auto *tool = find_registration(registrations, call.name);
     if (!tool) return outcome_error(Error::tool("unknown tool: " + call.name));
-    if (tool->validate) return tool->validate(call);
-    return {};
+    if (tool->prepare) {
+        auto execution = tool->prepare(*this, call);
+        if (!execution) return outcome_error(std::move(execution).error());
+        if (!execution->execute) return outcome_error(Error::tool("tool '" + call.name + "' prepared no executor"));
+        if (execution->receipt_bytes > k_max_tool_receipt_bytes) {
+            return outcome_error(Error::tool("prepared receipt exceeds the local tool limit"));
+        }
+        if (execution->minimum_payload_bytes > k_max_tool_payload_bytes) {
+            return outcome_error(Error::tool("prepared minimum payload exceeds the local tool limit"));
+        }
+        return PreparedToolCall{.call = std::move(call),
+                                .mode = tool->execution_mode,
+                                .receipt_bytes = execution->receipt_bytes,
+                                .minimum_payload_bytes = execution->minimum_payload_bytes,
+                                .execute = std::move(execution->execute)};
+    }
+    if (tool->validate) {
+        auto valid = tool->validate(call);
+        if (!valid) return outcome_error(std::move(valid).error());
+    }
+    auto invocation = call;
+    return PreparedToolCall{
+        .call = std::move(call),
+        .mode = tool->execution_mode,
+        .receipt_bytes = tool->receipt_bytes,
+        .minimum_payload_bytes = tool->minimum_payload_bytes,
+        .execute = [this, tool,
+                    invocation = std::move(invocation)](ToolOutputGrant grant) mutable { return tool->execute(*this, invocation, grant); },
+    };
 }
 
-Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &call, ToolExecutionContext context) const {
-    context.max_output_bytes = std::min(context.max_output_bytes, k_max_tool_output_bytes);
-    if (const auto *tool = find_registration(registrations, call.name)) {
-        auto result = co_await tool->execute(*this, call, context).or_fail();
-        sanitize_tool_result(result, context.max_output_bytes);
-        co_return result;
-    }
-    co_await fail(Error::tool("unknown tool: " + call.name));
+Task<ToolOutcome, Error> ToolSet::execute(provider::ToolCall call, ToolOutputGrant grant) const {
+    auto prepared = co_await or_fail(prepare(std::move(call)));
+    lighter::check(grant.receipt_bytes >= prepared.receipt_bytes, "tool grant does not cover its prepared receipt");
+    lighter::check(grant.payload_bytes >= prepared.minimum_payload_bytes, "tool grant does not cover its minimum payload");
+    auto outcome = co_await prepared.execute(grant).or_fail();
+    finalize_tool_outcome(outcome, grant);
+    co_return outcome;
 }
 
 ToolExecutionMode ToolSet::execution_mode(std::string_view name) const {
@@ -520,9 +554,9 @@ ToolCallPresentation ToolSet::describe(const provider::ToolCall &call) const {
     return tool && tool->describe ? tool->describe(call) : fallback_description(call);
 }
 
-std::string ToolSet::summarize(const provider::ToolCall &call, const provider::ToolResult &result) const {
+std::string ToolSet::summarize(const provider::ToolCall &call, const ToolOutcome &outcome) const {
     const auto *tool = find_registration(registrations, call.name);
-    return tool && tool->summarize ? tool->summarize(call, result) : generic_result_summary(result);
+    return tool && tool->summarize ? tool->summarize(call, outcome) : generic_result_summary(outcome);
 }
 
 } // namespace liminal

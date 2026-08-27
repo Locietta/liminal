@@ -68,7 +68,7 @@ void test_request_encoding() {
             },
         .phase = provider::MessagePhase::COMMENTARY,
     });
-    provider::append_tool_results(history, {{.call_id = "call_1", .content = "Liminal"}});
+    provider::append_tool_outcomes(history, {{.call_id = "call_1", .payload = "Liminal"}});
     std::vector<provider::ToolDefinition> tools{{
         .name = "read_file",
         .description = "Read a file",
@@ -93,7 +93,10 @@ void test_request_encoding() {
                 encoded->contains(R"("phase":"commentary")"),
             "generated text was not encoded as assistant output");
     require(encoded->contains(R"("encrypted_content":"encrypted-reasoning")"), "encrypted reasoning was not replayed");
-    require(encoded->contains(R"("type":"function_call_output","call_id":"call_1","output":"Liminal")"), "tool result was not replayed");
+    require(
+        encoded->contains(
+            R"("type":"function_call_output","call_id":"call_1","output":"status: succeeded\npayload_truncated: false\n\noutput:\nLiminal")"),
+        "semantic tool outcome was not replayed with its status");
     require(encoded->contains(R"("strict":false)"),
             "tool schemas must stay non-strict so optional parameters survive Responses schema validation");
     require(encoded->contains(R"("additionalProperties":false)"), "tool schema must reject extra properties");
@@ -207,11 +210,13 @@ void test_stream_decoding_and_replay() {
 
     auto history = base_history();
     for (const auto &output : outputs) provider::append_output_item(history, output);
-    provider::append_tool_results(history, {{.call_id = "call_1", .content = "Liminal"}});
+    provider::append_tool_outcomes(history, {{.call_id = "call_1", .payload = "Liminal"}});
     auto replayed = openai::protocol::encode_complete_request(history, {}, options());
     require(replayed && replayed->contains(R"("encrypted_content":"encrypted-reasoning")"),
             "decoded reasoning did not replay into the next request");
-    require(replayed && replayed->contains(R"("call_id":"call_1","output":"Liminal")"), "tool output did not replay into the next request");
+    require(replayed &&
+                replayed->contains(R"("call_id":"call_1","output":"status: succeeded\npayload_truncated: false\n\noutput:\nLiminal")"),
+            "semantic tool outcome did not replay into the next request");
 }
 
 void test_completed_response_carries_fallback_output() {

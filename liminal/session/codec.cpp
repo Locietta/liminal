@@ -34,6 +34,19 @@ struct glz::meta<liminal::session::ProviderCallAbortReason> {
 };
 
 template <>
+struct glz::meta<liminal::ToolOutcomeKind> {
+    using enum liminal::ToolOutcomeKind;
+    static constexpr auto value =
+        enumerate("succeeded", SUCCEEDED, "failed", FAILED, "not_started", NOT_STARTED, "outcome_unknown", OUTCOME_UNKNOWN);
+};
+
+template <>
+struct glz::meta<liminal::session::ProviderRoundReplay> {
+    using enum liminal::session::ProviderRoundReplay;
+    static constexpr auto value = enumerate("replay", REPLAY, "omit", OMIT);
+};
+
+template <>
 struct glz::meta<liminal::session::TaskOutcome> {
     using enum liminal::session::TaskOutcome;
     static constexpr auto value = enumerate("completed", COMPLETED, "cancelled", CANCELLED, "failed", FAILED, "interrupted", INTERRUPTED);
@@ -74,9 +87,10 @@ std::string_view entry_kind_name(EntryKind kind) noexcept {
         case EntryKind::OUTPUT_ITEM_COMPLETED: return "OutputItemCompleted";
         case EntryKind::PROVIDER_CALL_COMPLETED: return "ProviderCallCompleted";
         case EntryKind::PROVIDER_CALL_ABORTED: return "ProviderCallAborted";
-        case EntryKind::TOOL_RESULTS: return "ToolResults";
+        case EntryKind::TOOL_OUTCOMES: return "ToolOutcomes";
         case EntryKind::TASK_FINISHED: return "TaskFinished";
         case EntryKind::CONTEXT_CHECKPOINT: return "ContextCheckpoint";
+        case EntryKind::PROVIDER_ROUND_SETTLED: return "ProviderRoundSettled";
     }
     return "unknown";
 }
@@ -104,8 +118,12 @@ Result<EncodedPayload> encode_payload(const EntryPayload &payload) {
                 encoded.kind = EntryKind::PROVIDER_CALL_ABORTED;
                 encoded.task_id = value.task_id;
                 encoded.provider_call_id = value.id;
-            } else if constexpr (std::same_as<T, ToolResults>) {
-                encoded.kind = EntryKind::TOOL_RESULTS;
+            } else if constexpr (std::same_as<T, ToolOutcomes>) {
+                encoded.kind = EntryKind::TOOL_OUTCOMES;
+                encoded.task_id = value.task_id;
+                encoded.provider_call_id = value.provider_call_id;
+            } else if constexpr (std::same_as<T, ProviderRoundSettled>) {
+                encoded.kind = EntryKind::PROVIDER_ROUND_SETTLED;
                 encoded.task_id = value.task_id;
                 encoded.provider_call_id = value.provider_call_id;
             } else if constexpr (std::same_as<T, TaskFinished>) {
@@ -132,9 +150,10 @@ Result<EntryPayload> decode_payload(EntryKind kind, u32 version, std::string_vie
         case EntryKind::OUTPUT_ITEM_COMPLETED: return decode<OutputItemCompleted>(json, kind);
         case EntryKind::PROVIDER_CALL_COMPLETED: return decode<ProviderCallCompleted>(json, kind);
         case EntryKind::PROVIDER_CALL_ABORTED: return decode<ProviderCallAborted>(json, kind);
-        case EntryKind::TOOL_RESULTS: return decode<ToolResults>(json, kind);
+        case EntryKind::TOOL_OUTCOMES: return decode<ToolOutcomes>(json, kind);
         case EntryKind::TASK_FINISHED: return decode<TaskFinished>(json, kind);
         case EntryKind::CONTEXT_CHECKPOINT: return decode<ContextCheckpoint>(json, kind);
+        case EntryKind::PROVIDER_ROUND_SETTLED: return decode<ProviderRoundSettled>(json, kind);
     }
     return lighter::outcome_error(Error::protocol("unknown session entry kind " + std::to_string(static_cast<u32>(kind))));
 }

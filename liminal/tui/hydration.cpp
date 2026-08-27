@@ -27,12 +27,12 @@ std::string abort_notice(const session::ProviderCallAborted &aborted) {
 }
 
 std::vector<Block> project_branch(const std::vector<const session::SessionEntry *> &branch, const ToolSet &tools) {
-    std::map<ToolKey, provider::ToolResult> results;
+    std::map<ToolKey, ToolOutcome> results;
     for (const auto *entry : branch) {
-        const auto *batch = std::get_if<session::ToolResults>(&entry->payload);
+        const auto *batch = std::get_if<session::ToolOutcomes>(&entry->payload);
         if (!batch) continue;
-        for (const auto &result : batch->results) {
-            results[{batch->task_id.value, batch->provider_call_id.value, result.call_id}] = result;
+        for (const auto &outcome : batch->outcomes) {
+            results[{batch->task_id.value, batch->provider_call_id.value, outcome.call_id}] = outcome;
         }
     }
 
@@ -67,7 +67,7 @@ std::vector<Block> project_branch(const std::vector<const session::SessionEntry 
                     .output_item_id = tool->id.value,
                 };
                 if (result != results.end()) {
-                    block.state = result->second.is_error ? BlockState::FAILED : BlockState::COMPLETED;
+                    block.state = tool_outcome_is_error(result->second.kind) ? BlockState::FAILED : BlockState::COMPLETED;
                     block.detail = tools.summarize(tool->call, result->second);
                 } else {
                     block.detail = "Result was not recorded";

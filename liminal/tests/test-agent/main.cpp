@@ -16,6 +16,7 @@
 #include <lighter/types.hpp>
 
 #include <liminal/agent/agent.h>
+#include <liminal/agent/tool_planner.h>
 #include <liminal/event.h>
 #include <liminal/provider/provider.h>
 
@@ -62,13 +63,18 @@ session::TaskId append_session_message(session::Session &log, std::string prompt
         .provider_call_id = {.value = 1},
         .item = provider::AssistantMessageItem{.id = {.value = "seed"}, .parts = {{.text = std::move(text)}}},
     });
-    if (usage.context_tokens != 0 || usage.input_tokens != 0 || usage.output_tokens != 0) {
-        log.append(session::ProviderCallCompleted{
-            .task_id = task_id,
-            .id = {.value = 1},
-            .completion = {.usage = usage},
-        });
-    }
+    log.append(session::ProviderCallCompleted{
+        .task_id = task_id,
+        .id = {.value = 1},
+        .completion = {.usage = usage},
+        .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
+    });
+    log.append(session::ProviderRoundSettled{
+        .task_id = task_id,
+        .provider_call_id = {.value = 1},
+        .replay = session::ProviderRoundReplay::REPLAY,
+    });
+    log.append(session::TaskFinished{.id = task_id});
     return task_id;
 }
 
@@ -84,10 +90,9 @@ std::shared_ptr<usize> register_noop_tool(ToolSet &tools) {
     auto executions = std::make_shared<usize>(0);
     auto registered = tools.register_tool({
         .definition = {.name = "test_noop", .description = "Test no-op"},
-        .execute = [executions](const ToolSet &, const provider::ToolCall &call,
-                                const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
+        .execute = [executions](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
             ++*executions;
-            co_return provider::ToolResult{.call_id = call.id, .content = "ok"};
+            co_return ToolOutcome{.call_id = call.id, .payload = "ok"};
         },
     });
     require(registered.has_value(), "failed to register the test no-op tool");
@@ -183,13 +188,14 @@ void test_successful_task() {
                 std::get<ToolCompleted>(events[3]).activity_scope == first_scope &&
                 std::get<TaskCompleted>(events[8]).task_generation == first_scope.task_generation,
             "agent lifecycle events must preserve task identity while advancing provider-call activity generations");
-    require(agent.session.entries.size() == 8, "semantic session has the wrong number of entries");
+    require(agent.session.entries.size() == 10, "semantic session has the wrong number of entries");
     require(std::holds_alternative<session::TaskStarted>(agent.session.entries[0].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[2].payload) &&
                 std::holds_alternative<session::ProviderCallCompleted>(agent.session.entries[3].payload) &&
-                std::holds_alternative<session::ToolResults>(agent.session.entries[4].payload) &&
-                std::holds_alternative<session::TaskFinished>(agent.session.entries[7].payload),
+                std::holds_alternative<session::ToolOutcomes>(agent.session.entries[4].payload) &&
+                std::holds_alternative<session::ProviderRoundSettled>(agent.session.entries[5].payload) &&
+                std::holds_alternative<session::TaskFinished>(agent.session.entries[9].payload),
             "session entries do not preserve task, output-item, provider-call, tool-result, and finish semantics");
     const auto &first_call = std::get<session::ProviderCallCompleted>(agent.session.entries[3].payload);
     require(first_call.completion.usage.input_tokens == 10 && first_call.completion.usage.output_tokens == 5 &&
@@ -201,13 +207,13 @@ void test_successful_task() {
     compact_loop.schedule(compact);
     compact_loop.run();
     require(compact.result().has_value(), "agent compaction failed");
-    require(agent.session.entries.size() == 9 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries.back().payload),
+    require(agent.session.entries.size() == 11 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries.back().payload),
             "compaction must append a checkpoint without deleting session entries");
     auto compacted_context = agent.context_manifest();
     require(compacted_context && compacted_context->provider_history.size() == 3 &&
                 compacted_context->provider_history[0].role == provider::Role::SYSTEM &&
                 compacted_context->provider_history[1].role == provider::Role::DEVELOPER &&
-                compacted_context->omitted_session_entries == 8 && compacted_context->session_entries.size() == 1,
+                compacted_context->omitted_session_entries == 10 && compacted_context->session_entries.size() == 1,
             "compaction did not reconstruct the instruction prefix");
     provider_mock.verify();
 }
@@ -244,7 +250,7 @@ void test_long_tool_loop() {
 
     require(task.result().has_value(), "a productive tool loop longer than 32 iterations failed");
     require(*tool_executions == k_tool_calls, "the long-running task did not execute every requested tool");
-    require(agent.session.entries.size() == 3 * k_tool_calls + 4, "the long-running task did not retain its complete semantic history");
+    require(agent.session.entries.size() == 4 * k_tool_calls + 5, "the long-running task did not retain its complete semantic history");
     provider_mock.verify();
 }
 
@@ -255,9 +261,9 @@ void test_tool_output_budget_tracks_model_context() {
         .definition = {.name = "test_budget", .description = "Observe the tool output budget"},
         .execution_mode = ToolExecutionMode::PARALLEL,
         .execute = [observed_budgets](const ToolSet &, const provider::ToolCall &call,
-                                      const ToolExecutionContext &context) -> lighter::Task<provider::ToolResult, Error> {
-            observed_budgets->push_back(context.max_output_bytes);
-            co_return provider::ToolResult{.call_id = call.id, .content = std::string(context.max_output_bytes, 'x')};
+                                      ToolOutputGrant grant) -> lighter::Task<ToolOutcome, Error> {
+            observed_budgets->push_back(grant.payload_bytes);
+            co_return ToolOutcome{.call_id = call.id, .payload = std::string(grant.payload_bytes, 'x')};
         },
     });
     require(registered.has_value(), "failed to register the output-budget test tool");
@@ -293,15 +299,16 @@ void test_tool_output_budget_tracks_model_context() {
     require(observed_budgets->size() == 2 && std::ranges::all_of(*observed_budgets, [](usize budget) { return budget < 8'000; }),
             "each tool must obtain a fresh allowance that charges the current response and tool arguments");
     const auto result_entry = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
-        return std::holds_alternative<session::ToolResults>(entry.payload);
+        return std::holds_alternative<session::ToolOutcomes>(entry.payload);
     });
     require(result_entry != agent.session.entries.end(), "budgeted tool batch did not produce durable results");
-    const auto &results = std::get<session::ToolResults>(result_entry->payload).results;
+    const auto &results = std::get<session::ToolOutcomes>(result_entry->payload).outcomes;
     usize result_bytes = 0;
-    for (const auto &result : results) result_bytes += result.content.size();
+    for (const auto &result : results) result_bytes += result.payload.size();
     usize committed_bytes = 0;
     for (const auto budget : *observed_budgets) committed_bytes += budget;
-    require(results.size() == 2 && result_bytes == committed_bytes && std::ranges::none_of(results, &provider::ToolResult::is_error),
+    require(results.size() == 2 && result_bytes == committed_bytes &&
+                std::ranges::none_of(results, [](const ToolOutcome &outcome) { return tool_outcome_is_error(outcome.kind); }),
             "parallel tools must receive immutable shares of one committed provider-call allowance");
     provider_mock.verify();
 }
@@ -333,13 +340,44 @@ void test_insufficient_batch_capacity_prevents_tool_dispatch() {
             "a batch without room for an actionable result must fail before tool dispatch (executions " + std::to_string(*executions) +
                 (outcome.has_error() ? ", error " + outcome.error().message() : ", no error") + ")");
     const auto result_entry = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
-        return std::holds_alternative<session::ToolResults>(entry.payload);
+        return std::holds_alternative<session::ToolOutcomes>(entry.payload);
     });
     require(result_entry != agent.session.entries.end(), "capacity refusal left an assistant tool call without a matching result");
-    const auto &results = std::get<session::ToolResults>(result_entry->payload).results;
-    require(results.size() == 1 && results.front().call_id == "capacity" && results.front().is_error,
+    const auto &results = std::get<session::ToolOutcomes>(result_entry->payload).outcomes;
+    require(results.size() == 1 && results.front().call_id == "capacity" && results.front().kind == ToolOutcomeKind::NOT_STARTED,
             "capacity refusal did not durably close the accepted tool call");
+    const auto settled = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
+        const auto *round = std::get_if<session::ProviderRoundSettled>(&entry.payload);
+        return round && round->replay == session::ProviderRoundReplay::OMIT;
+    });
+    require(settled != agent.session.entries.end(), "capacity refusal did not mark its provisional round audit-only");
     provider_mock.verify();
+}
+
+void test_tool_payload_framing_is_reserved_during_planning() {
+    ToolSet tools(std::filesystem::current_path());
+    auto registered = tools.register_tool({
+        .definition = {.name = "test_framing", .description = "Test payload framing"},
+        .execution_mode = ToolExecutionMode::PARALLEL,
+        .receipt_bytes = 200,
+        .execute = [](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
+            co_return ToolOutcome{.call_id = call.id, .payload = "payload"};
+        },
+    });
+    require(registered.has_value(), "failed to register the payload-framing test tool");
+
+    usize projected_receipt = 0;
+    agent::detail::ToolBatchPlanner planner(tools, [&projected_receipt](std::span<const ToolOutcome> outcomes) -> std::optional<usize> {
+        require(outcomes.size() == 1, "payload-framing projection omitted a tool outcome");
+        projected_receipt = outcomes.front().receipt.size();
+        return 32;
+    });
+    auto admission = planner.plan({provider::ToolCall{.id = "framed", .name = "test_framing"}});
+    const auto *plan = std::get_if<agent::detail::ToolBatchPlan>(&admission);
+    require(plan && plan->calls.size() == 1 && plan->calls.front().grant.payload_bytes == 32,
+            "payload-framing fixture did not receive a nonempty payload grant");
+    require(projected_receipt == 200 + k_tool_outcome_payload_framing.size(),
+            "planner did not charge fixed payload framing as projected control overhead");
 }
 
 void test_tool_error_results_share_the_output_guard() {
@@ -354,13 +392,15 @@ void test_tool_error_results_share_the_output_guard() {
         .validate = [invalid_detail](const provider::ToolCall &) -> Result<void> {
             return lighter::outcome_error(Error::tool(invalid_detail()));
         },
-        .execute = [](const ToolSet &, const provider::ToolCall &call, const ToolExecutionContext &)
-            -> lighter::Task<provider::ToolResult, Error> { co_return provider::ToolResult{.call_id = call.id}; },
+        .execute = [](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
+            co_return ToolOutcome{.call_id = call.id};
+        },
     });
     auto execution = tools.register_tool({
         .definition = {.name = "test_execution_error"},
-        .execute = [invalid_detail](const ToolSet &, const provider::ToolCall &, const ToolExecutionContext &)
-            -> lighter::Task<provider::ToolResult, Error> { co_await lighter::fail(Error::tool(invalid_detail())); },
+        .execute = [invalid_detail](const ToolSet &, const provider::ToolCall &, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
+            co_await lighter::fail(Error::tool(invalid_detail()));
+        },
     });
     require(validation && execution, "failed to register tool error guard fixtures");
 
@@ -389,17 +429,19 @@ void test_tool_error_results_share_the_output_guard() {
     require(task.result().has_value(),
             "bounded tool error task failed" + (task.result().has_error() ? ": " + task.result().error().message() : std::string{}));
     const auto result_entry = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
-        return std::holds_alternative<session::ToolResults>(entry.payload);
+        return std::holds_alternative<session::ToolOutcomes>(entry.payload);
     });
     require(result_entry != agent.session.entries.end(), "tool errors were not retained");
-    const auto &results = std::get<session::ToolResults>(result_entry->payload).results;
+    const auto &results = std::get<session::ToolOutcomes>(result_entry->payload).outcomes;
     usize result_bytes = 0;
     for (const auto &result : results) {
-        result_bytes += result.content.size();
-        require(result.is_error && lighter::encoding::utf8::is_valid(result.content),
+        result_bytes += result.payload.size();
+        require(tool_outcome_is_error(result.kind) && lighter::encoding::utf8::is_valid(result.payload),
                 "every normalized tool error must be bounded valid UTF-8");
     }
     require(results.size() == 2 && result_bytes <= 40'000, "validation and execution errors must share the batch allowance");
+    require(results[0].kind == ToolOutcomeKind::FAILED && results[1].kind == ToolOutcomeKind::OUTCOME_UNKNOWN,
+            "validation failure and missing execution outcome were not distinguished semantically");
     provider_mock.verify();
 }
 
@@ -408,8 +450,9 @@ void test_tool_waits_for_committed_output_allowance() {
     auto registered = tools.register_tool({
         .definition = {.name = "test_committed", .description = "Test committed scheduling"},
         .execution_mode = ToolExecutionMode::PARALLEL,
-        .execute = [](const ToolSet &, const provider::ToolCall &call, const ToolExecutionContext &)
-            -> lighter::Task<provider::ToolResult, Error> { co_return provider::ToolResult{.call_id = call.id, .content = "committed"}; },
+        .execute = [](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
+            co_return ToolOutcome{.call_id = call.id, .payload = "committed"};
+        },
     });
     require(registered.has_value(), "failed to register the committed scheduling test tool");
 
@@ -485,6 +528,44 @@ void test_done_requires_terminal_answer() {
     provider_mock.verify();
 }
 
+void test_failed_completed_round_closes_queued_tool_calls() {
+    ToolSet tools(std::filesystem::current_path());
+    auto executions = register_noop_tool(tools);
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [](const provider::History &, const std::vector<provider::ToolDefinition> &,
+           const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            emit_tool_call(callbacks, "truncated-call", "test_noop");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::TRUNCATED, .stop_detail = "output_limit"};
+        });
+    provider_mock.expect<provider::CompactDispatch>().never();
+
+    Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
+    lighter::EventLoop loop;
+    auto task = agent.run_task("handle a truncated tool round", {});
+    loop.schedule(task);
+    loop.run();
+
+    auto task_outcome = task.result();
+    require(task_outcome.has_error(), "failed completed provider round did not fail the task");
+    require(task_outcome.error().message().contains("response truncated"),
+            "failed completed provider round returned the wrong task failure: " + task_outcome.error().message());
+    require(*executions == 0, "failed completed provider round dispatched its queued tool");
+    const auto outcomes = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
+        return std::holds_alternative<session::ToolOutcomes>(entry.payload);
+    });
+    require(outcomes != agent.session.entries.end(), "failed completed provider round left a dangling tool call");
+    const auto &result = std::get<session::ToolOutcomes>(outcomes->payload).outcomes;
+    require(result.size() == 1 && result.front().call_id == "truncated-call" && result.front().kind == ToolOutcomeKind::NOT_STARTED &&
+                result.front().receipt.contains("provider_round_failed"),
+            "failed completed provider round did not record its tool as not started");
+    require(agent.session.validate().has_value(), "failed completed provider round left an incoherent durable session");
+    auto context = agent.context_manifest();
+    require(context && context->provider_history.size() == 3,
+            "failed completed provider round leaked audit-only output into resumable context");
+    provider_mock.verify();
+}
+
 void test_final_phase_does_not_bypass_tool_follow_up() {
     ToolSet tools(std::filesystem::current_path());
     auto tool_executions = register_noop_tool(tools);
@@ -523,12 +604,12 @@ void test_final_phase_does_not_bypass_tool_follow_up() {
     require(premature.phase == provider::MessagePhase::FINAL && premature.parts[0].text == "I found the answer.",
             "terminal-reply projection changed the provider's original message semantics");
     const auto &first_call = std::get<session::ProviderCallCompleted>(agent.session.entries[3].payload);
-    const auto &tool_results = std::get<session::ToolResults>(agent.session.entries[4].payload);
-    const auto &terminal_call = std::get<session::ProviderCallCompleted>(agent.session.entries[6].payload);
+    const auto &tool_results = std::get<session::ToolOutcomes>(agent.session.entries[4].payload);
+    const auto &terminal_call = std::get<session::ProviderCallCompleted>(agent.session.entries[7].payload);
     require(first_call.loop_outcome == session::ProviderCallLoopOutcome::FOLLOW_UP &&
                 terminal_call.loop_outcome == session::ProviderCallLoopOutcome::TERMINAL,
             "provider calls did not record the agent loop's follow-up and terminal decisions");
-    require(tool_results.results.size() == 1 && tool_results.results[0].content == "ok",
+    require(tool_results.outcomes.size() == 1 && tool_results.outcomes[0].payload == "ok",
             "tool-bearing provider call did not retain its tool result before follow-up");
     provider_mock.verify();
 }
@@ -537,11 +618,10 @@ void test_cancelled_task_retains_semantic_progress() {
     ToolSet tools(std::filesystem::current_path());
     auto registered = tools.register_tool({
         .definition = {.name = "test_slow", .description = "Test cancellation"},
-        .execute = [](const ToolSet &, const provider::ToolCall &call,
-                      const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
+        .execute = [](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
             lighter::Event parked;
             co_await parked.wait();
-            co_return provider::ToolResult{.call_id = call.id, .content = "late"};
+            co_return ToolOutcome{.call_id = call.id, .payload = "late"};
         },
     });
     require(registered.has_value(), "failed to register the cancellable test tool");
@@ -572,22 +652,22 @@ void test_cancelled_task_retains_semantic_progress() {
 
     auto outcome = task.result();
     require(outcome.is_cancelled(), "task cancellation did not propagate to the caller");
-    require(agent.session.entries.size() == 6 && std::holds_alternative<session::TaskStarted>(agent.session.entries[0].payload) &&
+    require(agent.session.entries.size() == 7 && std::holds_alternative<session::TaskStarted>(agent.session.entries[0].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
                 std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[2].payload) &&
                 std::get<session::ProviderCallAborted>(agent.session.entries[3].payload).reason ==
                     session::ProviderCallAbortReason::CANCELLED &&
-                std::holds_alternative<session::ToolResults>(agent.session.entries[4].payload) &&
-                std::get<session::ToolResults>(agent.session.entries[4].payload).results.size() == 1 &&
-                std::get<session::ToolResults>(agent.session.entries[4].payload).results[0].call_id == "slow-call" &&
-                std::get<session::ToolResults>(agent.session.entries[4].payload).results[0].is_error &&
-                std::get<session::ToolResults>(agent.session.entries[4].payload).results[0].content.contains("No tool action") &&
-                std::get<session::TaskFinished>(agent.session.entries[5].payload).outcome == session::TaskOutcome::CANCELLED,
+                std::holds_alternative<session::ToolOutcomes>(agent.session.entries[4].payload) &&
+                std::get<session::ToolOutcomes>(agent.session.entries[4].payload).outcomes.size() == 1 &&
+                std::get<session::ToolOutcomes>(agent.session.entries[4].payload).outcomes[0].call_id == "slow-call" &&
+                std::get<session::ToolOutcomes>(agent.session.entries[4].payload).outcomes[0].kind == ToolOutcomeKind::NOT_STARTED &&
+                std::get<session::ToolOutcomes>(agent.session.entries[4].payload).outcomes[0].receipt.contains("provider_call_cancelled") &&
+                std::get<session::ProviderRoundSettled>(agent.session.entries[5].payload).replay == session::ProviderRoundReplay::OMIT &&
+                std::get<session::TaskFinished>(agent.session.entries[6].payload).outcome == session::TaskOutcome::CANCELLED,
             "cancelled task did not retain completed output items and its terminal outcome");
     auto context = agent.context_manifest();
-    require(context && context->provider_history.size() == 6 && context->provider_history.back().role == provider::Role::USER &&
-                std::get<provider::ToolResult>(context->provider_history.back().parts[0]).call_id == "slow-call",
-            "cancelled task projected an unmatched tool call into resumable provider context");
+    require(context && context->provider_history.size() == 3 && context->provider_history.back().role == provider::Role::USER,
+            "cancelled pre-dispatch provider round leaked incomplete output into resumable context");
     provider_mock.verify();
 }
 
@@ -618,12 +698,13 @@ void test_stream_failure_retains_queued_tool_result() {
     const auto &durable_failure = std::get<session::ProviderCallAborted>(agent.session.entries[2].payload).detail;
     require(durable_failure.size() == 4095 && lighter::encoding::utf8::is_valid(durable_failure),
             "durable provider diagnostic split a UTF-8 code point at its byte bound");
-    require(agent.session.entries.size() == 5 && std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
+    require(agent.session.entries.size() == 6 && std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[1].payload) &&
                 std::get<session::ProviderCallAborted>(agent.session.entries[2].payload).reason ==
                     session::ProviderCallAbortReason::FAILED &&
-                std::holds_alternative<session::ToolResults>(agent.session.entries[3].payload) &&
-                std::get<session::ToolResults>(agent.session.entries[3].payload).results.front().call_id == "queued-before-failure" &&
-                std::get<session::TaskFinished>(agent.session.entries[4].payload).outcome == session::TaskOutcome::FAILED,
+                std::holds_alternative<session::ToolOutcomes>(agent.session.entries[3].payload) &&
+                std::get<session::ToolOutcomes>(agent.session.entries[3].payload).outcomes.front().call_id == "queued-before-failure" &&
+                std::get<session::ProviderRoundSettled>(agent.session.entries[4].payload).replay == session::ProviderRoundReplay::OMIT &&
+                std::get<session::TaskFinished>(agent.session.entries[5].payload).outcome == session::TaskOutcome::FAILED,
             "stream failure lost the queued tool call or its synthetic result");
     provider_mock.verify();
 }
@@ -641,8 +722,9 @@ void test_invalid_tool_is_rejected_before_dispatch() {
             }
             require(history.back().role == provider::Role::USER && history.back().parts.size() == 1,
                     "invalid tool call did not produce a model-visible result");
-            const auto *result = std::get_if<provider::ToolResult>(&history.back().parts[0]);
-            require(result && result->call_id == "unknown-call" && result->is_error && result->content.contains("unknown tool"),
+            const auto *result = std::get_if<ToolOutcome>(&history.back().parts[0]);
+            require(result && result->call_id == "unknown-call" && result->kind == ToolOutcomeKind::FAILED &&
+                        result->payload.contains("unknown tool"),
                     "invalid tool result did not describe the pre-dispatch validation failure");
             emit_message(callbacks, "done", "Recovered.");
             co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
@@ -679,28 +761,26 @@ void test_tool_execution_semantics() {
     auto parallel = tools.register_tool({
         .definition = {.name = "test_parallel", .description = "Test parallel scheduling"},
         .execution_mode = ToolExecutionMode::PARALLEL,
-        .execute = [probe](const ToolSet &, const provider::ToolCall &call,
-                           const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
+        .execute = [probe](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
             if (call.id == "trailing") {
                 if (!probe->exclusive_finished) probe->trailing_started_early = true;
-                co_return provider::ToolResult{.call_id = call.id, .content = "parallel"};
+                co_return ToolOutcome{.call_id = call.id, .payload = "parallel"};
             }
             ++probe->running;
             probe->max_running = std::max(probe->max_running, probe->running);
             if (probe->running == k_parallel_calls) probe->parallel_wave_started.set();
             co_await probe->parallel_wave_started.wait();
             --probe->running;
-            co_return provider::ToolResult{.call_id = call.id, .content = "parallel"};
+            co_return ToolOutcome{.call_id = call.id, .payload = "parallel"};
         },
     });
     require(parallel.has_value(), "failed to register the parallel scheduling test tool");
     auto exclusive = tools.register_tool({
         .definition = {.name = "test_exclusive", .description = "Test exclusive scheduling"},
-        .execute = [probe](const ToolSet &, const provider::ToolCall &call,
-                           const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
+        .execute = [probe](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
             probe->exclusive_overlapped = probe->running != 0;
             probe->exclusive_finished = true;
-            co_return provider::ToolResult{.call_id = call.id, .content = "exclusive"};
+            co_return ToolOutcome{.call_id = call.id, .payload = "exclusive"};
         },
     });
     require(exclusive.has_value(), "failed to register the exclusive scheduling test tool");
@@ -739,10 +819,10 @@ void test_tool_execution_semantics() {
     require(!probe->exclusive_overlapped, "an exclusive tool overlapped the preceding parallel wave");
     require(!probe->trailing_started_early, "a parallel tool crossed an exclusive ordering barrier");
     const auto result_entry = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
-        return std::holds_alternative<session::ToolResults>(entry.payload);
+        return std::holds_alternative<session::ToolOutcomes>(entry.payload);
     });
     require(result_entry != agent.session.entries.end(), "tool scheduling task did not retain its result batch");
-    const auto &results = std::get<session::ToolResults>(result_entry->payload).results;
+    const auto &results = std::get<session::ToolOutcomes>(result_entry->payload).outcomes;
     require(results.size() == k_parallel_calls + 2 && results.front().call_id == "parallel-0" &&
                 results[k_parallel_calls - 1].call_id == "parallel-39" && results[k_parallel_calls].call_id == "exclusive" &&
                 results.back().call_id == "trailing",
@@ -792,9 +872,9 @@ void test_automatic_compaction() {
                 std::holds_alternative<ProviderActivityCompleted>(events[1]) && std::holds_alternative<SessionNotice>(events[2]) &&
                 std::holds_alternative<TaskCompleted>(events[3]),
             "automatic compaction emitted the wrong lifecycle events");
-    require(agent.session.entries.size() == 7 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
-                std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[4].payload) &&
-                std::holds_alternative<session::TaskFinished>(agent.session.entries[6].payload),
+    require(agent.session.entries.size() == 11 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[6].payload) &&
+                std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[7].payload) &&
+                std::holds_alternative<session::TaskFinished>(agent.session.entries[10].payload),
             "automatic compaction did not commit a semantic checkpoint with the task");
     provider_mock.verify();
 }
@@ -848,8 +928,8 @@ void test_multiple_automatic_compactions_in_one_task() {
     require(task.result().has_value(), "a task requiring multiple automatic compactions failed");
     require(*compactions == 2, "the long-running task did not compact as often as needed");
     require(*tool_executions == 1, "the compacted task did not execute its tool call");
-    require(agent.session.entries.size() == 11 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
-                std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[7].payload),
+    require(agent.session.entries.size() == 16 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[6].payload) &&
+                std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[11].payload),
             "the task did not commit both automatic checkpoints");
     require(std::ranges::count_if(events, [](const Event &event) { return std::holds_alternative<SessionNotice>(event); }) == 1,
             "multiple automatic compactions must emit one committed-task notice");
@@ -889,7 +969,7 @@ void test_proactive_compaction_uses_reported_context() {
     loop.run();
 
     require(task.result().has_value(), "proactive automatic compaction task failed");
-    require(agent.session.entries.size() == 8 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[4].payload),
+    require(agent.session.entries.size() == 11 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[6].payload),
             "90 percent context usage did not create an automatic checkpoint");
     provider_mock.verify();
 }
@@ -925,7 +1005,7 @@ void test_failed_task_does_not_report_staged_compaction() {
 
     require(outcome.has_error() && outcome.error().detail.contains("context window exhausted"),
             "failed completion did not report context exhaustion");
-    require(agent.session.entries.size() == 6 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[3].payload) &&
+    require(agent.session.entries.size() == 10 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[6].payload) &&
                 std::get<session::TaskFinished>(agent.session.entries.back().payload).outcome == session::TaskOutcome::FAILED,
             "failed task did not retain its resumable semantic progress");
     require(events.empty(), "failed task emitted an assistant-message boundary without an assistant message");
@@ -969,9 +1049,11 @@ i32 run_all() {
     test_long_tool_loop();
     test_tool_output_budget_tracks_model_context();
     test_insufficient_batch_capacity_prevents_tool_dispatch();
+    test_tool_payload_framing_is_reserved_during_planning();
     test_tool_error_results_share_the_output_guard();
     test_tool_waits_for_committed_output_allowance();
     test_done_requires_terminal_answer();
+    test_failed_completed_round_closes_queued_tool_calls();
     test_final_phase_does_not_bypass_tool_follow_up();
     test_cancelled_task_retains_semantic_progress();
     test_stream_failure_retains_queued_tool_result();

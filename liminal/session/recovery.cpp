@@ -14,6 +14,7 @@ struct CallRecovery {
     std::set<std::string> results;
     std::optional<ProviderCallCompleted> completed;
     std::optional<ProviderCallAborted> aborted;
+    bool settled = false;
 };
 
 TaskOutcome recovered_outcome(const std::vector<CallRecovery> &calls) {
@@ -71,9 +72,13 @@ RecoveryResult recover_interrupted(Session &session) {
             find_call(aborted->id).aborted = *aborted;
             continue;
         }
-        if (const auto *results = std::get_if<ToolResults>(&entry->payload); results && results->task_id == *task_id) {
-            auto &call = find_call(results->provider_call_id);
-            for (const auto &result : results->results) call.results.insert(result.call_id);
+        if (const auto *outcomes = std::get_if<ToolOutcomes>(&entry->payload); outcomes && outcomes->task_id == *task_id) {
+            auto &call = find_call(outcomes->provider_call_id);
+            for (const auto &outcome : outcomes->outcomes) call.results.insert(outcome.call_id);
+            continue;
+        }
+        if (const auto *settled = std::get_if<ProviderRoundSettled>(&entry->payload); settled && settled->task_id == *task_id) {
+            find_call(settled->provider_call_id).settled = true;
             continue;
         }
         if (const auto *task_finished = std::get_if<TaskFinished>(&entry->payload); task_finished && task_finished->id == *task_id) {
@@ -83,14 +88,15 @@ RecoveryResult recover_interrupted(Session &session) {
 
     if (!task_id || finished) return recovered;
     for (auto &call : calls) {
-        std::vector<provider::ToolResult> missing;
+        std::vector<ToolOutcome> missing;
         for (const auto &tool : call.tools) {
             if (call.results.contains(tool.id)) continue;
             missing.push_back({
                 .call_id = tool.id,
-                .content = "Tool execution was interrupted before its result became durable. It may have partially or fully occurred; "
-                           "inspect the environment before deciding whether to run it again. It will not be retried automatically.",
-                .is_error = true,
+                .kind = ToolOutcomeKind::OUTCOME_UNKNOWN,
+                .receipt = "reason: process_interrupted",
+                .payload = "Tool execution was interrupted before its outcome became durable. Inspect the environment before deciding "
+                           "whether to run it again; it will not be retried automatically.",
             });
         }
         if (!call.completed && !call.aborted) {
@@ -104,7 +110,16 @@ RecoveryResult recover_interrupted(Session &session) {
         }
         if (!missing.empty()) {
             recovered.unknown_tool_outcomes += missing.size();
-            session.append(ToolResults{.task_id = *task_id, .provider_call_id = call.id, .results = std::move(missing)});
+            session.append(ToolOutcomes{.task_id = *task_id, .provider_call_id = call.id, .outcomes = std::move(missing)});
+        }
+        if (!call.settled) {
+            session.append(ProviderRoundSettled{
+                .task_id = *task_id,
+                .provider_call_id = call.id,
+                .replay = call.completed && !call.aborted && call.completed->loop_outcome != ProviderCallLoopOutcome::FAILED ?
+                              ProviderRoundReplay::REPLAY :
+                              ProviderRoundReplay::OMIT,
+            });
         }
     }
     session.append(TaskFinished{.id = *task_id, .outcome = recovered_outcome(calls)});

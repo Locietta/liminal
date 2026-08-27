@@ -156,7 +156,8 @@ Result<void> Session::validate() const {
                 using T = std::remove_cvref_t<decltype(payload)>;
                 if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>) {
                     maximum_task_id = std::max(maximum_task_id, payload.id.value);
-                } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolResults>) {
+                } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolOutcomes> ||
+                                     std::same_as<T, ProviderRoundSettled>) {
                     maximum_task_id = std::max(maximum_task_id, payload.task_id.value);
                     maximum_provider_call_id = std::max(maximum_provider_call_id, payload.provider_call_id.value);
                 } else if constexpr (std::same_as<T, ProviderCallCompleted> || std::same_as<T, ProviderCallAborted>) {
@@ -171,6 +172,96 @@ Result<void> Session::validate() const {
     }
     if (next_task_id <= maximum_task_id || next_provider_call_id <= maximum_provider_call_id) {
         return lighter::outcome_error(Error::protocol("session lifecycle counters do not follow their durable identifiers"));
+    }
+
+    struct BranchState {
+        std::optional<TaskId> task;
+        std::optional<ProviderCallId> round;
+        std::vector<std::string> calls;
+        std::vector<std::string> outcomes;
+        std::optional<ProviderCallLoopOutcome> completed;
+        bool aborted = false;
+        bool has_outcomes = false;
+    };
+    std::vector<BranchState> states(entries.size() + 1);
+    for (const auto &entry : entries) {
+        auto state = entry.parent_id ? states[entry.parent_id->value] : BranchState{};
+        auto select_round = [&state](ProviderCallId id) -> Result<void> {
+            if (!state.round) {
+                state.round = id;
+            } else if (*state.round != id) {
+                return lighter::outcome_error(Error::protocol("session branch overlaps provider rounds"));
+            }
+            return {};
+        };
+        if (const auto *started = std::get_if<TaskStarted>(&entry.payload)) {
+            if (state.task || state.round) return lighter::outcome_error(Error::protocol("session branch starts an overlapping task"));
+            state.task = started->id;
+        } else if (const auto *output = std::get_if<OutputItemCompleted>(&entry.payload)) {
+            if (!state.task || *state.task != output->task_id) {
+                return lighter::outcome_error(Error::protocol("session branch has provider output outside its active task"));
+            }
+            if (auto selected = select_round(output->provider_call_id); !selected) return selected;
+            if (state.completed || state.aborted) {
+                return lighter::outcome_error(Error::protocol("session branch appends output after provider completion"));
+            }
+            if (const auto *call = std::get_if<provider::ToolCallItem>(&output->item)) state.calls.push_back(call->call.id);
+        } else if (const auto *completed = std::get_if<ProviderCallCompleted>(&entry.payload)) {
+            if (!state.task || *state.task != completed->task_id) {
+                return lighter::outcome_error(Error::protocol("session branch completes a provider round outside its active task"));
+            }
+            if (auto selected = select_round(completed->id); !selected) return selected;
+            if (state.completed || state.aborted) {
+                return lighter::outcome_error(Error::protocol("session branch has multiple provider terminals for one round"));
+            }
+            state.completed = completed->loop_outcome;
+        } else if (const auto *aborted = std::get_if<ProviderCallAborted>(&entry.payload)) {
+            if (!state.task || *state.task != aborted->task_id) {
+                return lighter::outcome_error(Error::protocol("session branch aborts a provider round outside its active task"));
+            }
+            if (auto selected = select_round(aborted->id); !selected) return selected;
+            if (state.completed || state.aborted) {
+                return lighter::outcome_error(Error::protocol("session branch has multiple provider terminals for one round"));
+            }
+            state.aborted = true;
+        } else if (const auto *outcomes = std::get_if<ToolOutcomes>(&entry.payload)) {
+            if (!state.task || *state.task != outcomes->task_id) {
+                return lighter::outcome_error(Error::protocol("session branch has tool outcomes outside its active task"));
+            }
+            if (auto selected = select_round(outcomes->provider_call_id); !selected) return selected;
+            if (state.has_outcomes || (!state.completed && !state.aborted)) {
+                return lighter::outcome_error(Error::protocol("session branch records tool outcomes before a unique provider terminal"));
+            }
+            state.has_outcomes = true;
+            for (const auto &outcome : outcomes->outcomes) state.outcomes.push_back(outcome.call_id);
+        } else if (const auto *settled = std::get_if<ProviderRoundSettled>(&entry.payload)) {
+            if (!state.task || *state.task != settled->task_id) {
+                return lighter::outcome_error(Error::protocol("session branch settles a provider round outside its active task"));
+            }
+            if (auto selected = select_round(settled->provider_call_id); !selected) return selected;
+            if ((!state.completed && !state.aborted) || state.calls != state.outcomes || (state.calls.empty() && state.has_outcomes)) {
+                return lighter::outcome_error(Error::protocol("session branch settles an incoherent provider round"));
+            }
+            if (settled->replay == ProviderRoundReplay::REPLAY &&
+                (!state.completed || state.aborted || *state.completed == ProviderCallLoopOutcome::FAILED)) {
+                return lighter::outcome_error(
+                    Error::protocol("session branch replays a provider round that did not complete successfully"));
+            }
+            state.round.reset();
+            state.calls.clear();
+            state.outcomes.clear();
+            state.completed.reset();
+            state.aborted = false;
+            state.has_outcomes = false;
+        } else if (const auto *finished = std::get_if<TaskFinished>(&entry.payload)) {
+            if (!state.task || *state.task != finished->id || state.round) {
+                return lighter::outcome_error(Error::protocol("session branch finishes an inactive task or unsettled provider round"));
+            }
+            state.task.reset();
+        } else if (std::holds_alternative<ContextCheckpoint>(entry.payload) && (state.task || state.round)) {
+            return lighter::outcome_error(Error::protocol("session branch checkpoints an active task or provider round"));
+        }
+        states[entry.id.value] = std::move(state);
     }
     if (metadata.created_at_ms <= 0 || metadata.updated_at_ms < metadata.created_at_ms) {
         return lighter::outcome_error(Error::protocol("session catalog timestamps are invalid"));
@@ -269,9 +360,13 @@ Result<std::vector<ConversationCheckpoint>> Session::conversation_checkpoints() 
             if (!state.active_task || *state.active_task != aborted->task_id) {
                 return lighter::outcome_error(Error::protocol("conversation branch aborts a provider call outside its active task"));
             }
-        } else if (const auto *results = std::get_if<ToolResults>(&entry.payload)) {
-            if (!state.active_task || *state.active_task != results->task_id) {
-                return lighter::outcome_error(Error::protocol("conversation branch has tool results outside its active task"));
+        } else if (const auto *outcomes = std::get_if<ToolOutcomes>(&entry.payload)) {
+            if (!state.active_task || *state.active_task != outcomes->task_id) {
+                return lighter::outcome_error(Error::protocol("conversation branch has tool outcomes outside its active task"));
+            }
+        } else if (const auto *settled = std::get_if<ProviderRoundSettled>(&entry.payload)) {
+            if (!state.active_task || *state.active_task != settled->task_id) {
+                return lighter::outcome_error(Error::protocol("conversation branch settles a provider round outside its active task"));
             }
         } else if (const auto *finished = std::get_if<TaskFinished>(&entry.payload)) {
             if (!state.active_task || *state.active_task != finished->id) {
@@ -392,7 +487,8 @@ Result<Session> Session::fork_at(ConversationCheckpointId checkpoint) const {
                 using T = std::remove_cvref_t<decltype(value)>;
                 if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>) {
                     value.id = remap_task(value.id);
-                } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolResults>) {
+                } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolOutcomes> ||
+                                     std::same_as<T, ProviderRoundSettled>) {
                     value.task_id = remap_task(value.task_id);
                     value.provider_call_id = remap_call(value.provider_call_id);
                 } else if constexpr (std::same_as<T, ProviderCallCompleted> || std::same_as<T, ProviderCallAborted>) {

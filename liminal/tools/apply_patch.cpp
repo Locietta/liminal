@@ -19,6 +19,7 @@
 
 #include <lighter/async/vocab/outcome.h>
 #include <lighter/codec/json/json.h>
+#include <lighter/encoding/utf8.h>
 
 namespace liminal {
 
@@ -186,8 +187,8 @@ Result<std::vector<PatchOperation>> parse_patch(std::string_view raw) {
     return operations;
 }
 
-std::filesystem::path resolve_path(const ToolSet &tools, const std::filesystem::path &path) {
-    return path.is_absolute() ? path.lexically_normal() : (tools.working_directory / path).lexically_normal();
+std::filesystem::path resolve_path(const std::filesystem::path &working_directory, const std::filesystem::path &path) {
+    return path.is_absolute() ? path.lexically_normal() : (working_directory / path).lexically_normal();
 }
 
 Result<std::string> read_text_file(const std::filesystem::path &path) {
@@ -344,13 +345,14 @@ struct PreparedChange {
     std::string content;
 };
 
-Result<std::vector<PreparedChange>> prepare_changes(const ToolSet &tools, const std::vector<PatchOperation> &operations) {
+Result<std::vector<PreparedChange>> resolve_changes(const std::filesystem::path &working_directory,
+                                                    const std::vector<PatchOperation> &operations) {
     std::map<std::filesystem::path, bool> touched;
     std::vector<PreparedChange> changes;
     changes.reserve(operations.size());
     for (const auto &operation : operations) {
-        const auto source = resolve_path(tools, operation.path);
-        const auto destination = operation.move_path ? resolve_path(tools, *operation.move_path) : source;
+        const auto source = resolve_path(working_directory, operation.path);
+        const auto destination = operation.move_path ? resolve_path(working_directory, *operation.move_path) : source;
         if (touched.contains(source) || (destination != source && touched.contains(destination))) {
             return outcome_error(Error::tool("patch touches a path more than once: '" + operation.path.string() + "'"));
         }
@@ -387,21 +389,20 @@ Result<std::vector<PreparedChange>> prepare_changes(const ToolSet &tools, const 
     return changes;
 }
 
-std::string change_report(const std::vector<PreparedChange> &changes, const ToolSet &tools) {
+std::string report_path(const std::filesystem::path &path) { return path.lexically_normal().generic_string(); }
+
+std::string change_report(const std::vector<PatchOperation> &operations) {
     std::string result = "Done!";
-    for (const auto &change : changes) {
-        std::error_code error;
-        if (change.kind == PatchKind::DELETE_FILE) {
-            const auto relative = std::filesystem::relative(change.source, tools.working_directory, error);
-            result += "\nDeleted: " + (error ? change.source : relative).generic_string();
+    for (const auto &operation : operations) {
+        if (operation.kind == PatchKind::DELETE_FILE) {
+            result += "\nDeleted: " + report_path(operation.path);
             continue;
         }
-        if (change.destination != change.source) {
-            result += "\nMoved: " + change.source.generic_string() + " -> " + change.destination.generic_string();
+        if (operation.move_path) {
+            result += "\nMoved: " + report_path(operation.path) + " -> " + report_path(*operation.move_path);
         } else {
-            result += change.kind == PatchKind::ADD_FILE ? "\nAdded: " : "\nUpdated: ";
-            const auto relative = std::filesystem::relative(change.destination, tools.working_directory, error);
-            result += (error ? change.destination : relative).generic_string();
+            result += operation.kind == PatchKind::ADD_FILE ? "\nAdded: " : "\nUpdated: ";
+            result += report_path(operation.path);
         }
     }
     return result;
@@ -426,36 +427,43 @@ Result<void> apply_changes(const std::vector<PreparedChange> &changes) {
     return {};
 }
 
-Task<provider::ToolResult, Error> execute_apply_patch(const ToolSet &tools, const provider::ToolCall &call,
-                                                      const ToolExecutionContext &context) {
+Result<PreparedToolExecution> prepare_apply_patch(const ToolSet &tools, const provider::ToolCall &call) {
     auto encoded = json::to_string(call.input);
-    if (!encoded) co_await lighter::fail(Error::json(std::move(encoded).error(), "tool input re-encode"));
+    if (!encoded) return outcome_error(Error::json(std::move(encoded).error(), "tool input re-encode"));
     auto parsed = json::parse<ApplyPatchInput>(*encoded);
-    if (!parsed) co_await lighter::fail(Error::json(std::move(parsed).error(), "tool input"));
+    if (!parsed) return outcome_error(Error::json(std::move(parsed).error(), "tool input"));
     auto input = *std::move(parsed);
-    provider::ToolResult result{.call_id = call.id};
     auto operations = parse_patch(input.patch);
-    if (!operations) {
-        result.content = "Error: " + operations.error().message();
-        result.is_error = true;
-        co_return result;
-    }
-    auto changes = prepare_changes(tools, *operations);
-    if (!changes) {
-        result.content = "Error: " + changes.error().message();
-        result.is_error = true;
-        co_return result;
-    }
-    result.content = change_report(*changes, tools);
-    sanitize_tool_result(result, context.max_output_bytes);
-    if (result.is_error) {
-        result.content = "Error: insufficient output capacity; compact first";
-        co_return result;
-    }
-    auto applied = apply_changes(*changes);
-    if (!applied) result.content = "Error: " + applied.error().message();
-    result.is_error = !applied;
-    co_return result;
+    if (!operations) return outcome_error(std::move(operations).error());
+    auto report = lighter::encoding::utf8::sanitize(change_report(*operations));
+    constexpr std::string_view preparation_failure_receipt = "reason: apply_failed\nside_effects: none";
+    constexpr std::string_view failure_receipt = "reason: apply_failed\nside_effects: may_be_partial";
+    const auto receipt_bytes = std::max({report.size(), preparation_failure_receipt.size(), failure_receipt.size()});
+    return PreparedToolExecution{
+        .receipt_bytes = receipt_bytes,
+        .execute = [call_id = call.id, working_directory = tools.working_directory, operations = *std::move(operations),
+                    report = std::move(report)](ToolOutputGrant) mutable -> Task<ToolOutcome, Error> {
+            auto changes = resolve_changes(working_directory, operations);
+            if (!changes) {
+                co_return ToolOutcome{
+                    .call_id = std::move(call_id),
+                    .kind = ToolOutcomeKind::FAILED,
+                    .receipt = "reason: apply_failed\nside_effects: none",
+                    .payload = std::string(changes.error().message()),
+                };
+            }
+            auto applied = apply_changes(*changes);
+            if (!applied) {
+                co_return ToolOutcome{
+                    .call_id = std::move(call_id),
+                    .kind = ToolOutcomeKind::FAILED,
+                    .receipt = "reason: apply_failed\nside_effects: may_be_partial",
+                    .payload = std::string(applied.error().message()),
+                };
+            }
+            co_return ToolOutcome{.call_id = std::move(call_id), .receipt = std::move(report)};
+        },
+    };
 }
 
 ToolCallPresentation describe_apply_patch(const provider::ToolCall &) { return {.description = "Apply patch"}; }
@@ -476,14 +484,7 @@ ToolRegistration make_apply_patch_tool() {
                                  .required = {"patch"}},
             },
         .execution_mode = ToolExecutionMode::EXCLUSIVE,
-        .validate = [](const provider::ToolCall &call) -> Result<void> {
-            auto encoded = json::to_string(call.input);
-            if (!encoded) return lighter::outcome_error(Error::json(std::move(encoded).error(), "tool input re-encode"));
-            auto parsed = json::parse<ApplyPatchInput>(*encoded);
-            if (!parsed) return lighter::outcome_error(Error::json(std::move(parsed).error(), "tool input"));
-            return {};
-        },
-        .execute = execute_apply_patch,
+        .prepare = prepare_apply_patch,
         .describe = describe_apply_patch,
     };
 }

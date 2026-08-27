@@ -52,28 +52,95 @@ struct UsageBaseline {
 
 usize to_usize(u64 value) { return static_cast<usize>(std::min<u64>(value, std::numeric_limits<usize>::max())); }
 
-void append_entry(provider::History &history, const session::SessionEntry &entry, std::optional<UsageBaseline> *baseline = nullptr) {
-    std::visit(
-        [&history, baseline](const auto &payload) {
-            using T = std::remove_cvref_t<decltype(payload)>;
-            if constexpr (std::same_as<T, session::TaskStarted>) {
-                provider::append_user(history, payload.text);
-            } else if constexpr (std::same_as<T, session::OutputItemCompleted>) {
-                provider::append_output_item(history, payload.item);
-            } else if constexpr (std::same_as<T, session::ProviderCallCompleted>) {
-                if (baseline && payload.completion.usage.context_tokens != 0) {
-                    *baseline =
-                        UsageBaseline{.history_size = history.size(), .context_tokens = to_usize(payload.completion.usage.context_tokens)};
-                }
-            } else if constexpr (std::same_as<T, session::ToolResults>) {
-                provider::append_tool_results(history, payload.results);
-            } else if constexpr (std::same_as<T, session::ContextCheckpoint>) {
-                for (const auto &item : payload.items) {
-                    append_checkpoint_item(history, item);
-                }
+struct PendingRound {
+    std::optional<session::ProviderCallId> id;
+    std::vector<provider::OutputItem> output;
+    std::optional<session::ProviderCallCompleted> completed;
+    std::optional<session::ProviderCallAborted> aborted;
+    std::optional<session::ToolOutcomes> outcomes;
+};
+
+Result<void> check_round_id(PendingRound &round, session::ProviderCallId id) {
+    if (!round.id) {
+        round.id = id;
+    } else if (*round.id != id) {
+        return lighter::outcome_error(Error::protocol("provider rounds overlap in session history"));
+    }
+    return {};
+}
+
+Result<void> replay_round(provider::History &history, PendingRound &round, std::span<const ToolOutcome> projected,
+                          std::optional<UsageBaseline> *baseline) {
+    if (!round.completed || round.aborted) {
+        return lighter::outcome_error(Error::protocol("replayed provider round did not complete successfully"));
+    }
+    std::vector<std::string_view> calls;
+    for (const auto &item : round.output) {
+        if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) calls.push_back(call->call.id);
+    }
+    const auto outcomes = round.outcomes ? std::span<const ToolOutcome>(round.outcomes->outcomes) : projected;
+    if (calls.size() != outcomes.size()) {
+        return lighter::outcome_error(Error::protocol("replayed provider round does not have exactly one outcome per tool call"));
+    }
+    for (usize index = 0; index < calls.size(); ++index) {
+        if (calls[index] != outcomes[index].call_id) {
+            return lighter::outcome_error(Error::protocol("replayed provider round tool outcomes are missing, duplicated, or reordered"));
+        }
+    }
+    for (const auto &item : round.output) provider::append_output_item(history, item);
+    if (baseline && round.completed->completion.usage.context_tokens != 0) {
+        *baseline =
+            UsageBaseline{.history_size = history.size(), .context_tokens = to_usize(round.completed->completion.usage.context_tokens)};
+    }
+    if (!outcomes.empty()) provider::append_tool_outcomes(history, std::vector<ToolOutcome>(outcomes.begin(), outcomes.end()));
+    return {};
+}
+
+Result<void> project_entries(provider::History &history, std::span<const session::SessionEntry *const> entries,
+                             std::span<const ToolOutcome> projected, std::optional<UsageBaseline> *baseline = nullptr) {
+    PendingRound round;
+    for (const auto *entry : entries) {
+        if (const auto *started = std::get_if<session::TaskStarted>(&entry->payload)) {
+            if (round.id) return lighter::outcome_error(Error::protocol("task boundary splits an unsettled provider round"));
+            provider::append_user(history, started->text);
+        } else if (const auto *output = std::get_if<session::OutputItemCompleted>(&entry->payload)) {
+            if (auto valid = check_round_id(round, output->provider_call_id); !valid) return valid;
+            round.output.push_back(output->item);
+        } else if (const auto *completed = std::get_if<session::ProviderCallCompleted>(&entry->payload)) {
+            if (auto valid = check_round_id(round, completed->id); !valid) return valid;
+            if (round.completed || round.aborted) {
+                return lighter::outcome_error(Error::protocol("provider round has multiple remote terminal entries"));
             }
-        },
-        entry.payload);
+            round.completed = *completed;
+        } else if (const auto *aborted = std::get_if<session::ProviderCallAborted>(&entry->payload)) {
+            if (auto valid = check_round_id(round, aborted->id); !valid) return valid;
+            if (round.completed || round.aborted) {
+                return lighter::outcome_error(Error::protocol("provider round has multiple remote terminal entries"));
+            }
+            round.aborted = *aborted;
+        } else if (const auto *outcomes = std::get_if<session::ToolOutcomes>(&entry->payload)) {
+            if (auto valid = check_round_id(round, outcomes->provider_call_id); !valid) return valid;
+            if (round.outcomes) return lighter::outcome_error(Error::protocol("provider round has multiple tool outcome entries"));
+            round.outcomes = *outcomes;
+        } else if (const auto *settled = std::get_if<session::ProviderRoundSettled>(&entry->payload)) {
+            if (auto valid = check_round_id(round, settled->provider_call_id); !valid) return valid;
+            if (settled->replay == session::ProviderRoundReplay::REPLAY) {
+                if (auto replayed = replay_round(history, round, {}, baseline); !replayed) return replayed;
+            }
+            round = {};
+        } else if (const auto *checkpoint = std::get_if<session::ContextCheckpoint>(&entry->payload)) {
+            if (round.id) return lighter::outcome_error(Error::protocol("checkpoint splits an unsettled provider round"));
+            for (const auto &item : checkpoint->items) append_checkpoint_item(history, item);
+        } else if (std::holds_alternative<session::TaskFinished>(entry->payload) && round.id) {
+            return lighter::outcome_error(Error::protocol("task finished with an unsettled provider round"));
+        }
+    }
+    if (!round.id) {
+        if (!projected.empty()) return lighter::outcome_error(Error::protocol("projected tool outcomes have no provisional round"));
+        return {};
+    }
+    if (projected.empty()) return lighter::outcome_error(Error::protocol("session history ends with an unsettled provider round"));
+    return replay_round(history, round, projected, baseline);
 }
 
 bool starts_semantic_task(const session::SessionEntry &entry) {
@@ -98,8 +165,8 @@ usize part_bytes(const provider::Part &part) {
             } else if constexpr (std::same_as<T, provider::ToolCall>) {
                 auto input = lighter::codec::json::to_string(value.input);
                 return value.id.size() + value.name.size() + (input ? input->size() : 0);
-            } else if constexpr (std::same_as<T, provider::ToolResult>) {
-                return value.call_id.size() + value.content.size();
+            } else if constexpr (std::same_as<T, ToolOutcome>) {
+                return value.call_id.size() + render_tool_outcome(value).size();
             } else if constexpr (std::same_as<T, provider::OpaquePart>) {
                 return value.provider_tag.size() + value.payload.size();
             }
@@ -128,7 +195,7 @@ ContextUsage estimate_usage(const provider::History &history, const ContextBudge
             const auto bytes = part_bytes(part);
             if (item_index < instruction_count) {
                 usage.instruction_bytes += bytes;
-            } else if (std::holds_alternative<provider::ToolCall>(part) || std::holds_alternative<provider::ToolResult>(part)) {
+            } else if (std::holds_alternative<provider::ToolCall>(part) || std::holds_alternative<ToolOutcome>(part)) {
                 usage.tool_bytes += bytes;
             } else if (std::holds_alternative<provider::OpaquePart>(part)) {
                 usage.opaque_bytes += bytes;
@@ -185,15 +252,10 @@ void append_entry_ids(std::string &description, std::span<const session::EntryId
     description += "]";
 }
 
-void append_projected_tool_results(provider::History &history, std::span<const provider::ToolResult> results) {
-    if (results.empty()) return;
-    provider::append_tool_results(history, std::vector<provider::ToolResult>(results.begin(), results.end()));
-}
-
 } // namespace
 
 Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource> sources, const session::Session &session,
-                                              ContextBudget budget, std::span<const provider::ToolResult> projected_tool_results) const {
+                                              ContextBudget budget, std::span<const ToolOutcome> projected_tool_outcomes) const {
     std::vector<InstructionSource> ordered(sources.begin(), sources.end());
     std::stable_sort(ordered.begin(), ordered.end(),
                      [](const auto &left, const auto &right) { return authority_rank(left.authority) < authority_rank(right.authority); });
@@ -243,10 +305,9 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
         for (auto unit = unit_starts.rbegin(); unit != unit_starts.rend(); ++unit) {
             auto candidate = instruction_history;
             std::optional<UsageBaseline> baseline;
-            for (usize index = *unit; index < branch.size(); ++index) {
-                append_entry(candidate, *branch[index], *unit == start ? &baseline : nullptr);
-            }
-            append_projected_tool_results(candidate, projected_tool_results);
+            auto replayed =
+                project_entries(candidate, std::span(branch).subspan(*unit), projected_tool_outcomes, *unit == start ? &baseline : nullptr);
+            if (!replayed) return lighter::outcome_error(std::move(replayed).error());
             const auto candidate_usage = estimate_usage(candidate, budget, baseline);
             if (*candidate_usage.remaining_input_tokens < 0) {
                 if (unit == unit_starts.rbegin()) {
@@ -264,11 +325,10 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
     manifest.provider_history = std::move(instruction_history);
     manifest.provider_history.reserve(manifest.provider_history.size() + branch.size() - selected_start);
     std::optional<UsageBaseline> baseline;
-    for (usize index = selected_start; index < branch.size(); ++index) {
-        manifest.session_entries.push_back(branch[index]->id);
-        append_entry(manifest.provider_history, *branch[index], selected_start == start ? &baseline : nullptr);
-    }
-    append_projected_tool_results(manifest.provider_history, projected_tool_results);
+    for (usize index = selected_start; index < branch.size(); ++index) manifest.session_entries.push_back(branch[index]->id);
+    auto replayed = project_entries(manifest.provider_history, std::span(branch).subspan(selected_start), projected_tool_outcomes,
+                                    selected_start == start ? &baseline : nullptr);
+    if (!replayed) return lighter::outcome_error(std::move(replayed).error());
     manifest.usage = estimate_usage(manifest.provider_history, manifest.budget, baseline);
     return manifest;
 }

@@ -316,10 +316,10 @@ Result<WireInput> to_wire(const provider::History &history) {
                     return outcome_error(std::move(function).error());
                 }
                 items.push_back(*std::move(function));
-            } else if (const auto *result = std::get_if<provider::ToolResult>(&part)) {
+            } else if (const auto *result = std::get_if<ToolOutcome>(&part)) {
                 if (instruction) return outcome_error(Error::protocol("instruction messages may contain only text"));
                 flush_message();
-                items.push_back(wire::FunctionCallOutputItem{.call_id = result->call_id, .output = result->content});
+                items.push_back(wire::FunctionCallOutputItem{.call_id = result->call_id, .output = render_tool_outcome(*result)});
             } else if (const auto *opaque = std::get_if<provider::OpaquePart>(&part)) {
                 if (instruction) return outcome_error(Error::protocol("instruction messages may contain only text"));
                 if (opaque->provider_tag != k_provider_tag) {
