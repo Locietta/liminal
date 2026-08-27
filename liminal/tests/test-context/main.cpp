@@ -254,6 +254,27 @@ void test_reported_usage_accounts_for_trailing_context() {
             "context inspection omitted its reported usage baseline");
 }
 
+void test_projected_tool_results_charge_exact_envelope_overhead() {
+    session::Session session_log;
+    const auto task_id = session_log.start_task("use tools");
+    append_tool_call(session_log, task_id, "call0001", "first");
+    append_tool_call(session_log, task_id, "call0002", "second");
+    session_log.append(session::ProviderCallCompleted{
+        .task_id = task_id,
+        .id = {.value = 1},
+        .completion = {.usage = {.context_tokens = 100}},
+    });
+    const std::vector<provider::ToolResult> empty_results{{.call_id = "call0001"}, {.call_id = "call0002"}};
+
+    auto base = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 1'000});
+    auto projected = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 1'000}, empty_results);
+
+    require(base && projected && projected->usage.estimated_input_tokens == base->usage.estimated_input_tokens + 12 &&
+                projected->usage.tool_bytes == base->usage.tool_bytes + 16 &&
+                projected->provider_history.size() == base->provider_history.size() + 1,
+            "projected tool results must charge call IDs, part overhead, and their enclosing history item");
+}
+
 i32 run_all() {
     test_resolution_order_scope_and_determinism();
     test_workspace_boundary();
@@ -263,6 +284,7 @@ i32 run_all() {
     test_manifest_deduplication_and_redacted_description();
     test_bounded_selection_keeps_complete_recent_tasks();
     test_reported_usage_accounts_for_trailing_context();
+    test_projected_tool_results_charge_exact_envelope_overhead();
     return 0;
 }
 

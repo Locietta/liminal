@@ -185,10 +185,15 @@ void append_entry_ids(std::string &description, std::span<const session::EntryId
     description += "]";
 }
 
+void append_projected_tool_results(provider::History &history, std::span<const provider::ToolResult> results) {
+    if (results.empty()) return;
+    provider::append_tool_results(history, std::vector<provider::ToolResult>(results.begin(), results.end()));
+}
+
 } // namespace
 
 Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource> sources, const session::Session &session,
-                                              ContextBudget budget) const {
+                                              ContextBudget budget, std::span<const provider::ToolResult> projected_tool_results) const {
     std::vector<InstructionSource> ordered(sources.begin(), sources.end());
     std::stable_sort(ordered.begin(), ordered.end(),
                      [](const auto &left, const auto &right) { return authority_rank(left.authority) < authority_rank(right.authority); });
@@ -241,6 +246,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
             for (usize index = *unit; index < branch.size(); ++index) {
                 append_entry(candidate, *branch[index], *unit == start ? &baseline : nullptr);
             }
+            append_projected_tool_results(candidate, projected_tool_results);
             const auto candidate_usage = estimate_usage(candidate, budget, baseline);
             if (*candidate_usage.remaining_input_tokens < 0) {
                 if (unit == unit_starts.rbegin()) {
@@ -262,6 +268,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
         manifest.session_entries.push_back(branch[index]->id);
         append_entry(manifest.provider_history, *branch[index], selected_start == start ? &baseline : nullptr);
     }
+    append_projected_tool_results(manifest.provider_history, projected_tool_results);
     manifest.usage = estimate_usage(manifest.provider_history, manifest.budget, baseline);
     return manifest;
 }

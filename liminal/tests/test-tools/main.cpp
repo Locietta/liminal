@@ -11,6 +11,7 @@
 
 #include <lighter/async/io/loop.h>
 #include <lighter/async/runtime/when.h>
+#include <lighter/encoding/utf8.h>
 #include <lighter/types.hpp>
 
 #include <liminal/provider/common.h>
@@ -37,9 +38,9 @@ provider::ToolCall make_call(std::string id, std::string name, std::string_view 
     };
 }
 
-Result<provider::ToolResult> execute(ToolSet &tools, provider::ToolCall call) {
+Result<provider::ToolResult> execute(ToolSet &tools, provider::ToolCall call, ToolExecutionContext context = {}) {
     lighter::EventLoop loop;
-    auto task = tools.execute(call);
+    auto task = tools.execute(call, context);
     loop.schedule(task);
     loop.run();
     return task.result();
@@ -48,15 +49,21 @@ Result<provider::ToolResult> execute(ToolSet &tools, provider::ToolCall call) {
 void test_tools_are_available_by_default() {
     ToolSet tools(std::filesystem::current_path() / "liminal");
     auto definitions = tools.definitions();
-    require(definitions.size() == 6 && definitions[0].name == "read_file" && definitions[1].name == "apply_patch" &&
-                definitions[2].name == "exec_command" && definitions[3].name == "write_stdin" &&
-                definitions[4].kind == provider::ToolKind::WEB_SEARCH && definitions[5].kind == provider::ToolKind::WEB_FETCH,
+    require(definitions.size() == 7 && definitions[0].name == "read_file" && definitions[1].name == "read_file_bytes" &&
+                definitions[2].name == "apply_patch" && definitions[3].name == "exec_command" && definitions[4].name == "write_stdin" &&
+                definitions[5].kind == provider::ToolKind::WEB_SEARCH && definitions[6].kind == provider::ToolKind::WEB_FETCH,
             "default tools must include file reading, patch editing, interactive shell execution, and hosted web access");
-    const auto &write_stdin = definitions[3];
+    const auto &write_stdin = definitions[4];
     require(write_stdin.input_schema.properties.at("session_id").type == "integer" && write_stdin.input_schema.required.size() == 1 &&
                 write_stdin.input_schema.required.front() == "session_id",
             "write_stdin must require the numeric session ID returned by exec_command");
+    require(definitions[0].input_schema.properties.contains("offset") && definitions[0].input_schema.properties.contains("limit") &&
+                !definitions[0].input_schema.properties.contains("byte_offset") &&
+                definitions[1].input_schema.properties.contains("byte_offset") &&
+                !definitions[1].input_schema.properties.contains("offset"),
+            "line and byte ranges must be exposed by separate file reading tools");
     require(tools.execution_mode("read_file") == ToolExecutionMode::PARALLEL &&
+                tools.execution_mode("read_file_bytes") == ToolExecutionMode::PARALLEL &&
                 tools.execution_mode("exec_command") == ToolExecutionMode::PARALLEL &&
                 tools.execution_mode("write_stdin") == ToolExecutionMode::PARALLEL &&
                 tools.execution_mode("apply_patch") == ToolExecutionMode::EXCLUSIVE &&
@@ -71,15 +78,19 @@ void test_tools_are_available_by_default() {
     require(command.has_value() && command->call_id == "command" && !command->is_error && command->content.contains("exit_code: 0") &&
                 command->content.contains("output:\n"),
             "exec_command must execute a short command without an opt-in mode");
+    auto insufficient =
+        execute(tools, make_call("insufficient", "exec_command", R"({"cmd":"echo should-not-run"})"), {.max_output_bytes = 128});
+    require(insufficient && insufficient->is_error && insufficient->content.contains("compact first") &&
+                !insufficient->content.contains("session_id"),
+            "exec_command must reject insufficient output capacity before creating an undisclosable session");
 }
 
 void test_tool_registry_dispatches_extensions() {
     ToolSet tools(std::filesystem::current_path());
     auto registered = tools.register_tool({
         .definition = {.name = "echo_extension", .description = "Test extension"},
-        .execute = [](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
-            co_return provider::ToolResult{.call_id = call.id, .content = "extended"};
-        },
+        .execute = [](const ToolSet &, const provider::ToolCall &call, const ToolExecutionContext &)
+            -> lighter::Task<provider::ToolResult, Error> { co_return provider::ToolResult{.call_id = call.id, .content = "extended"}; },
     });
     require(registered.has_value(), "tool registry rejected a valid extension");
     require(tools.execution_mode("echo_extension") == ToolExecutionMode::EXCLUSIVE,
@@ -88,11 +99,37 @@ void test_tool_registry_dispatches_extensions() {
     auto result = execute(tools, make_call("extension", "echo_extension", R"({})"));
     require(result.has_value() && result->content == "extended", "tool registry did not dispatch an extension");
 
+    auto bounded_registered = tools.register_tool({
+        .definition = {.name = "large_extension"},
+        .execute = [](const ToolSet &, const provider::ToolCall &call,
+                      const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
+            co_return provider::ToolResult{.call_id = call.id, .content = std::string(128 * 1024, 'x')};
+        },
+    });
+    require(bounded_registered.has_value(), "tool registry rejected the bounded-output test extension");
+    auto bounded = execute(tools, make_call("bounded", "large_extension", R"({})"), {.max_output_bytes = 128});
+    require(bounded.has_value() && bounded->is_error && bounded->content.size() <= 128 && bounded->content.contains("truncated"),
+            "ToolSet must enforce the execution output budget for extension tools");
+    auto ceiling = execute(tools, make_call("ceiling", "large_extension", R"({})"), {.max_output_bytes = 128 * 1024});
+    require(ceiling.has_value() && ceiling->is_error && ceiling->content.size() == k_max_tool_output_bytes,
+            "ToolSet must enforce the absolute local-tool output ceiling");
+
+    auto invalid_registered = tools.register_tool({
+        .definition = {.name = "invalid_utf8_extension"},
+        .execute = [](const ToolSet &, const provider::ToolCall &call,
+                      const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
+            co_return provider::ToolResult{.call_id = call.id, .content = std::string("\xf0\x9f", 2)};
+        },
+    });
+    require(invalid_registered.has_value(), "failed to register invalid UTF-8 extension fixture");
+    auto sanitized = execute(tools, make_call("sanitize", "invalid_utf8_extension", R"({})"));
+    require(sanitized && lighter::encoding::utf8::is_valid(sanitized->content),
+            "ToolSet must sanitize every successful local result even when it is under budget");
+
     auto duplicate = tools.register_tool({
         .definition = {.name = "echo_extension"},
-        .execute = [](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
-            co_return provider::ToolResult{.call_id = call.id};
-        },
+        .execute = [](const ToolSet &, const provider::ToolCall &call, const ToolExecutionContext &)
+            -> lighter::Task<provider::ToolResult, Error> { co_return provider::ToolResult{.call_id = call.id}; },
     });
     require(!duplicate && duplicate.error().detail.contains("duplicate"), "tool registry must reject duplicate names");
 }
@@ -122,41 +159,83 @@ void test_tool_presentations_are_specific_and_bounded() {
 }
 
 void test_read_file_is_bounded_and_regular() {
-    constexpr usize k_file_limit = 128 * 1024;
+    constexpr usize k_read_payload_limit = k_max_tool_output_bytes - 256;
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto directory = std::filesystem::temp_directory_path() / ("liminal-tools-" + std::to_string(nonce));
     std::filesystem::create_directories(directory / "folder");
     {
         std::ofstream output(directory / "large.txt", std::ios::binary);
-        output << std::string(k_file_limit + 4096, 'x');
+        output << std::string(2 * 1024 * 1024, 'x');
         require(static_cast<bool>(output), "failed to create the large read_file fixture");
     }
 
     ToolSet tools(directory);
-    auto large = execute(tools, make_call("large", "read_file", R"({"path":"large.txt"})"));
-    require(large.has_value() && !large->is_error && large->content.starts_with(std::string(k_file_limit, 'x')) &&
-                large->content.ends_with("[truncated after 131072 bytes; next offset 131072]"),
-            "read_file did not return a bounded prefix for a large file");
+    auto large = execute(tools, make_call("large", "read_file_bytes", R"({"path":"large.txt"})"));
+    require(large.has_value() && !large->is_error && large->content.size() <= k_max_tool_output_bytes &&
+                large->content.starts_with(std::string(k_read_payload_limit, 'x')) &&
+                large->content.ends_with("[truncated after 65280 bytes; next byte_offset 65280]"),
+            "read_file_bytes did not return a bounded prefix for a large file");
 
     {
         std::ofstream output(directory / "lines.txt", std::ios::binary);
         output << "one\r\ntwo\r\nthree\r\nfour\r\n";
     }
-    auto lines = execute(tools, make_call("lines", "read_file", R"({"path":"lines.txt","line_start":2,"line_end":3})"));
-    require(lines.has_value() && !lines->is_error && lines->content == "two\nthree\n",
-            "read_file must support one-based inclusive line ranges and normalize CRLF");
+    auto whole = execute(tools, make_call("whole", "read_file", R"({"path":"lines.txt"})"));
+    require(whole.has_value() && !whole->is_error && whole->content == "one\ntwo\nthree\nfour\n",
+            "read_file must use normalized line-oriented reads by default");
 
-    auto bytes = execute(tools, make_call("bytes", "read_file", R"({"path":"lines.txt","offset":5,"limit":3})"));
-    require(bytes.has_value() && !bytes->is_error && bytes->content.starts_with("two") && bytes->content.contains("next offset 8"),
-            "read_file must support resumable byte ranges");
+    auto lines = execute(tools, make_call("lines", "read_file", R"({"path":"lines.txt","offset":2,"limit":2})"));
+    require(lines.has_value() && !lines->is_error && lines->content.starts_with("two\nthree\n") &&
+                lines->content.ends_with("[line limit reached before line 4; continue with offset 4]"),
+            "read_file must support conventional one-based offset and line-count ranges with resumable output");
 
-    auto mixed = execute(tools, make_call("mixed", "read_file", R"({"path":"lines.txt","offset":0,"line_start":1})"));
-    require(mixed.has_value() && mixed->is_error && mixed->content.contains("cannot be combined"),
-            "read_file must reject ambiguous mixed ranges");
+    auto bytes = execute(tools, make_call("bytes", "read_file_bytes", R"({"path":"lines.txt","byte_offset":5,"byte_count":3})"));
+    require(bytes.has_value() && !bytes->is_error && bytes->content.starts_with("two") && bytes->content.contains("next byte_offset 8"),
+            "read_file_bytes must support resumable byte ranges");
 
-    auto empty = execute(tools, make_call("empty", "read_file", R"({"path":"lines.txt","limit":0})"));
+    {
+        std::ofstream output(directory / "utf8.txt", std::ios::binary);
+        output << "A\xf0\x9f\x98\x80Z";
+    }
+    auto aligned = execute(tools, make_call("aligned", "read_file_bytes", R"({"path":"utf8.txt","byte_count":3})"));
+    require(aligned && !aligned->is_error && aligned->content.starts_with("A\n... [truncated after 1 bytes") &&
+                lighter::encoding::utf8::is_valid(aligned->content),
+            "read_file_bytes must end chunks at a complete UTF-8 prefix");
+    auto resumed = execute(tools, make_call("resumed", "read_file_bytes", R"({"path":"utf8.txt","byte_offset":1,"byte_count":4})"));
+    require(resumed && !resumed->is_error && resumed->content.starts_with("\xf0\x9f\x98\x80") &&
+                resumed->content.contains("next byte_offset 5") && lighter::encoding::utf8::is_valid(resumed->content),
+            "read_file_bytes must resume on a UTF-8 boundary");
+    auto misaligned = execute(tools, make_call("misaligned", "read_file_bytes", R"({"path":"utf8.txt","byte_offset":2,"byte_count":3})"));
+    require(misaligned && misaligned->is_error && misaligned->content.contains("falls inside a UTF-8 code point"),
+            "read_file_bytes must reject a starting offset inside a UTF-8 code point");
+    auto insufficient = execute(tools, make_call("insufficient", "read_file_bytes", R"({"path":"utf8.txt"})"), {.max_output_bytes = 128});
+    require(insufficient && insufficient->is_error && insufficient->content.contains("compact first") &&
+                !insufficient->content.contains("next byte_offset"),
+            "read_file_bytes must reject a budget that cannot advance its byte cursor");
+
+    auto obsolete_range = tools.validate(make_call("old-range", "read_file", R"({"path":"lines.txt","line_start":2})"));
+    require(!obsolete_range, "read_file must reject obsolete line range parameter names");
+
+    auto empty = execute(tools, make_call("empty", "read_file_bytes", R"({"path":"lines.txt","byte_count":0})"));
     require(empty.has_value() && empty->is_error && empty->content.contains("at least 1"),
-            "read_file must reject a zero byte limit that cannot advance a resumed read");
+            "read_file_bytes must reject a byte count that cannot advance a resumed read");
+
+    auto missing_path = tools.validate(make_call("missing-path", "read_file", R"({})"));
+    require(!missing_path && missing_path.error().message().contains("path must not be empty"),
+            "read_file must reject a missing path before dispatch");
+
+    auto zero_offset = tools.validate(make_call("zero-offset", "read_file", R"({"path":"lines.txt","offset":0})"));
+    require(!zero_offset && zero_offset.error().message().contains("offset must be at least 1"),
+            "read_file must reject a zero line offset before dispatch");
+
+    auto zero_limit = tools.validate(make_call("zero-limit", "read_file", R"({"path":"lines.txt","limit":0})"));
+    require(!zero_limit && zero_limit.error().message().contains("limit must be at least 1"),
+            "read_file must reject a zero line limit before dispatch");
+
+    auto oversized_line = execute(tools, make_call("oversized-line", "read_file", R"({"path":"large.txt"})"));
+    require(oversized_line.has_value() && oversized_line->is_error && oversized_line->content.contains("use read_file_bytes") &&
+                oversized_line->content.contains("byte_offset 0"),
+            "read_file must redirect oversized generated lines to read_file_bytes without a looping line continuation");
 
     auto folder = execute(tools, make_call("folder", "read_file", R"({"path":"folder"})"));
     require(folder.has_value() && folder->is_error && folder->content.contains("is not a regular file"),
@@ -183,6 +262,17 @@ void test_apply_patch_operations_are_validated_before_writes() {
     require(changed.has_value() && changed->is_error && changed->content.contains("context not found"),
             "apply_patch must validate every file hunk before writing any operation");
     require(!std::filesystem::exists(directory / "added.txt"), "apply_patch wrote an earlier operation before validation completed");
+
+    auto no_capacity = execute(
+        tools,
+        make_call(
+            "capacity", "apply_patch",
+            R"json({"patch":"*** Begin Patch\n*** Add File: capacity-receipt-that-cannot-fit-within-the-committed-output-budget.txt\n+must not be written\n*** End Patch"})json"),
+        {.max_output_bytes = 64});
+    require(no_capacity.has_value() && no_capacity->is_error && no_capacity->content.contains("compact first"),
+            "apply_patch must report insufficient success-receipt capacity before writing");
+    require(!std::filesystem::exists(directory / "capacity-receipt-that-cannot-fit-within-the-committed-output-budget.txt"),
+            "apply_patch mutated files without capacity for its success receipt");
 
     auto applied = execute(
         tools,

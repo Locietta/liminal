@@ -39,6 +39,8 @@ constexpr i64 k_max_yield_ms = 30'000;
 constexpr usize k_default_output_chars = 32 * 1024;
 constexpr usize k_min_output_chars = 1024;
 constexpr usize k_max_output_chars = 128 * 1024;
+constexpr usize k_response_envelope_reserve_bytes = 512;
+constexpr std::string_view k_insufficient_output_capacity = "Error: insufficient output capacity; compact first";
 constexpr usize k_shell_task_buffer_bytes = 1024 * 1024;
 constexpr usize k_max_shell_tasks = 32;
 
@@ -94,6 +96,11 @@ Result<usize> output_limit(std::optional<usize> requested) {
         return outcome_error(Error::tool("max_output_chars must be between 1024 and 131072"));
     }
     return value;
+}
+
+usize budgeted_output_limit(usize requested, usize output_budget) {
+    const auto payload_budget = output_budget > k_response_envelope_reserve_bytes ? output_budget - k_response_envelope_reserve_bytes : 0;
+    return std::min(requested, payload_budget);
 }
 
 std::string bounded_text(std::string_view text, usize limit = 2 * 1024) {
@@ -188,8 +195,8 @@ struct ShellTaskManager {
         }
     }
 
-    Task<ShellTaskResponse, Error> start(ExecCommandInput input);
-    Task<ShellTaskResponse, Error> write_stdin(WriteStdinInput input);
+    Task<ShellTaskResponse, Error> start(ExecCommandInput input, usize output_budget);
+    Task<ShellTaskResponse, Error> write_stdin(WriteStdinInput input, usize output_budget);
 
     std::filesystem::path working_directory;
     u64 next_id = 1;
@@ -336,10 +343,14 @@ ShellTaskResponse response_for(ShellTaskManager::ShellTask &task, usize limit) {
 
 } // namespace
 
-Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input) {
+Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input, usize output_budget) {
     if (input.cmd.empty()) co_await fail(Error::tool("cmd cannot be empty"));
     auto duration = co_await or_fail(yield_duration(input.yield_time_ms));
-    const auto limit = co_await or_fail(output_limit(input.max_output_chars));
+    const auto requested_limit = co_await or_fail(output_limit(input.max_output_chars));
+    if (output_budget <= k_response_envelope_reserve_bytes) {
+        co_return ShellTaskResponse{.content = std::string(k_insufficient_output_capacity), .is_error = true};
+    }
+    const auto limit = budgeted_output_limit(requested_limit, output_budget);
     auto directory = co_await or_fail(resolve_working_directory(*this, input.workdir));
     prune_shell_tasks(*this);
     if (tasks.size() >= k_max_shell_tasks) co_await fail(Error::tool("too many live shell tasks"));
@@ -376,9 +387,13 @@ Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input) {
     co_return response_for(*state, limit);
 }
 
-Task<ShellTaskResponse, Error> ShellTaskManager::write_stdin(WriteStdinInput input) {
+Task<ShellTaskResponse, Error> ShellTaskManager::write_stdin(WriteStdinInput input, usize output_budget) {
     auto duration = co_await or_fail(yield_duration(input.yield_time_ms));
-    const auto limit = co_await or_fail(output_limit(input.max_output_chars));
+    const auto requested_limit = co_await or_fail(output_limit(input.max_output_chars));
+    if (output_budget <= k_response_envelope_reserve_bytes) {
+        co_return ShellTaskResponse{.content = std::string(k_insufficient_output_capacity), .is_error = true};
+    }
+    const auto limit = budgeted_output_limit(requested_limit, output_budget);
     const auto found = tasks.find(input.session_id);
     if (found == tasks.end()) co_await fail(Error::tool("unknown exec session: " + std::to_string(input.session_id)));
     const auto task_pointer = found->second;
@@ -438,9 +453,10 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
             if (!input) return lighter::outcome_error(std::move(input).error());
             return {};
         },
-        .execute = [&tasks](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
+        .execute = [&tasks](const ToolSet &, const provider::ToolCall &call,
+                            const ToolExecutionContext &context) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<ExecCommandInput>(call.input));
-            auto response = co_await tasks.start(std::move(input)).or_fail();
+            auto response = co_await tasks.start(std::move(input), context.max_output_bytes).or_fail();
             co_return provider::ToolResult{.call_id = call.id, .content = std::move(response.content), .is_error = response.is_error};
         },
         .describe =
@@ -477,9 +493,10 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
             if (!input) return lighter::outcome_error(std::move(input).error());
             return {};
         },
-        .execute = [&tasks](const ToolSet &, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
+        .execute = [&tasks](const ToolSet &, const provider::ToolCall &call,
+                            const ToolExecutionContext &context) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<WriteStdinInput>(call.input));
-            auto response = co_await tasks.write_stdin(std::move(input)).or_fail();
+            auto response = co_await tasks.write_stdin(std::move(input), context.max_output_bytes).or_fail();
             co_return provider::ToolResult{.call_id = call.id, .content = std::move(response.content), .is_error = response.is_error};
         },
         .describe =

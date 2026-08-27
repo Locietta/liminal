@@ -387,25 +387,16 @@ Result<std::vector<PreparedChange>> prepare_changes(const ToolSet &tools, const 
     return changes;
 }
 
-Result<std::string> apply_changes(const std::vector<PreparedChange> &changes, const ToolSet &tools) {
+std::string change_report(const std::vector<PreparedChange> &changes, const ToolSet &tools) {
     std::string result = "Done!";
     for (const auto &change : changes) {
         std::error_code error;
         if (change.kind == PatchKind::DELETE_FILE) {
-            if (!std::filesystem::remove(change.source, error) || error) {
-                return outcome_error(Error::tool("cannot delete '" + change.source.string() + "': " + error.message()));
-            }
             const auto relative = std::filesystem::relative(change.source, tools.working_directory, error);
             result += "\nDeleted: " + (error ? change.source : relative).generic_string();
             continue;
         }
-        auto written = replace_file(change.destination, change.content);
-        if (!written) return outcome_error(std::move(written).error());
         if (change.destination != change.source) {
-            if (!std::filesystem::remove(change.source, error) || error) {
-                return outcome_error(
-                    Error::tool("moved content but cannot delete old path '" + change.source.string() + "': " + error.message()));
-            }
             result += "\nMoved: " + change.source.generic_string() + " -> " + change.destination.generic_string();
         } else {
             result += change.kind == PatchKind::ADD_FILE ? "\nAdded: " : "\nUpdated: ";
@@ -416,7 +407,27 @@ Result<std::string> apply_changes(const std::vector<PreparedChange> &changes, co
     return result;
 }
 
-Task<provider::ToolResult, Error> execute_apply_patch(const ToolSet &tools, const provider::ToolCall &call) {
+Result<void> apply_changes(const std::vector<PreparedChange> &changes) {
+    for (const auto &change : changes) {
+        std::error_code error;
+        if (change.kind == PatchKind::DELETE_FILE) {
+            if (!std::filesystem::remove(change.source, error) || error) {
+                return outcome_error(Error::tool("cannot delete '" + change.source.string() + "': " + error.message()));
+            }
+            continue;
+        }
+        auto written = replace_file(change.destination, change.content);
+        if (!written) return outcome_error(std::move(written).error());
+        if (change.destination != change.source && (!std::filesystem::remove(change.source, error) || error)) {
+            return outcome_error(
+                Error::tool("moved content but cannot delete old path '" + change.source.string() + "': " + error.message()));
+        }
+    }
+    return {};
+}
+
+Task<provider::ToolResult, Error> execute_apply_patch(const ToolSet &tools, const provider::ToolCall &call,
+                                                      const ToolExecutionContext &context) {
     auto encoded = json::to_string(call.input);
     if (!encoded) co_await lighter::fail(Error::json(std::move(encoded).error(), "tool input re-encode"));
     auto parsed = json::parse<ApplyPatchInput>(*encoded);
@@ -435,8 +446,14 @@ Task<provider::ToolResult, Error> execute_apply_patch(const ToolSet &tools, cons
         result.is_error = true;
         co_return result;
     }
-    auto applied = apply_changes(*changes, tools);
-    result.content = applied ? *std::move(applied) : "Error: " + applied.error().message();
+    result.content = change_report(*changes, tools);
+    sanitize_tool_result(result, context.max_output_bytes);
+    if (result.is_error) {
+        result.content = "Error: insufficient output capacity; compact first";
+        co_return result;
+    }
+    auto applied = apply_changes(*changes);
+    if (!applied) result.content = "Error: " + applied.error().message();
     result.is_error = !applied;
     co_return result;
 }

@@ -81,8 +81,10 @@ struct ContextManifest {
 std::string describe(const ContextManifest &manifest);
 
 struct ContextBuilder {
-    Result<ContextManifest> build(std::span<const InstructionSource> sources, const session::Session &session,
-                                  ContextBudget budget = {}) const;
+    /// Optional projected results participate in selection and usage
+    /// estimation, allowing callers to reserve their exact context envelope.
+    Result<ContextManifest> build(std::span<const InstructionSource> sources, const session::Session &session, ContextBudget budget = {},
+                                  std::span<const provider::ToolResult> projected_tool_results = {}) const;
 
     /// Converts a provider compaction result into a semantic checkpoint after
     /// verifying that its resolved instruction prefix is unchanged.

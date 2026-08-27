@@ -85,7 +85,9 @@ Liminal keeps its current frame visible while temporarily restoring normal termi
 
 Built-in tools show the consequential details in the transcript:
 
-- `read_file` names the requested path, then reports line and byte counts.
+- `read_file` reads ordinary text with a one-based line `offset` and line-count `limit`, while `read_file_bytes` provides resumable byte
+  chunks for large generated files. Local tool results use a context-aware output budget capped at 64 KiB, and both readers return
+  continuation metadata when more content remains. Both name the requested path, then report line and byte counts.
 - `apply_patch` reports the patch operation and a bounded list of changed paths.
 - `exec_command` shows the command and returns either its exit status or a session ID. `write_stdin` sends characters to that session or polls it for incremental, bounded output. Commands are highlighted as PowerShell on Windows and Bash on Linux, with executables and options visually separated from ordinary arguments; after ten seconds, a running command also shows live elapsed time.
 - Web search and page fetching run as hosted provider tools. Source links are surfaced while the answer streams and retained in the saved assistant text.

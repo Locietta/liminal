@@ -3,7 +3,9 @@
 #include "default_instructions.h"
 #include "tool_scheduler.h"
 
+#include <algorithm>
 #include <chrono>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -26,6 +28,11 @@ constexpr u64 k_automatic_compact_numerator = 9;
 constexpr u64 k_automatic_compact_denominator = 10;
 constexpr auto k_tool_cancel_grace_period = std::chrono::milliseconds(250);
 constexpr usize k_provider_diagnostic_limit = 4096;
+constexpr u64 k_tool_output_bytes_per_token = 4;
+constexpr u64 k_tool_output_context_numerator = 1;
+constexpr u64 k_tool_output_context_denominator = 2;
+constexpr u64 k_tool_output_remaining_numerator = 9;
+constexpr u64 k_tool_output_remaining_denominator = 10;
 
 void emit(const EventSink &events, Event event) {
     if (events) {
@@ -51,6 +58,21 @@ bool needs_automatic_compaction(const context::ContextManifest &manifest) {
     const auto threshold =
         static_cast<u64>(*manifest.budget.context_window_tokens) * k_automatic_compact_numerator / k_automatic_compact_denominator;
     return manifest.usage.estimated_input_tokens >= threshold;
+}
+
+ToolExecutionContext tool_execution_context(const context::ContextManifest &manifest) {
+    if (!manifest.budget.context_window_tokens || !manifest.usage.remaining_input_tokens) return {};
+
+    // Match KimiX's context-aware shape: at most half of the total context,
+    // at most 90% of the currently remaining input capacity, and always below
+    // Liminal's absolute local-tool ceiling.
+    const auto context_bytes = static_cast<u64>(*manifest.budget.context_window_tokens) * k_tool_output_bytes_per_token *
+                               k_tool_output_context_numerator / k_tool_output_context_denominator;
+    const auto remaining_tokens = static_cast<u64>(std::max<i64>(*manifest.usage.remaining_input_tokens, 0));
+    const auto remaining_bytes =
+        remaining_tokens * k_tool_output_bytes_per_token * k_tool_output_remaining_numerator / k_tool_output_remaining_denominator;
+    const auto maximum = std::min<u64>({context_bytes, remaining_bytes, k_max_tool_output_bytes});
+    return {.max_output_bytes = static_cast<usize>(maximum)};
 }
 
 std::string bounded_diagnostic(std::string detail) { return bounded_utf8(detail, k_provider_diagnostic_limit); }
@@ -165,7 +187,16 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
         };
         usize call_count = 0;
         bool has_terminal_answer = false;
-        agent::detail::ToolScheduler scheduler(*tools, events, activity_scope);
+        agent::detail::ToolScheduler scheduler(
+            *tools,
+            [this](std::span<const std::string> call_ids) {
+                std::vector<provider::ToolResult> projected_results;
+                projected_results.reserve(call_ids.size());
+                for (const auto &call_id : call_ids) projected_results.push_back({.call_id = call_id});
+                auto current = context::ContextBuilder{}.build(instructions, session, context_budget(model.entry), projected_results);
+                return current ? tool_execution_context(*current) : ToolExecutionContext{.max_output_bytes = 0};
+            },
+            events, activity_scope);
         provider::StreamCallbacks stream{
             .on_assistant_text_delta =
                 [&events, activity_scope](const provider::OutputItemId &item_id, std::string_view text) {
@@ -201,7 +232,6 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
         };
         auto completed =
             co_await observe_cancellation(model.handle->complete(built->provider_history, tools->definitions(), stream), cancellation);
-        scheduler.finish_accepting();
         if (completed.is_cancelled()) {
             session.append(session::ProviderCallAborted{
                 .task_id = task_id,
@@ -253,26 +283,42 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
             .completion = completion,
             .loop_outcome = loop_outcome(completion, call_count, has_terminal_answer),
         });
-        auto settled = co_await observe_cancellation(scheduler.finish(), cancellation);
-        const bool cancelled_while_settling = settled.is_cancelled();
-        std::vector<provider::ToolResult> results;
-        if (settled.is_cancelled()) {
-            auto cancelled = co_await scheduler.cancel_and_finish(k_tool_cancel_grace_period);
-            if (!cancelled) {
-                co_await fail(std::move(cancelled).error());
+        if (call_count != 0) {
+            scheduler.finish_accepting();
+            if (!scheduler.has_output_capacity()) {
+                auto cancelled = co_await scheduler.cancel_and_finish(k_tool_cancel_grace_period);
+                if (!cancelled) co_await fail(std::move(cancelled).error());
+                auto results = *std::move(cancelled);
+                if (!results.empty()) {
+                    session.append(session::ToolResults{
+                        .task_id = task_id,
+                        .provider_call_id = provider_call_id,
+                        .results = std::move(results),
+                    });
+                }
+                co_await fail(Error::protocol("insufficient output capacity for tool results; compact first"));
             }
-            results = *std::move(cancelled);
-        } else if (settled.has_value()) {
-            results = *std::move(settled);
+            auto settled = co_await observe_cancellation(scheduler.finish(), cancellation);
+            const bool cancelled_while_settling = settled.is_cancelled();
+            std::vector<provider::ToolResult> results;
+            if (settled.is_cancelled()) {
+                auto cancelled = co_await scheduler.cancel_and_finish(k_tool_cancel_grace_period);
+                if (!cancelled) {
+                    co_await fail(std::move(cancelled).error());
+                }
+                results = *std::move(cancelled);
+            } else if (settled.has_value()) {
+                results = *std::move(settled);
+            }
+            if (!results.empty()) {
+                session.append(session::ToolResults{
+                    .task_id = task_id,
+                    .provider_call_id = provider_call_id,
+                    .results = std::move(results),
+                });
+            }
+            if (cancelled_while_settling) co_await cancel();
         }
-        if (!results.empty()) {
-            session.append(session::ToolResults{
-                .task_id = task_id,
-                .provider_call_id = provider_call_id,
-                .results = std::move(results),
-            });
-        }
-        if (cancelled_while_settling) co_await cancel();
 
         switch (completion.stop) {
             case provider::StopKind::DONE:

@@ -28,6 +28,19 @@ enum struct ToolExecutionMode {
     PARALLEL,
 };
 
+inline constexpr usize k_max_tool_output_bytes = 64 * 1024;
+
+/// Bound for one local tool result at the instant it begins executing.
+/// Built-ins should use this while producing resumable output; the scheduler
+/// applies the final shared provider-call allowance after all calls settle.
+struct ToolExecutionContext {
+    usize max_output_bytes = k_max_tool_output_bytes;
+};
+
+/// Replace invalid UTF-8 and enforce a byte bound. This is the universal guard
+/// used after every local tool outcome has been normalized to a ToolResult.
+void sanitize_tool_result(provider::ToolResult &result, usize maximum_bytes);
+
 /// Bounded, user-facing data for the built-in tool lifecycle. Commands remain
 /// separate so renderers can apply state copy and platform shell highlighting.
 struct ToolCallPresentation {
@@ -47,7 +60,9 @@ struct ToolRegistration {
     /// extensions that may touch shared state.
     ToolExecutionMode execution_mode = ToolExecutionMode::EXCLUSIVE;
     std::move_only_function<Result<void>(const provider::ToolCall &) const> validate;
-    std::move_only_function<lighter::Task<provider::ToolResult, Error>(const ToolSet &, const provider::ToolCall &) const> execute;
+    std::move_only_function<lighter::Task<provider::ToolResult, Error>(const ToolSet &, const provider::ToolCall &,
+                                                                       const ToolExecutionContext &) const>
+        execute;
     std::move_only_function<ToolCallPresentation(const provider::ToolCall &) const> describe;
     std::move_only_function<std::string(const provider::ToolCall &, const provider::ToolResult &) const> summarize;
 };
@@ -72,7 +87,7 @@ struct ToolSet {
     /// failures (unknown tool, malformed input, spawn error) use the error
     /// channel - the agent layer converts those into is_error results.
     Result<void> validate(const provider::ToolCall &call) const;
-    lighter::Task<provider::ToolResult, Error> execute(const provider::ToolCall &call) const;
+    lighter::Task<provider::ToolResult, Error> execute(const provider::ToolCall &call, ToolExecutionContext context = {}) const;
     ToolExecutionMode execution_mode(std::string_view name) const;
     ToolCallPresentation describe(const provider::ToolCall &call) const;
     std::string summarize(const provider::ToolCall &call, const provider::ToolResult &result) const;

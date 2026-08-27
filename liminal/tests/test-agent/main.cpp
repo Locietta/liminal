@@ -84,7 +84,8 @@ std::shared_ptr<usize> register_noop_tool(ToolSet &tools) {
     auto executions = std::make_shared<usize>(0);
     auto registered = tools.register_tool({
         .definition = {.name = "test_noop", .description = "Test no-op"},
-        .execute = [executions](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
+        .execute = [executions](const ToolSet &, const provider::ToolCall &call,
+                                const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
             ++*executions;
             co_return provider::ToolResult{.call_id = call.id, .content = "ok"};
         },
@@ -247,35 +248,183 @@ void test_long_tool_loop() {
     provider_mock.verify();
 }
 
-void test_tool_starts_before_provider_call_finishes() {
+void test_tool_output_budget_tracks_model_context() {
     ToolSet tools(std::filesystem::current_path());
-    auto started = std::make_shared<lighter::Event>();
-    auto release = std::make_shared<lighter::Event>();
+    auto observed_budgets = std::make_shared<std::vector<usize>>();
     auto registered = tools.register_tool({
-        .definition = {.name = "test_online", .description = "Test online scheduling"},
-        .execute = [started, release](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
-            started->set();
-            co_await release->wait();
-            co_return provider::ToolResult{.call_id = call.id, .content = "online"};
+        .definition = {.name = "test_budget", .description = "Observe the tool output budget"},
+        .execution_mode = ToolExecutionMode::PARALLEL,
+        .execute = [observed_budgets](const ToolSet &, const provider::ToolCall &call,
+                                      const ToolExecutionContext &context) -> lighter::Task<provider::ToolResult, Error> {
+            observed_budgets->push_back(context.max_output_bytes);
+            co_return provider::ToolResult{.call_id = call.id, .content = std::string(context.max_output_bytes, 'x')};
         },
     });
-    require(registered.has_value(), "failed to register the online scheduling test tool");
+    require(registered.has_value(), "failed to register the output-budget test tool");
+
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>()
+        .then_calls([](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            glz::generic padded_input;
+            const auto encoded = "{\"padding\":\"" + std::string(6'000, 'p') + "\"}";
+            require(!glz::read_json(padded_input, encoded), "failed to create padded tool input");
+            emit_tool_call(callbacks, "budget-1", "test_budget");
+            emit_tool_call(callbacks, "budget-2", "test_budget", std::move(padded_input));
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+        })
+        .then_calls([](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        });
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "small-context", .context_window = 4'000, .max_output_tokens = 500},
+    };
+    Agent agent(std::move(choice), tools, {});
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("measure", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "context-aware output-budget task failed");
+    require(observed_budgets->size() == 2 && std::ranges::all_of(*observed_budgets, [](usize budget) { return budget < 8'000; }),
+            "each tool must obtain a fresh allowance that charges the current response and tool arguments");
+    const auto result_entry = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
+        return std::holds_alternative<session::ToolResults>(entry.payload);
+    });
+    require(result_entry != agent.session.entries.end(), "budgeted tool batch did not produce durable results");
+    const auto &results = std::get<session::ToolResults>(result_entry->payload).results;
+    usize result_bytes = 0;
+    for (const auto &result : results) result_bytes += result.content.size();
+    usize committed_bytes = 0;
+    for (const auto budget : *observed_budgets) committed_bytes += budget;
+    require(results.size() == 2 && result_bytes == committed_bytes && std::ranges::none_of(results, &provider::ToolResult::is_error),
+            "parallel tools must receive immutable shares of one committed provider-call allowance");
+    provider_mock.verify();
+}
+
+void test_insufficient_batch_capacity_prevents_tool_dispatch() {
+    ToolSet tools(std::filesystem::current_path());
+    auto executions = register_noop_tool(tools);
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [](const provider::History &, const std::vector<provider::ToolDefinition> &,
+           const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            glz::generic padded_input;
+            const auto encoded = "{\"padding\":\"" + std::string(3'450, 'p') + "\"}";
+            require(!glz::read_json(padded_input, encoded), "failed to create capacity exhaustion input");
+            emit_tool_call(callbacks, "capacity", "test_noop", std::move(padded_input));
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+        });
+    Agent agent({.handle = provider_mock.handle(),
+                 .entry = {.provider = "fake", .id = "tiny-context", .context_window = 1'000, .max_output_tokens = 100}},
+                tools, {});
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("measure", {});
+    loop.schedule(task);
+    loop.run();
+
+    const auto &outcome = task.result();
+    require(outcome.has_error() && outcome.error().message().contains("compact first") && *executions == 0,
+            "a batch without room for an actionable result must fail before tool dispatch (executions " + std::to_string(*executions) +
+                (outcome.has_error() ? ", error " + outcome.error().message() : ", no error") + ")");
+    const auto result_entry = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
+        return std::holds_alternative<session::ToolResults>(entry.payload);
+    });
+    require(result_entry != agent.session.entries.end(), "capacity refusal left an assistant tool call without a matching result");
+    const auto &results = std::get<session::ToolResults>(result_entry->payload).results;
+    require(results.size() == 1 && results.front().call_id == "capacity" && results.front().is_error,
+            "capacity refusal did not durably close the accepted tool call");
+    provider_mock.verify();
+}
+
+void test_tool_error_results_share_the_output_guard() {
+    ToolSet tools(std::filesystem::current_path());
+    auto invalid_detail = [] {
+        auto detail = std::string(128 * 1024, 'e');
+        detail[0] = static_cast<char>(0xff);
+        return detail;
+    };
+    auto validation = tools.register_tool({
+        .definition = {.name = "test_validation_error"},
+        .validate = [invalid_detail](const provider::ToolCall &) -> Result<void> {
+            return lighter::outcome_error(Error::tool(invalid_detail()));
+        },
+        .execute = [](const ToolSet &, const provider::ToolCall &call, const ToolExecutionContext &)
+            -> lighter::Task<provider::ToolResult, Error> { co_return provider::ToolResult{.call_id = call.id}; },
+    });
+    auto execution = tools.register_tool({
+        .definition = {.name = "test_execution_error"},
+        .execute = [invalid_detail](const ToolSet &, const provider::ToolCall &, const ToolExecutionContext &)
+            -> lighter::Task<provider::ToolResult, Error> { co_await lighter::fail(Error::tool(invalid_detail())); },
+    });
+    require(validation && execution, "failed to register tool error guard fixtures");
+
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>()
+        .then_calls([](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            emit_tool_call(callbacks, "validation", "test_validation_error");
+            emit_tool_call(callbacks, "execution", "test_execution_error");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+        })
+        .then_calls([](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        });
+    Agent agent({.handle = provider_mock.handle(),
+                 .entry = {.provider = "fake", .id = "bounded-context", .context_window = 20'000, .max_output_tokens = 500}},
+                tools, {});
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("exercise errors", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(),
+            "bounded tool error task failed" + (task.result().has_error() ? ": " + task.result().error().message() : std::string{}));
+    const auto result_entry = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
+        return std::holds_alternative<session::ToolResults>(entry.payload);
+    });
+    require(result_entry != agent.session.entries.end(), "tool errors were not retained");
+    const auto &results = std::get<session::ToolResults>(result_entry->payload).results;
+    usize result_bytes = 0;
+    for (const auto &result : results) {
+        result_bytes += result.content.size();
+        require(result.is_error && lighter::encoding::utf8::is_valid(result.content),
+                "every normalized tool error must be bounded valid UTF-8");
+    }
+    require(results.size() == 2 && result_bytes <= 40'000, "validation and execution errors must share the batch allowance");
+    provider_mock.verify();
+}
+
+void test_tool_waits_for_committed_output_allowance() {
+    ToolSet tools(std::filesystem::current_path());
+    auto registered = tools.register_tool({
+        .definition = {.name = "test_committed", .description = "Test committed scheduling"},
+        .execution_mode = ToolExecutionMode::PARALLEL,
+        .execute = [](const ToolSet &, const provider::ToolCall &call, const ToolExecutionContext &)
+            -> lighter::Task<provider::ToolResult, Error> { co_return provider::ToolResult{.call_id = call.id, .content = "committed"}; },
+    });
+    require(registered.has_value(), "failed to register the committed scheduling test tool");
 
     auto completions = std::make_shared<usize>(0);
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>()
-        .calls([completions, started,
-                release](const provider::History &, const std::vector<provider::ToolDefinition> &,
-                         const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+        .calls([completions](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                             const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             if ((*completions)++ != 0) {
                 emit_message(callbacks, "final", "done", true);
                 co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
             }
             emit_message(callbacks, "before", "I will inspect.", true);
-            emit_tool_call(callbacks, "online-call", "test_online");
-            co_await started->wait();
-            emit_message(callbacks, "after", "The inspection is running.", true);
-            release->set();
+            emit_tool_call(callbacks, "committed-call", "test_committed");
+            emit_message(callbacks, "after", "The inspection is queued.", true);
             co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
         })
         .times(2);
@@ -284,23 +433,23 @@ void test_tool_starts_before_provider_call_finishes() {
     Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
     std::vector<Event> events;
     lighter::EventLoop loop;
-    auto task = agent.run_task("work online", [&events](const Event &event) { events.push_back(event); });
+    auto task = agent.run_task("work with committed output", [&events](const Event &event) { events.push_back(event); });
     loop.schedule(task);
     loop.run();
 
-    require(task.result().has_value(), "online scheduling task failed");
+    require(task.result().has_value(), "committed scheduling task failed");
     usize tool_started = events.size();
     usize tool_completed = events.size();
     usize after_delta = events.size();
     for (usize index = 0; index < events.size(); ++index) {
         if (std::holds_alternative<ToolStarted>(events[index])) tool_started = index;
         if (std::holds_alternative<ToolCompleted>(events[index])) tool_completed = index;
-        if (const auto *delta = std::get_if<AssistantTextDelta>(&events[index]); delta && delta->text == "The inspection is running.") {
+        if (const auto *delta = std::get_if<AssistantTextDelta>(&events[index]); delta && delta->text == "The inspection is queued.") {
             after_delta = index;
         }
     }
-    require(tool_started < after_delta && after_delta < tool_completed,
-            "provider progress did not stream while the online tool was running");
+    require(after_delta < tool_started && tool_started < tool_completed,
+            "tool execution began before the provider batch received a committed output allowance");
     provider_mock.verify();
 }
 
@@ -388,7 +537,8 @@ void test_cancelled_task_retains_semantic_progress() {
     ToolSet tools(std::filesystem::current_path());
     auto registered = tools.register_tool({
         .definition = {.name = "test_slow", .description = "Test cancellation"},
-        .execute = [](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
+        .execute = [](const ToolSet &, const provider::ToolCall &call,
+                      const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
             lighter::Event parked;
             co_await parked.wait();
             co_return provider::ToolResult{.call_id = call.id, .content = "late"};
@@ -414,7 +564,7 @@ void test_cancelled_task_retains_semantic_progress() {
     auto task = agent.run_task(
         "start slow work",
         [&cancellation](const Event &event) {
-            if (std::holds_alternative<ToolStarted>(event)) cancellation.cancel();
+            if (std::holds_alternative<AssistantMessageCompleted>(event)) cancellation.cancel();
         },
         cancellation.token());
     loop.schedule(task);
@@ -431,7 +581,7 @@ void test_cancelled_task_retains_semantic_progress() {
                 std::get<session::ToolResults>(agent.session.entries[4].payload).results.size() == 1 &&
                 std::get<session::ToolResults>(agent.session.entries[4].payload).results[0].call_id == "slow-call" &&
                 std::get<session::ToolResults>(agent.session.entries[4].payload).results[0].is_error &&
-                std::get<session::ToolResults>(agent.session.entries[4].payload).results[0].content.contains("outcome is unknown") &&
+                std::get<session::ToolResults>(agent.session.entries[4].payload).results[0].content.contains("No tool action") &&
                 std::get<session::TaskFinished>(agent.session.entries[5].payload).outcome == session::TaskOutcome::CANCELLED,
             "cancelled task did not retain completed output items and its terminal outcome");
     auto context = agent.context_manifest();
@@ -441,33 +591,30 @@ void test_cancelled_task_retains_semantic_progress() {
     provider_mock.verify();
 }
 
-void test_stream_failure_retains_completed_tool_result() {
+void test_stream_failure_retains_queued_tool_result() {
     ToolSet tools(std::filesystem::current_path());
-    register_noop_tool(tools);
-    auto tool_completed = std::make_shared<lighter::Event>();
+    auto executions = register_noop_tool(tools);
     const auto diagnostic_prefix_size = Error::protocol("").message().size();
     auto failure = std::make_shared<std::string>(4095 - diagnostic_prefix_size, 'x');
     *failure += "\xF0\x9F\x98\x80 trailing diagnostic";
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>().calls(
-        [tool_completed, failure](const provider::History &, const std::vector<provider::ToolDefinition> &,
-                                  const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
-            emit_tool_call(callbacks, "completed-before-failure", "test_noop");
-            co_await tool_completed->wait();
+        [failure](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                  const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            emit_tool_call(callbacks, "queued-before-failure", "test_noop");
             co_await lighter::fail(Error::protocol(*failure));
         });
     provider_mock.expect<provider::CompactDispatch>().never();
 
     Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
     lighter::EventLoop loop;
-    auto task = agent.run_task("do fragile work", [tool_completed](const Event &event) {
-        if (std::holds_alternative<ToolCompleted>(event)) tool_completed->set();
-    });
+    auto task = agent.run_task("do fragile work", {});
     loop.schedule(task);
     loop.run();
 
     auto outcome = task.result();
-    require(outcome.has_error() && outcome.error().detail == *failure, "provider stream failure did not reach the caller");
+    require(outcome.has_error() && outcome.error().detail == *failure && *executions == 0,
+            "provider stream failure dispatched a queued tool or did not reach the caller");
     const auto &durable_failure = std::get<session::ProviderCallAborted>(agent.session.entries[2].payload).detail;
     require(durable_failure.size() == 4095 && lighter::encoding::utf8::is_valid(durable_failure),
             "durable provider diagnostic split a UTF-8 code point at its byte bound");
@@ -475,9 +622,9 @@ void test_stream_failure_retains_completed_tool_result() {
                 std::get<session::ProviderCallAborted>(agent.session.entries[2].payload).reason ==
                     session::ProviderCallAbortReason::FAILED &&
                 std::holds_alternative<session::ToolResults>(agent.session.entries[3].payload) &&
-                std::get<session::ToolResults>(agent.session.entries[3].payload).results.front().call_id == "completed-before-failure" &&
+                std::get<session::ToolResults>(agent.session.entries[3].payload).results.front().call_id == "queued-before-failure" &&
                 std::get<session::TaskFinished>(agent.session.entries[4].payload).outcome == session::TaskOutcome::FAILED,
-            "stream failure rolled back a completed tool call or result");
+            "stream failure lost the queued tool call or its synthetic result");
     provider_mock.verify();
 }
 
@@ -532,7 +679,8 @@ void test_tool_execution_semantics() {
     auto parallel = tools.register_tool({
         .definition = {.name = "test_parallel", .description = "Test parallel scheduling"},
         .execution_mode = ToolExecutionMode::PARALLEL,
-        .execute = [probe](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
+        .execute = [probe](const ToolSet &, const provider::ToolCall &call,
+                           const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
             if (call.id == "trailing") {
                 if (!probe->exclusive_finished) probe->trailing_started_early = true;
                 co_return provider::ToolResult{.call_id = call.id, .content = "parallel"};
@@ -548,7 +696,8 @@ void test_tool_execution_semantics() {
     require(parallel.has_value(), "failed to register the parallel scheduling test tool");
     auto exclusive = tools.register_tool({
         .definition = {.name = "test_exclusive", .description = "Test exclusive scheduling"},
-        .execute = [probe](const ToolSet &, const provider::ToolCall &call) -> lighter::Task<provider::ToolResult, Error> {
+        .execute = [probe](const ToolSet &, const provider::ToolCall &call,
+                           const ToolExecutionContext &) -> lighter::Task<provider::ToolResult, Error> {
             probe->exclusive_overlapped = probe->running != 0;
             probe->exclusive_finished = true;
             co_return provider::ToolResult{.call_id = call.id, .content = "exclusive"};
@@ -818,11 +967,14 @@ void test_context_manifest() {
 i32 run_all() {
     test_successful_task();
     test_long_tool_loop();
-    test_tool_starts_before_provider_call_finishes();
+    test_tool_output_budget_tracks_model_context();
+    test_insufficient_batch_capacity_prevents_tool_dispatch();
+    test_tool_error_results_share_the_output_guard();
+    test_tool_waits_for_committed_output_allowance();
     test_done_requires_terminal_answer();
     test_final_phase_does_not_bypass_tool_follow_up();
     test_cancelled_task_retains_semantic_progress();
-    test_stream_failure_retains_completed_tool_result();
+    test_stream_failure_retains_queued_tool_result();
     test_invalid_tool_is_rejected_before_dispatch();
     test_tool_execution_semantics();
     test_automatic_compaction();

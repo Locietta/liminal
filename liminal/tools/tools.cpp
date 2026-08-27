@@ -15,6 +15,8 @@
 #include <lighter/codec/json/json.h>
 #include <lighter/utils/panic.h>
 
+#include <liminal/text.h>
+
 namespace liminal {
 
 namespace json = lighter::codec::json;
@@ -23,19 +25,38 @@ using lighter::or_fail;
 using lighter::outcome_error;
 using lighter::Task;
 
+void sanitize_tool_result(provider::ToolResult &result, usize maximum_bytes) {
+    maximum_bytes = std::min(maximum_bytes, k_max_tool_output_bytes);
+    result.content = lighter::encoding::utf8::sanitize(result.content);
+    if (result.content.size() <= maximum_bytes) return;
+
+    const auto marker = "\n... [tool output truncated to " + std::to_string(maximum_bytes) + " bytes]";
+    if (marker.size() >= maximum_bytes) {
+        result.content = bounded_utf8(marker, maximum_bytes);
+    } else {
+        result.content = bounded_utf8(result.content, maximum_bytes - marker.size()) + marker;
+    }
+    result.is_error = true;
+}
+
 namespace {
 
-constexpr usize k_file_limit = 128 * 1024;
+constexpr usize k_read_notice_reserve_bytes = 256;
+constexpr std::string_view k_insufficient_output_capacity = "Error: insufficient output capacity; compact first";
 constexpr usize k_max_call_summary_bytes = 2 * 1024;
 constexpr usize k_max_preview_line_bytes = 240;
 constexpr usize k_max_preview_lines = 4;
 
 struct ReadFileInput {
     std::string path;
-    std::optional<u64> offset;
+    std::optional<usize> offset;
     std::optional<usize> limit;
-    std::optional<usize> line_start;
-    std::optional<usize> line_end;
+};
+
+struct ReadFileBytesInput {
+    std::string path;
+    std::optional<u64> byte_offset;
+    std::optional<usize> byte_count;
 };
 
 std::string bounded_text(std::string_view text, usize limit) {
@@ -93,6 +114,10 @@ std::string generic_result_summary(const provider::ToolResult &result) {
     return summary;
 }
 
+usize resumable_payload_budget(const ToolExecutionContext &context) {
+    return context.max_output_bytes > k_read_notice_reserve_bytes ? context.max_output_bytes - k_read_notice_reserve_bytes : 0;
+}
+
 /// Decode a tool_use input (already validated as a JSON object) into the
 /// tool's typed input struct. Strict: unknown keys are rejected here, matching
 /// the additionalProperties:false schema we advertise.
@@ -109,14 +134,27 @@ Result<T> parse_input(const glz::generic &input) {
     return *std::move(typed);
 }
 
-Result<std::filesystem::path> resolve_read_path(const ToolSet &tools, const ReadFileInput &input) {
+Result<void> validate_read_file_input(const ReadFileInput &input) {
+    if (input.path.empty()) return outcome_error(Error::tool("path must not be empty"));
+    if (input.offset.value_or(1) == 0) return outcome_error(Error::tool("offset must be at least 1"));
+    if (input.limit && *input.limit == 0) return outcome_error(Error::tool("limit must be at least 1"));
+    return {};
+}
+
+Result<void> validate_read_file_bytes_input(const ReadFileBytesInput &input) {
+    if (input.path.empty()) return outcome_error(Error::tool("path must not be empty"));
+    if (input.byte_count && *input.byte_count == 0) return outcome_error(Error::tool("byte_count must be at least 1"));
+    return {};
+}
+
+Result<std::filesystem::path> resolve_read_path(const ToolSet &tools, std::string_view path) {
     std::error_code error;
     const auto root = std::filesystem::weakly_canonical(tools.working_directory, error);
     if (error) {
         return outcome_error(Error::tool("cannot resolve workspace: " + error.message()));
     }
 
-    auto requested = std::filesystem::path(input.path);
+    auto requested = std::filesystem::path(path);
     if (requested.is_relative()) requested = root / requested;
     auto resolved = std::filesystem::weakly_canonical(requested, error);
     if (error) {
@@ -125,8 +163,7 @@ Result<std::filesystem::path> resolve_read_path(const ToolSet &tools, const Read
     return resolved;
 }
 
-Result<std::string> read_byte_range(const std::filesystem::path &path, u64 offset, usize limit) {
-    if (limit == 0) return outcome_error(Error::tool("limit must be at least 1"));
+Result<std::string> read_byte_range(const std::filesystem::path &path, u64 offset, usize count_limit) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) return outcome_error(Error::tool("cannot open '" + path.string() + "'"));
 
@@ -135,64 +172,125 @@ Result<std::string> read_byte_range(const std::filesystem::path &path, u64 offse
     if (end < 0) return outcome_error(Error::tool("cannot size '" + path.string() + "'"));
     const auto size = static_cast<u64>(end);
     if (offset > size) {
-        return outcome_error(Error::tool("offset " + std::to_string(offset) + " exceeds file size " + std::to_string(size)));
+        return outcome_error(Error::tool("byte_offset " + std::to_string(offset) + " exceeds file size " + std::to_string(size)));
     }
     if (offset > static_cast<u64>(std::numeric_limits<std::streamoff>::max())) {
-        return outcome_error(Error::tool("offset is too large for this platform"));
+        return outcome_error(Error::tool("byte_offset is too large for this platform"));
     }
     stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
 
     const auto available = size - offset;
-    const auto count = static_cast<usize>(std::min<u64>(available, limit));
+    const auto count = static_cast<usize>(std::min<u64>(available, count_limit));
     std::string content(count, '\0');
     stream.read(content.data(), static_cast<std::streamsize>(count));
     content.resize(static_cast<usize>(stream.gcount()));
     if (!stream && !stream.eof()) return outcome_error(Error::tool("cannot read '" + path.string() + "'"));
     if (content.find('\0') != std::string::npos) return outcome_error(Error::tool("'" + path.string() + "' looks like a binary file"));
-    if (available > count) {
-        content += "\n... [truncated after " + std::to_string(count) + " bytes; next offset " + std::to_string(offset + count) + "]";
+    if (!content.empty() && (static_cast<unsigned char>(content.front()) & 0xc0) == 0x80) {
+        return outcome_error(Error::tool("byte_offset " + std::to_string(offset) + " falls inside a UTF-8 code point"));
+    }
+    if (available > content.size()) {
+        const auto complete = lighter::encoding::utf8::complete_prefix_len(content);
+        if (complete == 0 && !content.empty()) {
+            return outcome_error(Error::tool("byte_count is too small to include the UTF-8 code point at byte_offset " +
+                                             std::to_string(offset) + "; increase byte_count"));
+        }
+        content.resize(complete);
+        content +=
+            "\n... [truncated after " + std::to_string(complete) + " bytes; next byte_offset " + std::to_string(offset + complete) + "]";
     }
     return content;
 }
 
-Result<std::string> read_line_range(const std::filesystem::path &path, usize first, std::optional<usize> last) {
-    if (first == 0) return outcome_error(Error::tool("line_start must be at least 1"));
-    if (last && (*last == 0 || *last < first)) {
-        return outcome_error(Error::tool("line_end must be at least line_start"));
-    }
+Result<std::string> read_line_range(const std::filesystem::path &path, usize first, std::optional<usize> line_limit, usize output_limit) {
+    if (first == 0) return outcome_error(Error::tool("offset must be at least 1"));
+    if (line_limit && *line_limit == 0) return outcome_error(Error::tool("limit must be at least 1"));
 
     std::ifstream stream(path, std::ios::binary);
     if (!stream) return outcome_error(Error::tool("cannot open '" + path.string() + "'"));
 
     std::string content;
-    std::string line;
     usize line_number = 0;
+    usize selected_lines = 0;
     bool truncated = false;
-    while (std::getline(stream, line)) {
+    bool limited = false;
+    usize continuation_line = 0;
+    while (true) {
+        const auto line_offset = stream.tellg();
+        const bool selected = line_number + 1 >= first;
+        std::string line;
+        bool has_bytes = false;
+        bool reached_eof = false;
+        bool oversized = false;
+        while (true) {
+            const auto next = stream.get();
+            if (next == std::char_traits<char>::eof()) {
+                reached_eof = true;
+                break;
+            }
+            has_bytes = true;
+            const auto byte = static_cast<char>(next);
+            if (byte == '\n') break;
+            if (!selected) continue;
+            if (byte == '\0') return outcome_error(Error::tool("'" + path.string() + "' looks like a binary file"));
+            if (line.size() >= output_limit) {
+                oversized = true;
+                break;
+            }
+            line += byte;
+        }
+        if (!has_bytes && reached_eof) break;
         ++line_number;
         if (line_number < first) continue;
-        if (last && line_number > *last) break;
-        if (line.find('\0') != std::string::npos) return outcome_error(Error::tool("'" + path.string() + "' looks like a binary file"));
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (content.size() + line.size() + 1 > k_file_limit) {
+        if (oversized) {
+            auto marker = "... [truncated before oversized line " + std::to_string(line_number) + "; use read_file_bytes";
+            if (line_offset >= 0) marker += " with byte_offset " + std::to_string(static_cast<u64>(line_offset));
+            marker += "]";
+            if (content.empty()) return outcome_error(Error::tool(std::move(marker)));
+            content += std::move(marker);
+            return content;
+        }
+        if (line.size() + 1 > output_limit - std::min(content.size(), output_limit)) {
+            if (line.size() + 1 > output_limit) {
+                auto marker = "... [truncated before oversized line " + std::to_string(line_number) + "; use read_file_bytes";
+                if (line_offset >= 0) marker += " with byte_offset " + std::to_string(static_cast<u64>(line_offset));
+                marker += "]";
+                if (content.empty()) return outcome_error(Error::tool(std::move(marker)));
+                content += std::move(marker);
+                return content;
+            }
             truncated = true;
             break;
         }
         content += line;
         content += '\n';
+        ++selected_lines;
+        if (line_limit && selected_lines >= *line_limit) {
+            if (stream.peek() != std::char_traits<char>::eof()) {
+                limited = true;
+                continuation_line = line_number + 1;
+            }
+            break;
+        }
+        if (reached_eof) break;
     }
-    if (!stream.eof() && stream.fail() && !(last && line_number > *last)) {
+    if (stream.bad()) {
         return outcome_error(Error::tool("cannot read '" + path.string() + "'"));
     }
     if (truncated) {
         content +=
-            "... [truncated before line " + std::to_string(line_number) + "; continue with line_start " + std::to_string(line_number) + "]";
+            "... [truncated before line " + std::to_string(line_number) + "; continue with offset " + std::to_string(line_number) + "]";
+    } else if (limited) {
+        content += "... [line limit reached before line " + std::to_string(continuation_line) + "; continue with offset " +
+                   std::to_string(continuation_line) + "]";
     }
     return content;
 }
 
-std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input) {
-    auto resolved = resolve_read_path(tools, input);
+std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input, const ToolExecutionContext &context) {
+    if (auto valid = validate_read_file_input(input); !valid) return "Error: " + valid.error().message();
+    auto resolved = resolve_read_path(tools, input.path);
     if (!resolved) return "Error: " + resolved.error().message();
     const auto path = resolved->string();
 
@@ -204,14 +302,32 @@ std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input) {
     if (!std::filesystem::is_regular_file(status)) {
         return "Error: '" + path + "' is not a regular file";
     }
+    if (context.max_output_bytes <= k_read_notice_reserve_bytes) return std::string(k_insufficient_output_capacity);
 
-    const bool lines = input.line_start.has_value() || input.line_end.has_value();
-    const bool bytes = input.offset.has_value() || input.limit.has_value();
-    if (lines && bytes) return "Error: line ranges cannot be combined with byte offsets";
+    auto content = read_line_range(*resolved, input.offset.value_or(1), input.limit, resumable_payload_budget(context));
+    if (!content) return "Error: " + content.error().message();
+    return *std::move(content);
+}
 
-    const auto byte_limit = std::min(input.limit.value_or(k_file_limit), k_file_limit);
-    Result<std::string> content = lines ? read_line_range(*resolved, input.line_start.value_or(1), input.line_end) :
-                                          read_byte_range(*resolved, input.offset.value_or(0), byte_limit);
+std::string tool_read_file_bytes(const ToolSet &tools, const ReadFileBytesInput &input, const ToolExecutionContext &context) {
+    if (auto valid = validate_read_file_bytes_input(input); !valid) return "Error: " + valid.error().message();
+    auto resolved = resolve_read_path(tools, input.path);
+    if (!resolved) return "Error: " + resolved.error().message();
+    const auto path = resolved->string();
+
+    std::error_code status_error;
+    const auto status = std::filesystem::status(*resolved, status_error);
+    if (status_error) {
+        return "Error: cannot inspect '" + path + "': " + status_error.message();
+    }
+    if (!std::filesystem::is_regular_file(status)) {
+        return "Error: '" + path + "' is not a regular file";
+    }
+    if (context.max_output_bytes <= k_read_notice_reserve_bytes) return std::string(k_insufficient_output_capacity);
+
+    const auto payload_budget = resumable_payload_budget(context);
+    const auto requested_count = input.byte_count.value_or(payload_budget);
+    auto content = read_byte_range(*resolved, input.byte_offset.value_or(0), std::min(requested_count, payload_budget));
     if (!content) return "Error: " + content.error().message();
     return *std::move(content);
 }
@@ -224,13 +340,19 @@ ToolCallPresentation describe_read_file(const provider::ToolCall &call) {
     const auto input = parse_input<ReadFileInput>(call.input);
     if (!input) return {.description = "Read file"};
     auto description = "Read " + bounded_text(input->path, k_max_call_summary_bytes);
-    if (input->line_start || input->line_end) {
-        description += " lines " + std::to_string(input->line_start.value_or(1));
-        description += input->line_end ? "-" + std::to_string(*input->line_end) : "+";
-    } else if (input->offset || input->limit) {
-        description += " bytes from " + std::to_string(input->offset.value_or(0));
+    if (input->offset || input->limit) {
+        description += " lines from " + std::to_string(input->offset.value_or(1));
         if (input->limit) description += " limit " + std::to_string(*input->limit);
     }
+    return {.description = std::move(description)};
+}
+
+ToolCallPresentation describe_read_file_bytes(const provider::ToolCall &call) {
+    const auto input = parse_input<ReadFileBytesInput>(call.input);
+    if (!input) return {.description = "Read file bytes"};
+    auto description =
+        "Read " + bounded_text(input->path, k_max_call_summary_bytes) + " bytes from " + std::to_string(input->byte_offset.value_or(0));
+    if (input->byte_count) description += " count " + std::to_string(*input->byte_count);
     return {.description = std::move(description)};
 }
 
@@ -251,18 +373,16 @@ ToolRegistration read_file_registration() {
         .definition =
             {
                 .name = "read_file",
-                .description = "Read a local text file or a bounded byte/line range. Use byte offsets for large generated files and "
-                               "one-based inclusive line ranges for source inspection. Do not combine byte and line ranges.",
+                .description = "Read a local text file by line. Offset is one-based and limit is a line count. Omit both to read from "
+                               "the beginning. Output is bounded by the current context budget; use read_file_bytes for large generated "
+                               "files.",
                 .input_schema =
                     {
                         .properties =
                             {
                                 {"path", {.type = "string", .description = "Absolute path, or a path relative to the working directory."}},
-                                {"offset", {.type = "integer", .description = "Zero-based byte offset. Defaults to 0."}},
-                                {"limit",
-                                 {.type = "integer", .description = "Maximum bytes to return, capped at 131072. Defaults to 131072."}},
-                                {"line_start", {.type = "integer", .description = "One-based first line. Defaults to 1."}},
-                                {"line_end", {.type = "integer", .description = "One-based inclusive last line. Omit to read onward."}},
+                                {"offset", {.type = "integer", .description = "One-based first line. Defaults to 1."}},
+                                {"limit", {.type = "integer", .description = "Maximum number of lines to return. Omit to read onward."}},
                             },
                         .required = {"path"},
                     },
@@ -271,16 +391,56 @@ ToolRegistration read_file_registration() {
         .validate = [](const provider::ToolCall &call) -> Result<void> {
             auto input = parse_input<ReadFileInput>(call.input);
             if (!input) return outcome_error(std::move(input).error());
-            return {};
+            return validate_read_file_input(*input);
         },
-        .execute = [](const ToolSet &tools, const provider::ToolCall &call) -> Task<provider::ToolResult, Error> {
+        .execute = [](const ToolSet &tools, const provider::ToolCall &call,
+                      const ToolExecutionContext &context) -> Task<provider::ToolResult, Error> {
             auto input = co_await or_fail(parse_input<ReadFileInput>(call.input));
             provider::ToolResult result{.call_id = call.id};
-            result.content = tool_read_file(tools, input);
+            result.content = tool_read_file(tools, input, context);
             result.is_error = result.content.starts_with("Error:");
             co_return result;
         },
         .describe = describe_read_file,
+        .summarize = summarize_read_file,
+    };
+}
+
+ToolRegistration read_file_bytes_registration() {
+    return {
+        .definition =
+            {
+                .name = "read_file_bytes",
+                .description = "Read a bounded byte range from a local text file. Use this for large generated files or to continue "
+                               "from a byte truncation marker; use read_file for ordinary source inspection. Actual output is bounded "
+                               "by the current context budget.",
+                .input_schema =
+                    {
+                        .properties =
+                            {
+                                {"path", {.type = "string", .description = "Absolute path, or a path relative to the working directory."}},
+                                {"byte_offset", {.type = "integer", .description = "Zero-based byte offset. Defaults to 0."}},
+                                {"byte_count",
+                                 {.type = "integer", .description = "Requested number of bytes. Defaults to the current output budget."}},
+                            },
+                        .required = {"path"},
+                    },
+            },
+        .execution_mode = ToolExecutionMode::PARALLEL,
+        .validate = [](const provider::ToolCall &call) -> Result<void> {
+            auto input = parse_input<ReadFileBytesInput>(call.input);
+            if (!input) return outcome_error(std::move(input).error());
+            return validate_read_file_bytes_input(*input);
+        },
+        .execute = [](const ToolSet &tools, const provider::ToolCall &call,
+                      const ToolExecutionContext &context) -> Task<provider::ToolResult, Error> {
+            auto input = co_await or_fail(parse_input<ReadFileBytesInput>(call.input));
+            provider::ToolResult result{.call_id = call.id};
+            result.content = tool_read_file_bytes(tools, input, context);
+            result.is_error = result.content.starts_with("Error:");
+            co_return result;
+        },
+        .describe = describe_read_file_bytes,
         .summarize = summarize_read_file,
     };
 }
@@ -294,6 +454,9 @@ ToolCallPresentation fallback_description(const provider::ToolCall &call) {
     if (call.name == "read_file") {
         return {.description = "Read file"};
     }
+    if (call.name == "read_file_bytes") {
+        return {.description = "Read file bytes"};
+    }
     return {.description = "Run " + bounded_text(call.name, k_max_call_summary_bytes)};
 }
 
@@ -302,6 +465,7 @@ ToolCallPresentation fallback_description(const provider::ToolCall &call) {
 ToolSet::ToolSet(std::filesystem::path working_directory)
     : working_directory(std::move(working_directory)), shell_tasks(make_shell_task_manager(this->working_directory)) {
     lighter::check(static_cast<bool>(register_tool(read_file_registration())), "failed to register read_file");
+    lighter::check(static_cast<bool>(register_tool(read_file_bytes_registration())), "failed to register read_file_bytes");
     lighter::check(static_cast<bool>(register_tool(make_apply_patch_tool())), "failed to register apply_patch");
     for (auto &tool : make_exec_tools(*shell_tasks)) {
         lighter::check(static_cast<bool>(register_tool(std::move(tool))), "failed to register exec tool");
@@ -336,9 +500,12 @@ Result<void> ToolSet::validate(const provider::ToolCall &call) const {
     return {};
 }
 
-Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &call) const {
+Task<provider::ToolResult, Error> ToolSet::execute(const provider::ToolCall &call, ToolExecutionContext context) const {
+    context.max_output_bytes = std::min(context.max_output_bytes, k_max_tool_output_bytes);
     if (const auto *tool = find_registration(registrations, call.name)) {
-        co_return co_await tool->execute(*this, call).or_fail();
+        auto result = co_await tool->execute(*this, call, context).or_fail();
+        sanitize_tool_result(result, context.max_output_bytes);
+        co_return result;
     }
     co_await fail(Error::tool("unknown tool: " + call.name));
 }
