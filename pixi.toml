@@ -25,6 +25,9 @@ test-all = { cmd = "xmake test && python -m pytest tests/integration -v", depend
 test-linux = "python scripts/test_wsl.py"
 test-linux-release = "python scripts/test_wsl.py --mode release"
 test-linux-sanitize = "python scripts/test_wsl.py --mode sanitize"
+test-remote-linux = "python scripts/test_remote_linux.py"
+test-remote-linux-release = "python scripts/test_remote_linux.py --mode release"
+test-remote-linux-sanitize = "python scripts/test_remote_linux.py --mode sanitize"
 
 [dependencies]
 python = ">=3.14"

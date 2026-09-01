@@ -35,9 +35,18 @@ local function _generate_header(target)
         raise("%s: the project version is unavailable", rule_name)
     end
 
-    local commit = git_output({"rev-parse", "HEAD"}) or ""
-    local status = commit ~= "" and git_output({"status", "--porcelain=v1", "--untracked-files=normal"}) or ""
-    local dirty = status ~= nil and status ~= ""
+    local commit = os.getenv("LIMINAL_SOURCE_COMMIT") or git_output({"rev-parse", "HEAD"}) or ""
+    local dirty_override = os.getenv("LIMINAL_SOURCE_DIRTY")
+    local dirty
+    if dirty_override then
+        if dirty_override ~= "0" and dirty_override ~= "1" then
+            raise("%s: LIMINAL_SOURCE_DIRTY must be 0 or 1", rule_name)
+        end
+        dirty = dirty_override == "1"
+    else
+        local status = commit ~= "" and git_output({"status", "--porcelain=v1", "--untracked-files=normal"}) or ""
+        dirty = status ~= nil and status ~= ""
+    end
     local headerroot = path.join(target:autogendir(), "rules", rule_name)
     local headerdir = path.join(headerroot, "xmake", "version")
     local headerfile = path.join(headerdir, "liminal.hpp")
