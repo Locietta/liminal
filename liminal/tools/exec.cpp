@@ -307,7 +307,11 @@ void prune_shell_tasks(ShellTaskManager &manager) {
     for (auto iterator = manager.tasks.begin(); iterator != manager.tasks.end();) {
         const auto &task = *iterator->second;
         const auto end = task.output_offset + task.output.size();
-        if (!task.running && (task.killed || task.delivered_offset >= end)) {
+        // A killed session exits like any other and its response delivers
+        // output, so the delivery rule alone decides when it can go; reclaiming
+        // it earlier would discard bytes the kill response told the model to
+        // poll for.
+        if (!task.running && task.delivered_offset >= end) {
             iterator = manager.tasks.erase(iterator);
         } else {
             ++iterator;

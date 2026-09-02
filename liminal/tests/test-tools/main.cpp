@@ -549,6 +549,45 @@ lighter::Task<> exercise_shell_session_kill(ToolSet &tools) {
     require(late.has_error(), "writing to a killed session must be rejected");
 }
 
+/// A kill response may leave output behind and tell the model to poll for it.
+/// Starting another command must not reclaim the killed session before that
+/// output has been read.
+lighter::Task<> exercise_killed_session_output_survives_prune(ToolSet &tools) {
+#ifdef _WIN32
+    constexpr std::string_view command = R"json({"cmd":"Write-Output ('x' * 6000); Start-Sleep 300","yield_time_ms":25})json";
+    constexpr std::string_view quick = R"json({"cmd":"Write-Output done","yield_time_ms":5000})json";
+#else
+    constexpr std::string_view command = R"json({"cmd":"printf '%06000d\n' 0; sleep 300","yield_time_ms":25})json";
+    constexpr std::string_view quick = R"json({"cmd":"echo done","yield_time_ms":5000})json";
+#endif
+    auto started = co_await tools.execute(make_call("start", "exec_command", command), k_test_grant);
+    require(started.has_value() && !tool_outcome_is_error(started->kind) && started->receipt.contains("status: running"),
+            "the chatty command must report a running session");
+
+    ExecObservations observations;
+    observations.append(*started);
+    for (usize attempt = 0; attempt < 8 && observations.output.empty(); ++attempt) {
+        auto polled = co_await tools.execute(
+            make_call("poll", "write_stdin", R"({"session_id":1,"yield_time_ms":3000,"max_output_chars":1024})"), k_test_grant);
+        require(polled.has_value(), "polling the chatty session failed");
+        observations.append(*polled);
+    }
+    require(!observations.output.empty(), "the chatty session produced no output: " + observations.diagnostics);
+
+    auto killed = co_await tools.execute(
+        make_call("kill", "write_stdin", R"({"session_id":1,"kill":true,"yield_time_ms":5000,"max_output_chars":1024})"), k_test_grant);
+    require(killed.has_value() && killed->receipt.contains("killed: true") && killed->receipt.contains("output_remaining_bytes"),
+            "the kill response must still advertise the output it left behind: " + (killed ? killed->receipt : killed.error().message()));
+
+    auto other = co_await tools.execute(make_call("other", "exec_command", quick), k_test_grant);
+    require(other.has_value() && !tool_outcome_is_error(other->kind), "starting a second command failed");
+
+    auto remaining =
+        co_await tools.execute(make_call("remaining", "write_stdin", R"({"session_id":1,"yield_time_ms":1000})"), k_test_grant);
+    require(remaining.has_value() && !remaining->payload.empty(), "a killed session must keep its unread output until it is polled: " +
+                                                                      (remaining ? remaining->receipt : remaining.error().message()));
+}
+
 void test_shell_session_eof_and_kill() {
     {
         lighter::EventLoop loop;
@@ -562,6 +601,14 @@ void test_shell_session_eof_and_kill() {
         lighter::EventLoop loop;
         ToolSet tools(std::filesystem::current_path());
         auto task = exercise_shell_session_kill(tools);
+        loop.schedule(task);
+        loop.run();
+        std::ignore = task.result();
+    }
+    {
+        lighter::EventLoop loop;
+        ToolSet tools(std::filesystem::current_path());
+        auto task = exercise_killed_session_output_survives_prune(tools);
         loop.schedule(task);
         loop.run();
         std::ignore = task.result();
