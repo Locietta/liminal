@@ -265,7 +265,9 @@ bool matches_at(std::span<const std::string> lines, std::span<const std::string>
 
 std::optional<usize> find_sequence(std::span<const std::string> lines, std::span<const std::string> sequence, usize start,
                                    bool end_of_file = false) {
-    if (sequence.empty()) return lines.size();
+    // An insert-only hunk has nothing to match: it lands at the current
+    // cursor (directly after its context anchor), or at EOF when requested.
+    if (sequence.empty()) return end_of_file ? lines.size() : start;
     if (sequence.size() > lines.size()) return std::nullopt;
     const auto last = lines.size() - sequence.size();
     if (start > last) return std::nullopt;

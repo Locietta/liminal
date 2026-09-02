@@ -359,6 +359,39 @@ void test_apply_patch_resolves_files_when_executed() {
     std::filesystem::remove_all(directory, remove_error);
 }
 
+void test_apply_patch_insert_only_hunk_lands_after_its_anchor() {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto directory = std::filesystem::temp_directory_path() / ("liminal-patch-insert-" + std::to_string(nonce));
+    std::filesystem::create_directories(directory);
+    {
+        std::ofstream output(directory / "source.txt", std::ios::binary);
+        output << "class Foo\nbody\nclass Bar\nbody\n";
+    }
+
+    ToolSet tools(directory);
+    auto anchored = tools.prepare(
+        make_call("anchored", "apply_patch",
+                  R"json({"patch":"*** Begin Patch\n*** Update File: source.txt\n@@ class Foo\n+inserted\n*** End Patch"})json"));
+    require(anchored.has_value(), "an insert-only hunk with a context anchor must prepare");
+    auto anchored_outcome = execute_prepared(*std::move(anchored));
+    require(anchored_outcome && !tool_outcome_is_error(anchored_outcome->kind), "an anchored insert-only hunk must apply");
+
+    auto at_end = tools.prepare(
+        make_call("at-end", "apply_patch",
+                  R"json({"patch":"*** Begin Patch\n*** Update File: source.txt\n@@\n+trailing\n*** End of File\n*** End Patch"})json"));
+    require(at_end.has_value(), "an insert-only hunk at end of file must prepare");
+    auto at_end_outcome = execute_prepared(*std::move(at_end));
+    require(at_end_outcome && !tool_outcome_is_error(at_end_outcome->kind), "an end-of-file insert-only hunk must apply");
+
+    std::ifstream source(directory / "source.txt", std::ios::binary);
+    const std::string source_text((std::istreambuf_iterator<char>(source)), std::istreambuf_iterator<char>());
+    require(source_text == "class Foo\ninserted\nbody\nclass Bar\nbody\ntrailing\n",
+            "insert-only hunks must land directly after their anchor, or at end of file only when requested: got " + source_text);
+
+    std::error_code remove_error;
+    std::filesystem::remove_all(directory, remove_error);
+}
+
 struct ExecObservations {
     void append(const ToolOutcome &result) {
         if (!diagnostics.empty()) diagnostics += '\n';
@@ -537,6 +570,7 @@ i32 run_all() {
     test_read_file_is_bounded_and_regular();
     test_apply_patch_operations_are_validated_before_writes();
     test_apply_patch_resolves_files_when_executed();
+    test_apply_patch_insert_only_hunk_lands_after_its_anchor();
     test_shell_task_interaction();
     test_shell_output_receipt_is_resumable();
     test_distinct_shell_tasks_interact_concurrently();
