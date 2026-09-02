@@ -337,7 +337,7 @@ ToolOutcome read_outcome(std::string call_id, Result<ReadResult> read) {
 
 namespace {
 
-ToolCallPresentation describe_read_file(const provider::ToolCall &call) {
+ToolCallPresentation describe_read_file(const provider::ToolCall &call) noexcept {
     const auto input = parse_input<ReadFileInput>(call.input);
     if (!input) return {.description = "Read file"};
     auto description = "Read " + bounded_text(input->path, k_max_call_summary_bytes);
@@ -348,7 +348,7 @@ ToolCallPresentation describe_read_file(const provider::ToolCall &call) {
     return {.description = std::move(description)};
 }
 
-ToolCallPresentation describe_read_file_bytes(const provider::ToolCall &call) {
+ToolCallPresentation describe_read_file_bytes(const provider::ToolCall &call) noexcept {
     const auto input = parse_input<ReadFileBytesInput>(call.input);
     if (!input) return {.description = "Read file bytes"};
     auto description =
@@ -357,7 +357,7 @@ ToolCallPresentation describe_read_file_bytes(const provider::ToolCall &call) {
     return {.description = std::move(description)};
 }
 
-std::string summarize_read_file(const provider::ToolCall &, const ToolOutcome &result) {
+std::string summarize_read_file(const provider::ToolCall &, const ToolOutcome &result) noexcept {
     if (tool_outcome_is_error(result.kind)) return generic_result_summary(result);
     usize lines = 0;
     if (!result.payload.empty()) {
@@ -544,12 +544,12 @@ ToolExecutionMode ToolSet::execution_mode(std::string_view name) const {
     return tool ? tool->execution_mode : ToolExecutionMode::EXCLUSIVE;
 }
 
-ToolCallPresentation ToolSet::describe(const provider::ToolCall &call) const {
+ToolCallPresentation ToolSet::describe(const provider::ToolCall &call) const noexcept {
     const auto *tool = find_registration(registrations, call.name);
     return tool && tool->describe ? tool->describe(call) : fallback_description(call);
 }
 
-std::string ToolSet::summarize(const provider::ToolCall &call, const ToolOutcome &outcome) const {
+std::string ToolSet::summarize(const provider::ToolCall &call, const ToolOutcome &outcome) const noexcept {
     const auto *tool = find_registration(registrations, call.name);
     return tool && tool->summarize ? tool->summarize(call, outcome) : generic_result_summary(outcome);
 }

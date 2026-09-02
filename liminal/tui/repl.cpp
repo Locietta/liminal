@@ -598,7 +598,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                     application::SessionCoordinator *sessions, const session::SessionWorkspace &workspace, SelectableListDialog &dialog,
                     CompactPickerDialog &model_picker, SessionFailure &failure) {
     lighter::Error render_error;
-    EventSink events = [&renderer, &render_error, &control](const Event &event) {
+    EventSink events = [&renderer, &render_error, &control](const Event &event) noexcept {
         if (render_error) return;
         render_error = renderer.render(event);
         if (render_error && control.active_task) control.active_task->cancel();

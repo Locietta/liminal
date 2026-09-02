@@ -83,8 +83,12 @@ struct ToolRegistration {
     std::move_only_function<Result<PreparedToolExecution>(const ToolSet &, const provider::ToolCall &) const> prepare;
     std::move_only_function<Result<void>(const provider::ToolCall &) const> validate;
     std::move_only_function<lighter::Task<ToolOutcome, Error>(const ToolSet &, const provider::ToolCall &, ToolOutputGrant) const> execute;
-    std::move_only_function<ToolCallPresentation(const provider::ToolCall &) const> describe;
-    std::move_only_function<std::string(const provider::ToolCall &, const ToolOutcome &) const> summarize;
+    /// Presentation callbacks cannot fail: the display layer must always be
+    /// told what a call is and how it ended, and there is no meaningful
+    /// recovery from a presentation error. Report tool failures through the
+    /// outcome, never by throwing here.
+    std::move_only_function<ToolCallPresentation(const provider::ToolCall &) const noexcept> describe;
+    std::move_only_function<std::string(const provider::ToolCall &, const ToolOutcome &) const noexcept> summarize;
 };
 
 struct ToolSet {
@@ -107,8 +111,8 @@ struct ToolSet {
     Result<PreparedToolCall> prepare(provider::ToolCall call) const;
     lighter::Task<ToolOutcome, Error> execute(provider::ToolCall call, ToolOutputGrant grant) const;
     ToolExecutionMode execution_mode(std::string_view name) const;
-    ToolCallPresentation describe(const provider::ToolCall &call) const;
-    std::string summarize(const provider::ToolCall &call, const ToolOutcome &outcome) const;
+    ToolCallPresentation describe(const provider::ToolCall &call) const noexcept;
+    std::string summarize(const provider::ToolCall &call, const ToolOutcome &outcome) const noexcept;
 
     std::filesystem::path working_directory;
 

@@ -541,12 +541,12 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
                 .call_id = call.id, .kind = response.kind, .receipt = std::move(response.receipt), .payload = std::move(response.payload)};
         },
         .describe =
-            [](const provider::ToolCall &call) {
+            [](const provider::ToolCall &call) noexcept {
                 const auto input = parse_input<ExecCommandInput>(call.input);
                 return input ? ToolCallPresentation{.command = bounded_text(input->cmd)} :
                                ToolCallPresentation{.description = "Run command"};
             },
-        .summarize = [](const provider::ToolCall &, const ToolOutcome &result) { return summarize_exec(result); },
+        .summarize = [](const provider::ToolCall &, const ToolOutcome &result) noexcept { return summarize_exec(result); },
     };
 
     auto write_stdin = ToolRegistration{
@@ -585,7 +585,7 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
                 .call_id = call.id, .kind = response.kind, .receipt = std::move(response.receipt), .payload = std::move(response.payload)};
         },
         .describe =
-            [](const provider::ToolCall &call) {
+            [](const provider::ToolCall &call) noexcept {
                 const auto input = parse_input<WriteStdinInput>(call.input);
                 if (!input) return ToolCallPresentation{.description = "Write to exec session"};
                 const auto writes = input->chars && !input->chars->empty();
@@ -595,7 +595,7 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
                                                                   "Poll exec session ";
                 return ToolCallPresentation{.description = action + std::to_string(input->session_id)};
             },
-        .summarize = [](const provider::ToolCall &, const ToolOutcome &result) { return summarize_exec(result); },
+        .summarize = [](const provider::ToolCall &, const ToolOutcome &result) noexcept { return summarize_exec(result); },
     };
     return {std::move(exec), std::move(write_stdin)};
 }

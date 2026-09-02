@@ -83,6 +83,8 @@ struct ModelSelected {
 
 using Event = std::variant<PromptSubmitted, AssistantTextDelta, AssistantMessageCompleted, ToolStarted, ToolCompleted,
                            ProviderActivityCompleted, TaskCompleted, TaskCancelled, TaskFailed, SessionNotice, ModelSelected>;
-using EventSink = std::copyable_function<void(const Event &) const>;
+/// Event sinks cannot fail. They observe the agent loop; a sink that could
+/// throw would turn a rendering problem into a stranded tool batch.
+using EventSink = std::copyable_function<void(const Event &) const noexcept>;
 
 } // namespace liminal

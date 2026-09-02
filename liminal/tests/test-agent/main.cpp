@@ -158,7 +158,7 @@ void test_successful_task() {
             "an agent must resolve its runtime and application instructions");
 
     std::vector<Event> events;
-    EventSink sink = [&events](const Event &event) { events.push_back(event); };
+    EventSink sink = [&events](const Event &event) noexcept { events.push_back(event); };
 
     lighter::EventLoop loop;
     auto task = agent.run_task("inspect", sink);
@@ -475,13 +475,24 @@ void test_throwing_tool_settles_its_batch() {
                  .entry = {.provider = "fake", .id = "bounded-context", .context_window = 20'000, .max_output_tokens = 500}},
                 tools, {});
 
+    std::vector<Event> events;
     lighter::EventLoop loop;
-    auto task = agent.run_task("exercise a throwing tool", {});
+    auto task = agent.run_task("exercise a throwing tool", [&events](const Event &event) noexcept { events.push_back(event); });
     loop.schedule(task);
     loop.run();
 
     require(task.result().has_value(), "a throwing tool must not hang or fail the task");
     require(*executions == 1, "the tool queued behind a throwing tool must still run");
+    const auto boom_started = std::ranges::any_of(events, [](const Event &event) {
+        const auto *started = std::get_if<ToolStarted>(&event);
+        return started && started->call_id == "boom";
+    });
+    const auto boom_completed = std::ranges::find_if(events, [](const Event &event) {
+        const auto *completed = std::get_if<ToolCompleted>(&event);
+        return completed && completed->call_id == "boom";
+    });
+    require(boom_started && boom_completed != events.end() && std::get<ToolCompleted>(*boom_completed).is_error,
+            "the display layer must see the throwing call start and then complete as a failure");
     const auto result_entry = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
         return std::holds_alternative<session::ToolOutcomes>(entry.payload);
     });
@@ -526,7 +537,7 @@ void test_tool_waits_for_committed_output_allowance() {
     Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
     std::vector<Event> events;
     lighter::EventLoop loop;
-    auto task = agent.run_task("work with committed output", [&events](const Event &event) { events.push_back(event); });
+    auto task = agent.run_task("work with committed output", [&events](const Event &event) noexcept { events.push_back(event); });
     loop.schedule(task);
     loop.run();
 
@@ -693,7 +704,7 @@ void test_cancelled_task_retains_semantic_progress() {
     lighter::EventLoop loop;
     auto task = agent.run_task(
         "start slow work",
-        [&cancellation](const Event &event) {
+        [&cancellation](const Event &event) noexcept {
             if (std::holds_alternative<AssistantMessageCompleted>(event)) cancellation.cancel();
         },
         cancellation.token());
@@ -785,7 +796,7 @@ void test_invalid_tool_is_rejected_before_dispatch() {
     std::vector<Event> events;
     Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools);
     lighter::EventLoop loop;
-    auto task = agent.run_task("use an invalid tool", [&events](const Event &event) { events.push_back(event); });
+    auto task = agent.run_task("use an invalid tool", [&events](const Event &event) noexcept { events.push_back(event); });
     loop.schedule(task);
     loop.run();
 
@@ -974,7 +985,7 @@ void test_automatic_compaction() {
 
     std::vector<Event> events;
     lighter::EventLoop loop;
-    auto task = agent.run_task("latest", [&events](const Event &event) { events.push_back(event); });
+    auto task = agent.run_task("latest", [&events](const Event &event) noexcept { events.push_back(event); });
     loop.schedule(task);
     loop.run();
 
@@ -1032,7 +1043,7 @@ void test_multiple_automatic_compactions_in_one_task() {
 
     std::vector<Event> events;
     lighter::EventLoop loop;
-    auto task = agent.run_task("latest", [&events](const Event &event) { events.push_back(event); });
+    auto task = agent.run_task("latest", [&events](const Event &event) noexcept { events.push_back(event); });
     loop.schedule(task);
     loop.run();
 
@@ -1109,7 +1120,7 @@ void test_failed_task_does_not_report_staged_compaction() {
 
     std::vector<Event> events;
     lighter::EventLoop loop;
-    auto task = agent.run_task("latest", [&events](const Event &event) { events.push_back(event); });
+    auto task = agent.run_task("latest", [&events](const Event &event) noexcept { events.push_back(event); });
     loop.schedule(task);
     loop.run();
     auto outcome = task.result();

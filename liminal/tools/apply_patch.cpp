@@ -468,7 +468,7 @@ Result<PreparedToolExecution> prepare_apply_patch(const ToolSet &tools, const pr
     };
 }
 
-ToolCallPresentation describe_apply_patch(const provider::ToolCall &) { return {.description = "Apply patch"}; }
+ToolCallPresentation describe_apply_patch(const provider::ToolCall &) noexcept { return {.description = "Apply patch"}; }
 
 } // namespace
 
