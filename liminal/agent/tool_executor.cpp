@@ -1,12 +1,15 @@
 #include "tool_executor.h"
 
+#include <exception>
 #include <memory>
 #include <optional>
+#include <string>
 #include <tuple>
 #include <utility>
 
 #include <lighter/async/async.h>
 #include <lighter/async/runtime/timeout.h>
+#include <lighter/utils/config.h>
 
 #include <liminal/text.h>
 
@@ -134,16 +137,37 @@ void store_execution_error(const std::shared_ptr<ToolExecutor::State> &state, us
     state->results[slot] = std::move(outcome);
 }
 
+/// Runs one tool call under the executor's cancellation token and records
+/// its outcome. Every exit path, including a tool that throws, leaves the
+/// slot settled so the batch and executor counters always reach zero.
+Task<> settle_slot(std::shared_ptr<ToolExecutor::State> state, usize slot, Task<ToolOutcome, Error> execution) {
+    std::optional<std::string> raised;
+#if LIGHTER_ENABLE_EXCEPTIONS
+    try {
+#endif
+        auto result = co_await lighter::with_token(std::move(execution), state->cancellation.token());
+        if (!state->settlement_closed) {
+            if (result.has_value()) {
+                state->results[slot] = *std::move(result);
+            } else if (result.has_error()) {
+                store_execution_error(state, slot, result.error().message());
+            }
+        }
+#if LIGHTER_ENABLE_EXCEPTIONS
+    } catch (const std::exception &error) {
+        raised = error.what();
+    } catch (...) {
+        raised = "unknown exception";
+    }
+#endif
+    if (raised && !state->settlement_closed) {
+        store_execution_error(state, slot, "tool execution raised an exception: " + *raised);
+    }
+}
+
 Task<> run_parallel(std::shared_ptr<ToolExecutor::State> state, usize slot, std::shared_ptr<lighter::Event> predecessor,
                     std::shared_ptr<ParallelBatch> batch) {
-    auto result = co_await lighter::with_token(execute_parallel(state, slot, std::move(predecessor)), state->cancellation.token());
-    if (!state->settlement_closed) {
-        if (result.has_value()) {
-            state->results[slot] = *std::move(result);
-        } else if (result.has_error()) {
-            store_execution_error(state, slot, result.error().message());
-        }
-    }
+    co_await settle_slot(state, slot, execute_parallel(state, slot, std::move(predecessor)));
     batch->complete();
     state->complete();
 }
@@ -157,15 +181,7 @@ Task<ToolOutcome, Error> execute_exclusive(std::shared_ptr<ToolExecutor::State> 
 
 Task<> run_exclusive(std::shared_ptr<ToolExecutor::State> state, usize slot, std::shared_ptr<lighter::Event> predecessor,
                      std::shared_ptr<ParallelBatch> preceding_batch, std::shared_ptr<lighter::Event> completed) {
-    auto result = co_await lighter::with_token(execute_exclusive(state, slot, std::move(predecessor), std::move(preceding_batch)),
-                                               state->cancellation.token());
-    if (!state->settlement_closed) {
-        if (result.has_value()) {
-            state->results[slot] = *std::move(result);
-        } else if (result.has_error()) {
-            store_execution_error(state, slot, result.error().message());
-        }
-    }
+    co_await settle_slot(state, slot, execute_exclusive(state, slot, std::move(predecessor), std::move(preceding_batch)));
     completed->set();
     state->complete();
 }

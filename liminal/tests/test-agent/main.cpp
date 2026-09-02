@@ -445,6 +445,55 @@ void test_tool_error_results_share_the_output_guard() {
     provider_mock.verify();
 }
 
+void test_throwing_tool_settles_its_batch() {
+    ToolSet tools(std::filesystem::current_path());
+    auto throwing = tools.register_tool({
+        .definition = {.name = "test_throwing"},
+        .execute = [](const ToolSet &, const provider::ToolCall &, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
+            co_await lighter::yield();
+            throw std::runtime_error("tool blew up");
+        },
+    });
+    auto executions = register_noop_tool(tools);
+    require(throwing.has_value(), "failed to register the throwing tool");
+
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>()
+        .then_calls([](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            emit_tool_call(callbacks, "boom", "test_throwing");
+            emit_tool_call(callbacks, "after", "test_noop");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+        })
+        .then_calls([](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        });
+    Agent agent({.handle = provider_mock.handle(),
+                 .entry = {.provider = "fake", .id = "bounded-context", .context_window = 20'000, .max_output_tokens = 500}},
+                tools, {});
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("exercise a throwing tool", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "a throwing tool must not hang or fail the task");
+    require(*executions == 1, "the tool queued behind a throwing tool must still run");
+    const auto result_entry = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
+        return std::holds_alternative<session::ToolOutcomes>(entry.payload);
+    });
+    require(result_entry != agent.session.entries.end(), "tool outcomes were not retained");
+    const auto &results = std::get<session::ToolOutcomes>(result_entry->payload).outcomes;
+    require(results.size() == 2, "both tool calls must settle");
+    require(results[0].call_id == "boom" && results[0].kind == ToolOutcomeKind::OUTCOME_UNKNOWN &&
+                results[0].payload.contains("tool blew up"),
+            "a throwing tool must settle as an execution error carrying the exception message");
+    require(results[1].call_id == "after" && !tool_outcome_is_error(results[1].kind), "the following tool must complete normally");
+    provider_mock.verify();
+}
+
 void test_tool_waits_for_committed_output_allowance() {
     ToolSet tools(std::filesystem::current_path());
     auto registered = tools.register_tool({
@@ -1051,6 +1100,7 @@ i32 run_all() {
     test_insufficient_batch_capacity_prevents_tool_dispatch();
     test_tool_payload_framing_is_reserved_during_planning();
     test_tool_error_results_share_the_output_guard();
+    test_throwing_tool_settles_its_batch();
     test_tool_waits_for_committed_output_allowance();
     test_done_requires_terminal_answer();
     test_failed_completed_round_closes_queued_tool_calls();
