@@ -179,15 +179,18 @@ void Manager::drain_completed_impl(void *arming_request) noexcept {
             continue;
         }
 
+        // The CURLMsg does not survive curl_multi_remove_handle, so copy the
+        // transfer result before detaching the easy handle.
+        const auto result = msg->data.result;
         remove_request(easy);
         if (arming_request != nullptr && opaque == arming_request) {
             detail::mark_inflight_request_removed(request);
-            detail::complete_inflight_request(request, msg->data.result, true);
+            detail::complete_inflight_request(request, result, true);
             continue;
         }
 
         detail::mark_inflight_request_removed(request);
-        deferred.emplace_back(std::move(request), msg->data.result);
+        deferred.emplace_back(std::move(request), result);
     }
 
     if (deferred.empty()) {
