@@ -12,6 +12,7 @@
 
 #include <lighter/async/detail/native_event_queue.h>
 #include <lighter/async/detail/terminal_input_decoder.h>
+#include <lighter/utils/panic.h>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -46,6 +47,7 @@ struct TerminalSession::Self {
     Lifecycle lifecycle = Lifecycle::EMPTY;
     bool owns_process_terminal = false;
     bool virtual_input = true;
+    bool alternate_screen_active = false;
 
 #ifdef _WIN32
     HANDLE input = INVALID_HANDLE_VALUE;
@@ -75,6 +77,7 @@ struct TerminalSession::Self {
     Error write_native(std::string_view bytes);
     Error apply_terminal_state(bool enter_alternate_screen = true);
     Error restore_terminal_state(bool leave_alternate_screen = true);
+    void arm_emergency_restore(bool restore_modes);
     Error start_worker();
     void stop_worker() noexcept;
     void shutdown() noexcept;
@@ -104,6 +107,68 @@ TerminalEvent key_event(TerminalKey key, TerminalModifiers modifiers = TerminalM
 }
 
 TerminalEvent text_event(std::string text) { return TerminalEvent{.kind = TerminalEventKind::TEXT, .text = std::move(text)}; }
+
+/// Snapshot of what it takes to hand the terminal back to the shell from a
+/// panic, contract violation, or std::terminate, where the session object is
+/// unreachable. Everything is pre-computed so the hook only performs raw
+/// writes and mode resets.
+struct EmergencyRestore {
+    std::atomic<bool> armed{false};
+    bool restore_modes = false;
+#ifdef _WIN32
+    HANDLE input = INVALID_HANDLE_VALUE;
+    HANDLE output = INVALID_HANDLE_VALUE;
+    DWORD input_mode = 0;
+    DWORD output_mode = 0;
+    UINT input_codepage = 0;
+    UINT output_codepage = 0;
+#else
+    i32 input_fd = -1;
+    i32 output_fd = -1;
+    termios mode{};
+#endif
+    std::array<char, 96> sequence{};
+    usize sequence_size = 0;
+};
+
+EmergencyRestore g_emergency_restore;
+
+void emergency_restore_terminal() noexcept {
+    auto &record = g_emergency_restore;
+    if (!record.armed.exchange(false, std::memory_order_acq_rel)) {
+        return;
+    }
+#ifdef _WIN32
+    DWORD written = 0;
+    WriteFile(record.output, record.sequence.data(), static_cast<DWORD>(record.sequence_size), &written, nullptr);
+    if (record.restore_modes) {
+        SetConsoleMode(record.input, record.input_mode);
+        SetConsoleMode(record.output, record.output_mode);
+        SetConsoleCP(record.input_codepage);
+        SetConsoleOutputCP(record.output_codepage);
+    }
+#else
+    std::string_view bytes(record.sequence.data(), record.sequence_size);
+    while (!bytes.empty()) {
+        const auto written = ::write(record.output_fd, bytes.data(), bytes.size());
+        if (written <= 0) {
+            if (written < 0 && errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        bytes.remove_prefix(static_cast<usize>(written));
+    }
+    if (record.restore_modes) {
+        ::tcsetattr(record.input_fd, TCSANOW, &record.mode);
+    }
+#endif
+}
+
+void disarm_emergency_restore() noexcept {
+    g_emergency_restore.armed.store(false, std::memory_order_release);
+    lighter::set_panic_hook(nullptr);
+}
 
 TerminalEvent resize_event(TerminalSize size) { return TerminalEvent{.kind = TerminalEventKind::RESIZE, .size = size}; }
 
@@ -765,7 +830,36 @@ Error TerminalSession::Self::apply_terminal_state(bool enter_alternate_screen) {
     }
 #endif
     lifecycle = Lifecycle::ACTIVE;
+    alternate_screen_active = alternate_screen_active || enter_alternate_screen;
+    arm_emergency_restore(true);
     return write_native(terminal_features(options, true, virtual_input, enter_alternate_screen));
+}
+
+/// Arms the panic hook with the sequence and modes that return the terminal to
+/// the shell from the current state. With `restore_modes` false only the
+/// alternate screen is left, for the editor handoff where the modes are
+/// already the shell's but the screen stays resident.
+void TerminalSession::Self::arm_emergency_restore(bool restore_modes) {
+    auto &record = g_emergency_restore;
+    record.armed.store(false, std::memory_order_release);
+    record.restore_modes = restore_modes;
+#ifdef _WIN32
+    record.input = input;
+    record.output = output;
+    record.input_mode = original_input_mode;
+    record.output_mode = original_output_mode;
+    record.input_codepage = original_input_codepage;
+    record.output_codepage = original_output_codepage;
+#else
+    record.input_fd = input_fd;
+    record.output_fd = output_fd;
+    record.mode = original_mode;
+#endif
+    const auto sequence = terminal_features(options, false, restore_modes && virtual_input, alternate_screen_active);
+    record.sequence_size = std::min(sequence.size(), record.sequence.size());
+    std::copy_n(sequence.data(), record.sequence_size, record.sequence.data());
+    lighter::set_panic_hook(&emergency_restore_terminal);
+    record.armed.store(true, std::memory_order_release);
 }
 
 Error TerminalSession::Self::restore_terminal_state(bool leave_alternate_screen) {
@@ -788,6 +882,14 @@ Error TerminalSession::Self::restore_terminal_state(bool leave_alternate_screen)
     }
 #endif
     lifecycle = Lifecycle::CAPTURED;
+    if (leave_alternate_screen) {
+        alternate_screen_active = false;
+    }
+    if (alternate_screen_active) {
+        arm_emergency_restore(false);
+    } else {
+        disarm_emergency_restore();
+    }
     return sequence_error;
 }
 
