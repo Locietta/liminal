@@ -114,6 +114,14 @@ protected:
         : m_begin(std::is_constant_evaluated() ? nullptr : first_element()),
           m_capacity(static_cast<size_storage_type>(std::is_constant_evaluated() ? 0 : inline_capacity)) {}
 
+    // A HybridVector is only ever the base subobject of a SmallVector. The
+    // implicit copy would slice a SmallVector into a second owner of the same
+    // buffer, so ownership transfer is limited to the SmallVector overloads.
+    HybridVector(const HybridVector &) = delete;
+    HybridVector(HybridVector &&) = delete;
+    HybridVector &operator=(const HybridVector &) = delete;
+    HybridVector &operator=(HybridVector &&) = delete;
+
     [[nodiscard]] constexpr pointer inline_begin() noexcept {
         if (std::is_constant_evaluated()) {
             return nullptr;
