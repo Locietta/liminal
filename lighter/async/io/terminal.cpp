@@ -115,6 +115,9 @@ TerminalEvent text_event(std::string text) { return TerminalEvent{.kind = Termin
 struct EmergencyRestore {
     std::atomic<bool> armed{false};
     bool restore_modes = false;
+    /// Hook that was installed before the terminal took over. It runs after
+    /// the terminal is restored and is reinstalled when the terminal lets go.
+    lighter::PanicHook previous = nullptr;
 #ifdef _WIN32
     HANDLE input = INVALID_HANDLE_VALUE;
     HANDLE output = INVALID_HANDLE_VALUE;
@@ -135,7 +138,11 @@ EmergencyRestore g_emergency_restore;
 
 void emergency_restore_terminal() noexcept {
     auto &record = g_emergency_restore;
+    const auto previous = record.previous;
     if (!record.armed.exchange(false, std::memory_order_acq_rel)) {
+        if (previous) {
+            previous();
+        }
         return;
     }
 #ifdef _WIN32
@@ -163,11 +170,20 @@ void emergency_restore_terminal() noexcept {
         ::tcsetattr(record.input_fd, TCSANOW, &record.mode);
     }
 #endif
+    if (previous) {
+        previous();
+    }
 }
 
 void disarm_emergency_restore() noexcept {
-    g_emergency_restore.armed.store(false, std::memory_order_release);
-    lighter::set_panic_hook(nullptr);
+    auto &record = g_emergency_restore;
+    record.armed.store(false, std::memory_order_release);
+    // Hand the slot back to whoever held it before the terminal. If someone
+    // else replaced the terminal's hook in the meantime, theirs stays.
+    if (auto current = lighter::set_panic_hook(record.previous); current != &emergency_restore_terminal) {
+        lighter::set_panic_hook(current);
+    }
+    record.previous = nullptr;
 }
 
 TerminalEvent resize_event(TerminalSize size) { return TerminalEvent{.kind = TerminalEventKind::RESIZE, .size = size}; }
@@ -858,7 +874,11 @@ void TerminalSession::Self::arm_emergency_restore(bool restore_modes) {
     const auto sequence = terminal_features(options, false, restore_modes && virtual_input, alternate_screen_active);
     record.sequence_size = std::min(sequence.size(), record.sequence.size());
     std::copy_n(sequence.data(), record.sequence_size, record.sequence.data());
-    lighter::set_panic_hook(&emergency_restore_terminal);
+    // Re-arming (resume, reclaim) finds our own hook installed; keep chaining
+    // to the hook that preceded the terminal rather than to ourselves.
+    if (auto prior = lighter::set_panic_hook(&emergency_restore_terminal); prior != &emergency_restore_terminal) {
+        record.previous = prior;
+    }
     record.armed.store(true, std::memory_order_release);
 }
 
