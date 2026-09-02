@@ -1,8 +1,10 @@
 #include "exec.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <csignal>
+#include <cwchar>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -11,6 +13,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <lighter/async/io/process.h>
 #include <lighter/async/io/watcher.h>
@@ -20,6 +23,10 @@
 #include <lighter/async/vocab/outcome.h>
 #include <lighter/codec/json/json.h>
 #include <lighter/encoding/utf8.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace liminal {
 
@@ -115,8 +122,43 @@ Result<usize> output_limit(std::optional<usize> requested) {
 usize budgeted_output_limit(usize requested, usize output_budget) { return std::min(requested, output_budget); }
 
 #ifdef _WIN32
-constexpr std::string_view k_pwsh_utf8_preamble = "[Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-                                                  "$OutputEncoding = [System.Text.Encoding]::UTF8; ";
+/// The user's script travels in this variable and is parsed as its own script
+/// block, so statements that must come first (`using`, `param`) stay valid
+/// while the console and pipeline encodings are pinned to UTF-8 beforehand.
+constexpr std::string_view k_pwsh_command_variable = "LIMINAL_EXEC_CMD";
+constexpr std::string_view k_pwsh_driver = "[Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+                                           "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+                                           "& ([scriptblock]::Create($env:LIMINAL_EXEC_CMD))";
+
+std::string narrow_utf8(const wchar_t *text, int length) {
+    if (length <= 0) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, text, length, nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<usize>(std::max(size, 0)), '\0');
+    if (size > 0) WideCharToMultiByte(CP_UTF8, 0, text, length, out.data(), size, nullptr, nullptr);
+    return out;
+}
+
+/// The parent environment plus one variable. libuv only fills in a handful of
+/// system variables when an explicit environment is given, so the inherited
+/// block has to be copied rather than extended.
+std::vector<std::string> environment_with(std::string_view name, std::string_view value) {
+    std::vector<std::string> env;
+    if (LPWCH block = GetEnvironmentStringsW()) {
+        for (const wchar_t *entry = block; *entry != L'\0'; entry += wcslen(entry) + 1) {
+            auto pair = narrow_utf8(entry, static_cast<int>(wcslen(entry)));
+            if (pair.size() > name.size() && pair[name.size()] == '=' &&
+                std::ranges::equal(std::string_view(pair).substr(0, name.size()), name, [](char a, char b) {
+                    return std::toupper(static_cast<unsigned char>(a)) == std::toupper(static_cast<unsigned char>(b));
+                })) {
+                continue;
+            }
+            env.push_back(std::move(pair));
+        }
+        FreeEnvironmentStringsW(block);
+    }
+    env.push_back(std::string(name) + "=" + std::string(value));
+    return env;
+}
 #endif
 
 std::string bounded_text(std::string_view text, usize limit = 2 * 1024) {
@@ -378,7 +420,8 @@ Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input, u
     // encoding to UTF-8 before the user's command runs.
     Process::Options options{
         .file = "pwsh",
-        .args = {"pwsh", "-NoProfile", "-NonInteractive", "-Command", std::string(k_pwsh_utf8_preamble) + input.cmd},
+        .args = {"pwsh", "-NoProfile", "-NonInteractive", "-Command", std::string(k_pwsh_driver)},
+        .env = environment_with(k_pwsh_command_variable, input.cmd),
         .cwd = directory.string(),
         .creation = {.process_group = true, .windows_hide = true},
         .streams = {Process::Stdio::pipe(true, false), Process::Stdio::pipe(false, true), Process::Stdio::pipe(false, true)},

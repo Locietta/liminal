@@ -686,6 +686,20 @@ void test_command_output_is_utf8() {
     auto outcome = execute(tools, std::move(call));
     require(outcome.has_value() && !tool_outcome_is_error(outcome->kind), "the UTF-8 echo command must succeed");
     require(outcome->payload.contains("héllo 你好"), "non-ASCII command output must reach the model as UTF-8, got: " + outcome->payload);
+
+#ifdef _WIN32
+    // Statements that must open a script have to survive the encoding setup.
+    auto leading = execute(
+        tools,
+        make_call("using", "exec_command",
+                  R"({"cmd":"using namespace System.Text; param($x = 'first'); [StringBuilder]::new(\"$x héllo\").ToString(); exit 3"})"));
+    require(leading.has_value() && leading->receipt.contains("exit_code: 3") && leading->payload.contains("first héllo"),
+            "using and param statements must remain the first statements of the user's script, got: " +
+                (leading ? leading->receipt + "\n" + leading->payload : leading.error().message()));
+    auto env = execute(
+        tools, make_call("env", "exec_command", R"json({"cmd":"Write-Output ('path:' + [string]::IsNullOrEmpty($env:PATH))"})json"));
+    require(env.has_value() && env->payload.contains("path:False"), "the exec shell must inherit the parent environment");
+#endif
 }
 
 void test_nonzero_command_is_an_error_result() {
