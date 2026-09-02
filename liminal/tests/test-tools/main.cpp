@@ -565,6 +565,18 @@ void test_distinct_shell_tasks_interact_concurrently() {
     std::filesystem::remove_all(directory, remove_error);
 }
 
+void test_command_output_is_utf8() {
+    ToolSet tools(std::filesystem::current_path());
+#ifdef _WIN32
+    auto call = make_call("utf8", "exec_command", R"({"cmd":"Write-Output 'héllo 你好'"})");
+#else
+    auto call = make_call("utf8", "exec_command", R"({"cmd":"printf 'héllo 你好\n'"})");
+#endif
+    auto outcome = execute(tools, std::move(call));
+    require(outcome.has_value() && !tool_outcome_is_error(outcome->kind), "the UTF-8 echo command must succeed");
+    require(outcome->payload.contains("héllo 你好"), "non-ASCII command output must reach the model as UTF-8, got: " + outcome->payload);
+}
+
 void test_nonzero_command_is_an_error_result() {
     ToolSet tools(std::filesystem::current_path());
 #ifdef _WIN32
@@ -588,6 +600,7 @@ i32 run_all() {
     test_shell_task_interaction();
     test_shell_output_receipt_is_resumable();
     test_distinct_shell_tasks_interact_concurrently();
+    test_command_output_is_utf8();
     test_nonzero_command_is_an_error_result();
     return 0;
 }

@@ -106,6 +106,11 @@ Result<usize> output_limit(std::optional<usize> requested) {
 
 usize budgeted_output_limit(usize requested, usize output_budget) { return std::min(requested, output_budget); }
 
+#ifdef _WIN32
+constexpr std::string_view k_pwsh_utf8_preamble = "[Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+                                                  "$OutputEncoding = [System.Text.Encoding]::UTF8; ";
+#endif
+
 std::string bounded_text(std::string_view text, usize limit = 2 * 1024) {
     if (text.size() <= limit) return std::string(text);
     auto end = limit;
@@ -360,9 +365,13 @@ Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input, u
     if (tasks.size() >= k_max_shell_tasks) co_await fail(Error::tool("too many live shell tasks"));
 
 #ifdef _WIN32
+    // pwsh writes piped output in the console's OEM/ANSI code page, so on a
+    // non-English locale every non-ASCII byte would reach the model as U+FFFD
+    // after sanitization. Pin both the console encodings and the pipeline
+    // encoding to UTF-8 before the user's command runs.
     Process::Options options{
         .file = "pwsh",
-        .args = {"pwsh", "-NoProfile", "-NonInteractive", "-Command", input.cmd},
+        .args = {"pwsh", "-NoProfile", "-NonInteractive", "-Command", std::string(k_pwsh_utf8_preamble) + input.cmd},
         .cwd = directory.string(),
         .creation = {.windows_hide = true},
         .streams = {Process::Stdio::pipe(true, false), Process::Stdio::pipe(false, true), Process::Stdio::pipe(false, true)},
