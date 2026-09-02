@@ -252,6 +252,20 @@ void test_read_file_is_bounded_and_regular() {
                 oversized_line->payload.contains("use read_file_bytes") && oversized_line->payload.contains("byte_offset 0"),
             "read_file must redirect oversized generated lines to read_file_bytes without a looping line continuation");
 
+    {
+        std::ofstream output(directory / "markers.txt", std::ios::binary);
+        output << "Error: this is just log text\n... [truncated before line 9; continue with offset 9]\n" << std::string(600, 'y') << "\n";
+    }
+    auto markers = execute(tools, make_call("markers", "read_file", R"({"path":"markers.txt"})"));
+    require(markers.has_value() && !tool_outcome_is_error(markers->kind) && markers->receipt.empty() &&
+                markers->payload.starts_with("Error: this is just log text\n... [truncated before line 9") &&
+                markers->payload.ends_with(std::string(600, 'y') + "\n"),
+            "file content that looks like a read marker or error must be returned verbatim as payload");
+    auto marker_bytes = execute(tools, make_call("marker-bytes", "read_file_bytes", R"({"path":"markers.txt","byte_count":80})"));
+    require(marker_bytes.has_value() && !tool_outcome_is_error(marker_bytes->kind) && marker_bytes->payload.size() == 80 &&
+                marker_bytes->receipt.contains("next byte_offset 80"),
+            "read_file_bytes must not confuse marker-like content with its own continuation note");
+
     auto folder = execute(tools, make_call("folder", "read_file", R"({"path":"folder"})"));
     require(folder.has_value() && tool_outcome_is_error(folder->kind) && folder->payload.contains("is not a regular file"),
             "read_file did not reject a directory");

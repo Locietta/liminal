@@ -55,6 +55,15 @@ struct ReadFileBytesInput {
     std::optional<usize> byte_count;
 };
 
+/// Result of a bounded read. `continuation` is the control-plane note that
+/// tells the model how to resume when the payload stopped short of the
+/// requested range; it stays separate from the file content so payload text
+/// can never be mistaken for it.
+struct ReadResult {
+    std::string payload;
+    std::string continuation;
+};
+
 std::string bounded_text(std::string_view text, usize limit) {
     if (text.size() <= limit) return std::string(text);
     auto end = limit;
@@ -156,7 +165,7 @@ Result<std::filesystem::path> resolve_read_path(const ToolSet &tools, std::strin
     return resolved;
 }
 
-Result<std::string> read_byte_range(const std::filesystem::path &path, u64 offset, usize count_limit) {
+Result<ReadResult> read_byte_range(const std::filesystem::path &path, u64 offset, usize count_limit) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) return outcome_error(Error::tool("cannot open '" + path.string() + "'"));
 
@@ -182,6 +191,7 @@ Result<std::string> read_byte_range(const std::filesystem::path &path, u64 offse
     if (!content.empty() && (static_cast<unsigned char>(content.front()) & 0xc0) == 0x80) {
         return outcome_error(Error::tool("byte_offset " + std::to_string(offset) + " falls inside a UTF-8 code point"));
     }
+    ReadResult result;
     if (available > content.size()) {
         const auto complete = lighter::encoding::utf8::complete_prefix_len(content);
         if (complete == 0 && !content.empty()) {
@@ -189,25 +199,32 @@ Result<std::string> read_byte_range(const std::filesystem::path &path, u64 offse
                                              std::to_string(offset) + "; increase byte_count"));
         }
         content.resize(complete);
-        content +=
-            "\n... [truncated after " + std::to_string(complete) + " bytes; next byte_offset " + std::to_string(offset + complete) + "]";
+        result.continuation =
+            "truncated after " + std::to_string(complete) + " bytes; next byte_offset " + std::to_string(offset + complete);
     }
-    return content;
+    result.payload = std::move(content);
+    return result;
 }
 
-Result<std::string> read_line_range(const std::filesystem::path &path, usize first, std::optional<usize> line_limit, usize output_limit) {
+Result<ReadResult> read_line_range(const std::filesystem::path &path, usize first, std::optional<usize> line_limit, usize output_limit) {
     if (first == 0) return outcome_error(Error::tool("offset must be at least 1"));
     if (line_limit && *line_limit == 0) return outcome_error(Error::tool("limit must be at least 1"));
 
     std::ifstream stream(path, std::ios::binary);
     if (!stream) return outcome_error(Error::tool("cannot open '" + path.string() + "'"));
 
-    std::string content;
+    ReadResult result;
+    auto &content = result.payload;
     usize line_number = 0;
     usize selected_lines = 0;
     bool truncated = false;
     bool limited = false;
     usize continuation_line = 0;
+    const auto oversized_line_marker = [&](std::streampos line_offset) {
+        auto marker = "truncated before oversized line " + std::to_string(line_number) + "; use read_file_bytes";
+        if (line_offset >= 0) marker += " with byte_offset " + std::to_string(static_cast<u64>(line_offset));
+        return marker;
+    };
     while (true) {
         const auto line_offset = stream.tellg();
         const bool selected = line_number + 1 >= first;
@@ -236,23 +253,13 @@ Result<std::string> read_line_range(const std::filesystem::path &path, usize fir
         ++line_number;
         if (line_number < first) continue;
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (oversized) {
-            auto marker = "... [truncated before oversized line " + std::to_string(line_number) + "; use read_file_bytes";
-            if (line_offset >= 0) marker += " with byte_offset " + std::to_string(static_cast<u64>(line_offset));
-            marker += "]";
+        if (oversized || line.size() + 1 > output_limit) {
+            auto marker = oversized_line_marker(line_offset);
             if (content.empty()) return outcome_error(Error::tool(std::move(marker)));
-            content += std::move(marker);
-            return content;
+            result.continuation = std::move(marker);
+            return result;
         }
         if (line.size() + 1 > output_limit - std::min(content.size(), output_limit)) {
-            if (line.size() + 1 > output_limit) {
-                auto marker = "... [truncated before oversized line " + std::to_string(line_number) + "; use read_file_bytes";
-                if (line_offset >= 0) marker += " with byte_offset " + std::to_string(static_cast<u64>(line_offset));
-                marker += "]";
-                if (content.empty()) return outcome_error(Error::tool(std::move(marker)));
-                content += std::move(marker);
-                return content;
-            }
             truncated = true;
             break;
         }
@@ -272,69 +279,57 @@ Result<std::string> read_line_range(const std::filesystem::path &path, usize fir
         return outcome_error(Error::tool("cannot read '" + path.string() + "'"));
     }
     if (truncated) {
-        content +=
-            "... [truncated before line " + std::to_string(line_number) + "; continue with offset " + std::to_string(line_number) + "]";
+        result.continuation =
+            "truncated before line " + std::to_string(line_number) + "; continue with offset " + std::to_string(line_number);
     } else if (limited) {
-        content += "... [line limit reached before line " + std::to_string(continuation_line) + "; continue with offset " +
-                   std::to_string(continuation_line) + "]";
+        result.continuation = "line limit reached before line " + std::to_string(continuation_line) + "; continue with offset " +
+                              std::to_string(continuation_line);
     }
-    return content;
+    return result;
 }
 
-std::string tool_read_file(const ToolSet &tools, const ReadFileInput &input, ToolOutputGrant grant) {
-    if (auto valid = validate_read_file_input(input); !valid) return "Error: " + valid.error().message();
-    auto resolved = resolve_read_path(tools, input.path);
-    if (!resolved) return "Error: " + resolved.error().message();
+Result<std::filesystem::path> resolve_regular_file(const ToolSet &tools, std::string_view requested) {
+    auto resolved = resolve_read_path(tools, requested);
+    if (!resolved) return resolved;
     const auto path = resolved->string();
 
     std::error_code status_error;
     const auto status = std::filesystem::status(*resolved, status_error);
     if (status_error) {
-        return "Error: cannot inspect '" + path + "': " + status_error.message();
+        return outcome_error(Error::tool("cannot inspect '" + path + "': " + status_error.message()));
     }
     if (!std::filesystem::is_regular_file(status)) {
-        return "Error: '" + path + "' is not a regular file";
+        return outcome_error(Error::tool("'" + path + "' is not a regular file"));
     }
-    auto content = read_line_range(*resolved, input.offset.value_or(1), input.limit, grant.payload_bytes);
-    if (!content) return "Error: " + content.error().message();
-    return *std::move(content);
+    return resolved;
 }
 
-std::string tool_read_file_bytes(const ToolSet &tools, const ReadFileBytesInput &input, ToolOutputGrant grant) {
-    if (auto valid = validate_read_file_bytes_input(input); !valid) return "Error: " + valid.error().message();
-    auto resolved = resolve_read_path(tools, input.path);
-    if (!resolved) return "Error: " + resolved.error().message();
-    const auto path = resolved->string();
+Result<ReadResult> tool_read_file(const ToolSet &tools, const ReadFileInput &input, ToolOutputGrant grant) {
+    if (auto valid = validate_read_file_input(input); !valid) return outcome_error(std::move(valid).error());
+    auto resolved = resolve_regular_file(tools, input.path);
+    if (!resolved) return outcome_error(std::move(resolved).error());
+    return read_line_range(*resolved, input.offset.value_or(1), input.limit, grant.payload_bytes);
+}
 
-    std::error_code status_error;
-    const auto status = std::filesystem::status(*resolved, status_error);
-    if (status_error) {
-        return "Error: cannot inspect '" + path + "': " + status_error.message();
-    }
-    if (!std::filesystem::is_regular_file(status)) {
-        return "Error: '" + path + "' is not a regular file";
-    }
+Result<ReadResult> tool_read_file_bytes(const ToolSet &tools, const ReadFileBytesInput &input, ToolOutputGrant grant) {
+    if (auto valid = validate_read_file_bytes_input(input); !valid) return outcome_error(std::move(valid).error());
+    auto resolved = resolve_regular_file(tools, input.path);
+    if (!resolved) return outcome_error(std::move(resolved).error());
     const auto requested_count = input.byte_count.value_or(grant.payload_bytes);
-    auto content = read_byte_range(*resolved, input.byte_offset.value_or(0), std::min(requested_count, grant.payload_bytes));
-    if (!content) return "Error: " + content.error().message();
-    return *std::move(content);
+    return read_byte_range(*resolved, input.byte_offset.value_or(0), std::min(requested_count, grant.payload_bytes));
 }
 
-ToolOutcome read_outcome(std::string call_id, std::string content, bool preserve_marker_newline) {
+/// Projects a read onto the tool outcome: file content is the payload, the
+/// resume note is the receipt, and a failure carries its message as payload.
+ToolOutcome read_outcome(std::string call_id, Result<ReadResult> read) {
     ToolOutcome outcome{.call_id = std::move(call_id)};
-    if (content.starts_with("Error:")) {
+    if (!read) {
         outcome.kind = ToolOutcomeKind::FAILED;
-        outcome.payload = std::move(content);
+        outcome.payload = "Error: " + read.error().message();
         return outcome;
     }
-    auto marker = content.rfind("\n... [");
-    if (marker == std::string::npos && content.starts_with("... [")) marker = 0;
-    if (marker != std::string::npos) {
-        const auto control_start = marker == 0 ? 0 : marker + 1;
-        outcome.receipt = "continuation: " + content.substr(control_start);
-        content.resize(marker + static_cast<usize>(preserve_marker_newline && marker != 0));
-    }
-    outcome.payload = std::move(content);
+    outcome.payload = std::move(read->payload);
+    if (!read->continuation.empty()) outcome.receipt = "continuation: " + read->continuation;
     return outcome;
 }
 
@@ -370,7 +365,7 @@ std::string summarize_read_file(const provider::ToolCall &, const ToolOutcome &r
         if (!result.payload.ends_with('\n')) ++lines;
     }
     auto summary = line_count(lines) + " · " + byte_count(result.payload.size());
-    if (result.payload_truncated || result.payload.contains("... [truncated ")) summary += " · truncated";
+    if (result.payload_truncated || result.receipt.contains("continuation: truncated ")) summary += " · truncated";
     return summary;
 }
 
@@ -403,7 +398,7 @@ ToolRegistration read_file_registration() {
         },
         .execute = [](const ToolSet &tools, const provider::ToolCall &call, ToolOutputGrant grant) -> Task<ToolOutcome, Error> {
             auto input = co_await or_fail(parse_input<ReadFileInput>(call.input));
-            co_return read_outcome(call.id, tool_read_file(tools, input, grant), true);
+            co_return read_outcome(call.id, tool_read_file(tools, input, grant));
         },
         .describe = describe_read_file,
         .summarize = summarize_read_file,
@@ -440,7 +435,7 @@ ToolRegistration read_file_bytes_registration() {
         },
         .execute = [](const ToolSet &tools, const provider::ToolCall &call, ToolOutputGrant grant) -> Task<ToolOutcome, Error> {
             auto input = co_await or_fail(parse_input<ReadFileBytesInput>(call.input));
-            co_return read_outcome(call.id, tool_read_file_bytes(tools, input, grant), false);
+            co_return read_outcome(call.id, tool_read_file_bytes(tools, input, grant));
         },
         .describe = describe_read_file_bytes,
         .summarize = summarize_read_file,
