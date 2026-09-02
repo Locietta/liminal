@@ -67,7 +67,7 @@ struct TaskGroup : AggregateOp {
         children.push_back(node);
         error_handlers.push_back(&extract_error<T, E>);
 
-        auto handle = node->attach(*this, std::source_location::current());
+        auto handle = node->start(*this, std::source_location::current());
         AsyncNode::resume_and_drain(handle);
         return true;
     }

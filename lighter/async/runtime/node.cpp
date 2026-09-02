@@ -261,6 +261,25 @@ std::coroutine_handle<> AsyncNode::attach_cancelled(TaskFrame &parent) {
     std::abort();
 }
 
+/// attach() for a Task the caller resumes immediately with the returned
+/// handle. The frame is marked executing before control transfers, so a
+/// cancel() reaching it during its first synchronous segment defers to the
+/// next suspension point instead of finalizing a frame that is live on the
+/// stack. Aggregates must keep using attach(): they link every child first
+/// and resume them afterwards through resume(), which marks executing itself.
+std::coroutine_handle<> AsyncNode::start(AsyncNode &parent_node, std::source_location loc) {
+    auto next = attach(parent_node, loc);
+    if (kind == NodeKind::TASK) {
+        auto *self = static_cast<TaskFrame *>(this);
+        // attach_cancelled() leaves a never-started Task unlinked; only a
+        // frame that attach() actually put into RUNNING is about to execute.
+        if (self->state == RUNNING && self->parent == &parent_node) {
+            self->mark_executing();
+        }
+    }
+    return next;
+}
+
 /// Wires this node as a child of `parent_node`. For Task nodes, sets state
 /// to RUNNING and returns the coroutine handle (ready to resume).
 /// For transient nodes (WaitNode, IoOp), records the parent

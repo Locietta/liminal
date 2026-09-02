@@ -96,6 +96,10 @@ struct AsyncNode {
 
     std::coroutine_handle<> attach(AsyncNode &parent, std::source_location location);
 
+    /// attach() plus the executing marker, for callers that resume the
+    /// returned handle directly (Task::Awaiter, TaskGroup::spawn).
+    std::coroutine_handle<> start(AsyncNode &parent, std::source_location location);
+
     std::coroutine_handle<> finalize();
 
 private:

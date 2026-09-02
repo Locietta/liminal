@@ -368,7 +368,7 @@ struct Task {
 
         template <typename Promise>
         auto await_suspend(std::coroutine_handle<Promise> h, std::source_location location = std::source_location::current()) noexcept {
-            return awaitee.h.promise().attach(h.promise(), location);
+            return awaitee.h.promise().start(h.promise(), location);
         }
 
         auto await_resume() {
