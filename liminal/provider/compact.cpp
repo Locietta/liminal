@@ -2,8 +2,13 @@
 
 #include <iterator>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
+
+#include <glaze/json.hpp>
+
+#include <lighter/utils/enum.h>
 
 namespace liminal::provider {
 
@@ -23,6 +28,61 @@ constexpr std::string_view k_summarize_prompt =
 /// Prefixed to the stored summary so the resuming model knows what it reads.
 constexpr std::string_view k_bridge_prefix = "[Compacted context] Another assistant worked on this conversation and produced the handoff "
                                              "summary below. Build on that work; do not redo it.\n\n";
+
+/// Renders a tool call as prose for the summarizer.
+std::string describe_tool_call(const ToolCall &call) {
+    std::string text = "[tool call " + call.name + " #" + call.id + "]";
+    if (auto input = glz::write_json(call.input); input && !input->empty() && *input != "null") {
+        text += '\n';
+        text += *input;
+    }
+    return text;
+}
+
+/// Renders a tool result as prose for the summarizer.
+std::string describe_tool_outcome(const ToolOutcome &outcome) {
+    std::string text = "[tool result #" + outcome.call_id + ": " + std::string(lighter::enum_name(outcome.kind)) + "]";
+    if (!outcome.receipt.empty()) {
+        text += '\n';
+        text += outcome.receipt;
+    }
+    if (!outcome.payload.empty()) {
+        text += '\n';
+        text += outcome.payload;
+    }
+    return text;
+}
+
+/// The summarization request is a plain text conversation. Tool calls and
+/// results are rendered as prose because providers reject tool blocks in a
+/// request that defines no tools (Anthropic answers with HTTP 400), and
+/// provider-private parts are dropped because they carry no summarizable
+/// content. This also keeps a trailing unmatched tool call from reaching the
+/// wire as a dangling tool_use block.
+History textualize_for_summary(const History &history, usize count) {
+    History plain;
+    plain.reserve(count);
+    for (usize index = 0; index < count; ++index) {
+        const auto &item = history[index];
+        Item rendered{.role = item.role, .phase = item.phase};
+        for (const auto &part : item.parts) {
+            std::visit(
+                [&rendered](const auto &value) {
+                    using T = std::decay_t<decltype(value)>;
+                    if constexpr (std::is_same_v<T, TextPart>) {
+                        rendered.parts.push_back(value);
+                    } else if constexpr (std::is_same_v<T, ToolCall>) {
+                        rendered.parts.push_back(TextPart{.text = describe_tool_call(value)});
+                    } else if constexpr (std::is_same_v<T, ToolOutcome>) {
+                        rendered.parts.push_back(TextPart{.text = describe_tool_outcome(value)});
+                    }
+                },
+                part);
+        }
+        if (!rendered.parts.empty()) plain.push_back(std::move(rendered));
+    }
+    return plain;
+}
 
 /// A real user prompt (not a tool-result round) marks the start of a task.
 bool starts_task(const Item &item) {
@@ -61,7 +121,7 @@ Task<void, Error> local_compact(ProviderView provider, History &history, std::st
         cut = history.size();
     }
 
-    History to_summarize(history.begin(), history.begin() + cut);
+    History to_summarize = textualize_for_summary(history, cut);
     std::string prompt(k_summarize_prompt);
     if (!instructions.empty()) {
         prompt += "\n\nAdditional instructions from the user:\n";

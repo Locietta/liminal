@@ -17,6 +17,7 @@
 
 #include <liminal/agent/agent.h>
 #include <liminal/agent/tool_planner.h>
+#include <liminal/provider/compact.h>
 #include <liminal/event.h>
 #include <liminal/provider/provider.h>
 
@@ -879,6 +880,67 @@ void test_tool_execution_semantics() {
     provider_mock.verify();
 }
 
+/// Records the summarization request so the test can inspect what reaches
+/// the wire. Conforms to ProviderFacade without going through the mock, which
+/// keeps the check on the request shape rather than on dispatch order.
+struct RecordingSummaryProvider {
+    provider::History seen;
+    usize tool_definitions = 0;
+
+    lighter::Task<provider::ProviderCallCompletion, Error> complete(const provider::History &history,
+                                                                    const std::vector<provider::ToolDefinition> &tools,
+                                                                    const provider::StreamCallbacks &callbacks) {
+        seen = history;
+        tool_definitions = tools.size();
+        emit_message(callbacks, "summary", "SUMMARY");
+        co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+    }
+
+    lighter::Task<void, Error> compact(provider::History &, std::string_view) { co_return; }
+};
+
+void test_local_compaction_summarizes_tool_rounds_as_text() {
+    provider::History history;
+    provider::append_developer(history, "policy");
+    provider::append_user(history, "first task");
+    glz::generic input;
+    require(!glz::read_json(input, R"({"path":"README.md"})"), "failed to build tool input");
+    history.push_back(
+        {.role = provider::Role::ASSISTANT, .parts = {provider::ToolCall{.id = "call-1", .name = "read_file", .input = std::move(input)}}});
+    provider::append_tool_outcomes(history, {ToolOutcome{.call_id = "call-1", .receipt = "continuation: none", .payload = "contents"}});
+    history.push_back({.role = provider::Role::ASSISTANT, .parts = {provider::OpaquePart{.provider_tag = "fake", .payload = "{}"}}});
+    history.push_back({.role = provider::Role::ASSISTANT, .parts = {provider::TextPart{.text = "done with the first task"}}});
+    provider::append_user(history, "second task");
+    provider::append_output_item(history, provider::AssistantMessageItem{.id = {.value = "answer"}, .parts = {{.text = "answer"}}});
+
+    RecordingSummaryProvider provider;
+    lighter::EventLoop loop;
+    auto task = provider::local_compact(&provider, history, "");
+    loop.schedule(task);
+    loop.run();
+    require(task.result().has_value(), "local compaction failed");
+
+    require(provider.tool_definitions == 0, "the summarization request must not advertise tools");
+    require(provider.seen.size() == 6, "the summarization request kept the wrong number of items: " + std::to_string(provider.seen.size()));
+    for (const auto &item : provider.seen) {
+        for (const auto &part : item.parts) {
+            require(std::holds_alternative<provider::TextPart>(part),
+                    "every part of the summarization request must be plain text so providers accept it without tools");
+        }
+    }
+    const auto call_text = std::get<provider::TextPart>(provider.seen[2].parts[0]).text;
+    const auto result_text = std::get<provider::TextPart>(provider.seen[3].parts[0]).text;
+    require(call_text.contains("read_file") && call_text.contains("README.md"), "the rendered tool call lost its name or arguments");
+    require(result_text.contains("call-1") && result_text.contains("contents"), "the rendered tool result lost its payload");
+    require(provider.seen.back().role == provider::Role::USER &&
+                std::get<provider::TextPart>(provider.seen.back().parts[0]).text.contains("handoff summary"),
+            "the summarization prompt must be the final user item");
+
+    require(history.size() == 4 && std::get<provider::TextPart>(history[1].parts[0]).text.contains("SUMMARY") &&
+                std::get<provider::TextPart>(history[2].parts[0]).text == "second task",
+            "compaction must replace the summarized prefix and keep the latest task verbatim");
+}
+
 void test_automatic_compaction() {
     ToolSet tools(std::filesystem::current_path());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
@@ -1109,6 +1171,7 @@ i32 run_all() {
     test_stream_failure_retains_queued_tool_result();
     test_invalid_tool_is_rejected_before_dispatch();
     test_tool_execution_semantics();
+    test_local_compaction_summarizes_tool_rounds_as_text();
     test_automatic_compaction();
     test_multiple_automatic_compactions_in_one_task();
     test_proactive_compaction_uses_reported_context();
