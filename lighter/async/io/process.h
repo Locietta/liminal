@@ -73,6 +73,12 @@ struct Process {
         /// Detach the child from the parent Process group/session.
         bool detached = false;
 
+        /// Make the child the root of its own process tree: a new session on
+        /// POSIX, a dedicated job object on Windows. kill_tree() then reaches
+        /// every process it started, and on Windows the tree dies with the
+        /// Process object.
+        bool process_group = false;
+
         /// Hide the Console window (Windows).
         bool windows_hide = false;
 
@@ -125,6 +131,10 @@ struct Process {
 
     /// Send a Signal to the Process.
     Error kill(i32 signum);
+
+    /// Send a Signal to the Process and, when it was spawned with
+    /// `process_group`, to every process it started. Otherwise same as kill().
+    Error kill_tree(i32 signum);
 
 private:
     explicit Process(UniqueHandle<Self> self) noexcept;

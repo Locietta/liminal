@@ -9,6 +9,14 @@
 
 #include <glaze/json.hpp>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <cerrno>
+#include <csignal>
+#endif
+
+#include <lighter/async/async.h>
 #include <lighter/async/io/loop.h>
 #include <lighter/async/runtime/when.h>
 #include <lighter/encoding/utf8.h>
@@ -457,6 +465,109 @@ lighter::Task<> exercise_shell_task_interaction(ToolSet &tools) {
             "the ordered exec session did not run through completion: " + observations.diagnostics);
 }
 
+/// Waits for a process that is not our child to disappear. Windows can wait
+/// on the process object; POSIX has no handle for a non-child, so poll the
+/// pid with a bounded number of short sleeps.
+lighter::Task<bool> process_terminated(i64 pid) {
+#ifdef _WIN32
+    HANDLE handle = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    if (!handle) co_return true;
+    const auto waited = WaitForSingleObject(handle, 5000);
+    CloseHandle(handle);
+    co_return waited == WAIT_OBJECT_0;
+#else
+    for (usize attempt = 0; attempt < 200; ++attempt) {
+        if (::kill(static_cast<pid_t>(pid), 0) != 0 && errno == ESRCH) co_return true;
+        co_await lighter::sleep(std::chrono::milliseconds(25));
+    }
+    co_return false;
+#endif
+}
+
+lighter::Task<> poll_until_exited(ToolSet &tools, ExecObservations &observations, std::string_view context) {
+    for (usize attempt = 0; attempt < 8 && !observations.exited; ++attempt) {
+        auto polled = co_await tools.execute(make_call("poll", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})"), k_test_grant);
+        require(polled.has_value(), std::string(context) + ": polling the exec session failed");
+        observations.append(*polled);
+    }
+}
+
+lighter::Task<> exercise_shell_session_eof(ToolSet &tools) {
+#ifdef _WIN32
+    constexpr std::string_view command =
+        R"json({"cmd":"$all = [Console]::In.ReadToEnd(); Write-Output ('got:' + $all.Trim())","yield_time_ms":25})json";
+#else
+    constexpr std::string_view command = R"json({"cmd":"all=$(cat); echo got:$all","yield_time_ms":25})json";
+#endif
+    auto started = co_await tools.execute(make_call("start", "exec_command", command), k_test_grant);
+    require(started.has_value() && !tool_outcome_is_error(started->kind) && started->receipt.contains("status: running"),
+            "a command reading to end of input must stay running until stdin closes");
+
+    ExecObservations observations;
+    auto closed = co_await tools.execute(
+        make_call("eof", "write_stdin", R"({"session_id":1,"chars":"abc\n","eof":true,"yield_time_ms":3000})"), k_test_grant);
+    require(closed.has_value(), "closing exec session stdin failed");
+    observations.append(*closed);
+    co_await poll_until_exited(tools, observations, "eof");
+    require(observations.output.contains("got:abc") && observations.exited && observations.exit_zero,
+            "closing stdin must let a program reading to end of input finish: " + observations.diagnostics);
+}
+
+lighter::Task<> exercise_shell_session_kill(ToolSet &tools) {
+#ifdef _WIN32
+    constexpr std::string_view command =
+        R"json({"cmd":"$p = Start-Process -FilePath pwsh -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep 300' -PassThru -WindowStyle Hidden; Write-Output ('child:' + $p.Id); Start-Sleep 300","yield_time_ms":25})json";
+#else
+    constexpr std::string_view command = R"json({"cmd":"sleep 300 & echo child:$!; wait","yield_time_ms":25})json";
+#endif
+    auto started = co_await tools.execute(make_call("start", "exec_command", command), k_test_grant);
+    require(started.has_value() && !tool_outcome_is_error(started->kind) && started->receipt.contains("status: running"),
+            "the long-running command must report a running session");
+
+    ExecObservations observations;
+    observations.append(*started);
+    for (usize attempt = 0; attempt < 8 && !observations.output.contains("child:"); ++attempt) {
+        auto polled = co_await tools.execute(make_call("poll", "write_stdin", R"({"session_id":1,"yield_time_ms":3000})"), k_test_grant);
+        require(polled.has_value(), "polling for the grandchild pid failed");
+        observations.append(*polled);
+    }
+    const auto marker = observations.output.find("child:");
+    require(marker != std::string::npos, "the shell never reported its grandchild pid: " + observations.diagnostics);
+    const auto pid = std::stoll(observations.output.substr(marker + 6));
+    require(pid > 0, "the reported grandchild pid is not usable");
+
+    auto killed =
+        co_await tools.execute(make_call("kill", "write_stdin", R"({"session_id":1,"kill":true,"yield_time_ms":5000})"), k_test_grant);
+    require(killed.has_value(), "killing the exec session failed");
+    observations.append(*killed);
+    co_await poll_until_exited(tools, observations, "kill");
+    require(observations.exited && killed->receipt.contains("killed: true"),
+            "a killed session must report that it exited because it was killed: " + observations.diagnostics);
+    require(co_await process_terminated(pid), "killing the session must also terminate the process it started");
+
+    auto late = co_await tools.execute(make_call("late", "write_stdin", R"({"session_id":1,"chars":"x"})"), k_test_grant);
+    require(late.has_error(), "writing to a killed session must be rejected");
+}
+
+void test_shell_session_eof_and_kill() {
+    {
+        lighter::EventLoop loop;
+        ToolSet tools(std::filesystem::current_path());
+        auto task = exercise_shell_session_eof(tools);
+        loop.schedule(task);
+        loop.run();
+        std::ignore = task.result();
+    }
+    {
+        lighter::EventLoop loop;
+        ToolSet tools(std::filesystem::current_path());
+        auto task = exercise_shell_session_kill(tools);
+        loop.schedule(task);
+        loop.run();
+        std::ignore = task.result();
+    }
+}
+
 void test_shell_task_interaction() {
     lighter::EventLoop loop;
     ToolSet tools(std::filesystem::current_path());
@@ -598,6 +709,7 @@ i32 run_all() {
     test_apply_patch_resolves_files_when_executed();
     test_apply_patch_insert_only_hunk_lands_after_its_anchor();
     test_shell_task_interaction();
+    test_shell_session_eof_and_kill();
     test_shell_output_receipt_is_resumable();
     test_distinct_shell_tasks_interact_concurrently();
     test_command_output_is_utf8();

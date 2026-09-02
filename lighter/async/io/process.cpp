@@ -1,7 +1,13 @@
 #include "process.h"
 
+#include <cerrno>
 #include <contracts>
 #include <csignal>
+#include <tuple>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include <lighter/types.hpp>
 #include <lighter/async/io/awaiter.h>
@@ -15,6 +21,14 @@ static u32 to_uv_process_flags(const Process::CreationOptions &options) {
     if (options.detached) {
         out |= UV_PROCESS_DETACHED;
     }
+#ifndef _WIN32
+    // A new session makes the child the leader of its own process group, so
+    // kill_tree() can signal the whole group. On Windows the tree is tracked
+    // by a job object instead; UV_PROCESS_DETACHED would mean something else.
+    if (options.process_group) {
+        out |= UV_PROCESS_DETACHED;
+    }
+#endif
     if (options.windows_hide) {
         out |= UV_PROCESS_WINDOWS_HIDE;
     }
@@ -35,7 +49,59 @@ static u32 to_uv_process_flags(const Process::CreationOptions &options) {
 
 struct Process::Self : uv::handle<Process::Self, uv_process_t>, uv::LatchedDelivery<Process::ExitStatus> {
     uv_process_t handle{};
+#ifdef _WIN32
+    /// Job object holding the child and everything it spawns. Closing the last
+    /// handle terminates the tree (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE).
+    HANDLE job = nullptr;
+
+    ~Self() {
+        if (job) {
+            CloseHandle(job);
+        }
+    }
+#else
+    bool process_group = false;
+#endif
 };
+
+namespace {
+
+#ifdef _WIN32
+Error last_system_error() { return Error(uv_translate_sys_error(static_cast<int>(GetLastError()))); }
+
+/// Places the freshly spawned child in a dedicated job object. Children of a
+/// job member inherit the job, so the job is the process tree.
+Error assign_job(Process::Self &self) {
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (!job) {
+        return last_system_error();
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+        auto err = last_system_error();
+        CloseHandle(job);
+        return err;
+    }
+    HANDLE process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(self.handle.pid));
+    if (!process) {
+        auto err = last_system_error();
+        CloseHandle(job);
+        return err;
+    }
+    const bool assigned = AssignProcessToJobObject(job, process) != FALSE;
+    auto assign_error = assigned ? Error{} : last_system_error();
+    CloseHandle(process);
+    if (!assigned) {
+        CloseHandle(job);
+        return assign_error;
+    }
+    self.job = job;
+    return {};
+}
+#endif
+
+} // namespace
 
 namespace {
 
@@ -214,6 +280,19 @@ Result<Process::SpawnResult> Process::spawn(const Options &opts, EventLoop &loop
         return outcome_error(err);
     }
 
+    if (opts.creation.process_group) {
+#ifdef _WIN32
+        if (auto err = assign_job(*self)) {
+            // Without the job the caller could never reach the tree it asked
+            // to own; fail loudly rather than hand back a half-tracked child.
+            std::ignore = uv::process_kill(proc_handle, SIGTERM);
+            return outcome_error(err);
+        }
+#else
+        self->process_group = true;
+#endif
+    }
+
     out.stdin_pipe = std::move(created_pipes[0]);
     out.stdout_pipe = std::move(created_pipes[1]);
     out.stderr_pipe = std::move(created_pipes[2]);
@@ -255,6 +334,28 @@ Error Process::kill(i32 signum) {
     }
 
     return {};
+}
+
+Error Process::kill_tree(i32 signum) {
+    if (!self || !self->initialized()) {
+        return Error::k_invalid_argument;
+    }
+#ifdef _WIN32
+    if (self->job) {
+        if (!TerminateJobObject(self->job, 1)) {
+            return last_system_error();
+        }
+        return {};
+    }
+#else
+    if (self->process_group) {
+        if (::kill(-self->handle.pid, signum) != 0) {
+            return Error(-errno);
+        }
+        return {};
+    }
+#endif
+    return kill(signum);
 }
 
 } // namespace lighter

@@ -53,9 +53,17 @@ struct ExecCommandInput {
 struct WriteStdinInput {
     u64 session_id;
     std::optional<std::string> chars;
+    std::optional<bool> eof;
+    std::optional<bool> kill;
     std::optional<i64> yield_time_ms;
     std::optional<usize> max_output_chars;
 };
+
+#ifdef _WIN32
+constexpr i32 k_kill_signal = SIGTERM;
+#else
+constexpr i32 k_kill_signal = SIGKILL;
+#endif
 
 struct ShellTaskResponse {
     std::string receipt;
@@ -155,6 +163,8 @@ struct ShellTaskManager {
         u64 delivered_offset = 0;
         u64 version = 0;
         bool running = true;
+        bool stdin_closed = false;
+        bool killed = false;
         std::optional<Process::ExitStatus> exit_status;
         std::optional<std::string> error;
 
@@ -191,11 +201,7 @@ struct ShellTaskManager {
         for (const auto &[session_id, task] : tasks) {
             std::ignore = session_id;
             if (task->running && task->child) {
-#ifdef _WIN32
-                std::ignore = task->child->proc.kill(SIGTERM);
-#else
-                std::ignore = task->child->proc.kill(SIGKILL);
-#endif
+                std::ignore = task->child->proc.kill_tree(k_kill_signal);
             }
         }
     }
@@ -259,7 +265,7 @@ void prune_shell_tasks(ShellTaskManager &manager) {
     for (auto iterator = manager.tasks.begin(); iterator != manager.tasks.end();) {
         const auto &task = *iterator->second;
         const auto end = task.output_offset + task.output.size();
-        if (!task.running && task.delivered_offset >= end) {
+        if (!task.running && (task.killed || task.delivered_offset >= end)) {
             iterator = manager.tasks.erase(iterator);
         } else {
             ++iterator;
@@ -339,6 +345,7 @@ ShellTaskResponse response_for(ShellTaskManager::ShellTask &task, usize limit) {
         }
         if (task.exit_status->status != 0 || task.exit_status->term_signal != 0) kind = ToolOutcomeKind::FAILED;
     }
+    if (task.killed) receipt += "\nkilled: true";
     auto output = take_output(task, limit);
     if (output.dropped_bytes != 0) receipt += "\noutput_dropped_bytes: " + std::to_string(output.dropped_bytes);
     if (output.remaining_bytes != 0) {
@@ -373,7 +380,7 @@ Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input, u
         .file = "pwsh",
         .args = {"pwsh", "-NoProfile", "-NonInteractive", "-Command", std::string(k_pwsh_utf8_preamble) + input.cmd},
         .cwd = directory.string(),
-        .creation = {.windows_hide = true},
+        .creation = {.process_group = true, .windows_hide = true},
         .streams = {Process::Stdio::pipe(true, false), Process::Stdio::pipe(false, true), Process::Stdio::pipe(false, true)},
     };
 #else
@@ -381,6 +388,7 @@ Task<ShellTaskResponse, Error> ShellTaskManager::start(ExecCommandInput input, u
         .file = "/bin/sh",
         .args = {"sh", "-lc", input.cmd},
         .cwd = directory.string(),
+        .creation = {.process_group = true},
         .streams = {Process::Stdio::pipe(true, false), Process::Stdio::pipe(false, true), Process::Stdio::pipe(false, true)},
     };
 #endif
@@ -416,8 +424,23 @@ Task<ShellTaskResponse, Error> ShellTaskManager::write_stdin(WriteStdinInput inp
 
     if (input.chars && !input.chars->empty()) {
         if (!task.running) co_await fail(Error::tool("exec session has already exited: " + std::to_string(input.session_id)));
+        if (task.stdin_closed) co_await fail(Error::tool("exec session stdin is already closed: " + std::to_string(input.session_id)));
         auto written = co_await task.child->stdin_pipe.write(std::span<const char>(input.chars->data(), input.chars->size()));
         if (!written) co_await fail(Error::tool("failed to write exec session input: " + std::string(written.error().message())));
+    }
+    if (input.eof.value_or(false) && !task.stdin_closed) {
+        // Dropping the pipe closes the child's stdin, which is how a program
+        // reading to end of input learns that no more is coming.
+        task.stdin_closed = true;
+        task.child->stdin_pipe = lighter::Pipe{};
+    }
+    if (input.kill.value_or(false) && task.running) {
+        task.killed = true;
+        if (auto err = task.child->proc.kill_tree(k_kill_signal)) {
+            co_await fail(Error::tool("failed to kill exec session: " + std::string(err.message())));
+        }
+        co_await wait_for_finish(task, duration);
+        co_return response_for(task, limit);
     }
     const auto available = task.output_offset + task.output.size();
     if (task.delivered_offset >= available) co_await wait_for_change(task, version, duration);
@@ -483,14 +506,17 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
         .definition =
             {
                 .name = "write_stdin",
-                .description =
-                    "Write characters to an existing exec session and return incremental output. Empty or omitted chars polls only.",
+                .description = "Write characters to an existing exec session and return incremental output. Empty or omitted chars "
+                               "polls only. Set eof to close the session's input after writing, or kill to terminate the session "
+                               "and every process it started.",
                 .input_schema =
                     {
                         .properties =
                             {
                                 {"session_id", {.type = "integer", .description = "Session ID returned by exec_command."}},
                                 {"chars", {.type = "string", .description = "Characters to write. Empty or omitted means poll only."}},
+                                {"eof", {.type = "boolean", .description = "Close the session's stdin after writing chars."}},
+                                {"kill", {.type = "boolean", .description = "Terminate the session and its whole process tree."}},
                                 {"yield_time_ms", {.type = "integer", .description = "Wait up to 30000 ms for new output; default 10000."}},
                                 {"max_output_chars",
                                  {.type = "integer", .description = "Maximum output bytes returned now; 1024-131072, default 32768."}},
@@ -515,7 +541,11 @@ std::array<ToolRegistration, 2> make_exec_tools(ShellTaskManager &tasks) {
             [](const provider::ToolCall &call) {
                 const auto input = parse_input<WriteStdinInput>(call.input);
                 if (!input) return ToolCallPresentation{.description = "Write to exec session"};
-                const auto action = input->chars && !input->chars->empty() ? "Write to exec session " : "Poll exec session ";
+                const auto writes = input->chars && !input->chars->empty();
+                const auto action = input->kill.value_or(false) ? "Kill exec session " :
+                                    writes                      ? "Write to exec session " :
+                                    input->eof.value_or(false)  ? "Close stdin of exec session " :
+                                                                  "Poll exec session ";
                 return ToolCallPresentation{.description = action + std::to_string(input->session_id)};
             },
         .summarize = [](const provider::ToolCall &, const ToolOutcome &result) { return summarize_exec(result); },
