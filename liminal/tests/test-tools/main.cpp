@@ -554,10 +554,11 @@ lighter::Task<> exercise_shell_session_kill(ToolSet &tools) {
 /// output has been read.
 lighter::Task<> exercise_killed_session_output_survives_prune(ToolSet &tools) {
 #ifdef _WIN32
-    constexpr std::string_view command = R"json({"cmd":"Write-Output ('x' * 6000); Start-Sleep 300","yield_time_ms":25})json";
+    constexpr std::string_view command =
+        R"json({"cmd":"Write-Output ('x' * 6000); Start-Sleep 300","yield_time_ms":25,"max_output_chars":1024})json";
     constexpr std::string_view quick = R"json({"cmd":"Write-Output done","yield_time_ms":5000})json";
 #else
-    constexpr std::string_view command = R"json({"cmd":"printf '%06000d\n' 0; sleep 300","yield_time_ms":25})json";
+    constexpr std::string_view command = R"json({"cmd":"printf '%06000d\n' 0; sleep 300","yield_time_ms":25,"max_output_chars":1024})json";
     constexpr std::string_view quick = R"json({"cmd":"echo done","yield_time_ms":5000})json";
 #endif
     auto started = co_await tools.execute(make_call("start", "exec_command", command), k_test_grant);
