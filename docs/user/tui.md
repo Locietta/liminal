@@ -38,6 +38,22 @@ On a narrow terminal, the footer removes whole fields in order: tokens first, co
 
 External-editor guidance and brief confirmations replace ordinary metadata when they need attention. A persistence failure replaces ordinary metadata with `SESSION NOT SAVING`. On short terminals, decorative composer padding is removed before transcript or editing space.
 
+## Steering and follow-ups
+
+Enter while the agent is working sends a correction or additional instruction to the current task. Liminal lets the current provider response and tool batch finish, then includes pending corrections in order in the next model request. It also checks for corrections before accepting a final answer. Steering does not cancel running work; Esc remains the cancellation control.
+
+Pending input appears above the composer:
+
+- `Steer sN` is waiting for delivery to the current task.
+- `Queued qN` is a separate task or command waiting to run afterward. Use `/queue <prompt>` to request a separate task explicitly.
+- `Unsent sN` or `Unsent qN` requires an explicit resend after cancellation or failure.
+
+`/pending` lists all pending input. `/pending edit <id>` withdraws an item and returns its text to the composer; edit it and press Enter to submit again. `/pending drop <id>` removes it. These commands work while the agent is busy. Delivered corrections become ordinary user messages in the transcript and can no longer be edited through `/pending`.
+
+Submitted steering follows session persistence, including the normal `SESSION NOT SAVING` warning on storage failure. Undelivered steering remains available when that session is resumed and never automatically starts another task. Follow-up queues are local to the running process and session: they survive switching away and back, but not exiting Liminal. Cancellation or failure holds queued follow-ups until you edit and resend them. Other queued commands still run.
+
+Input management requires an interactive terminal. Redirected stdin continues to run prompts sequentially. Tab retains command completion, and `//` still escapes a prompt beginning with `/`.
+
 ## Slash commands
 
 A new empty session shows a single muted hint — `Ask Liminal anything. Type / for commands.` — that disappears as soon as the session has any content.
@@ -99,7 +115,7 @@ The action and exact path or command stay bright, while completion metadata and 
 
 | Shortcut             | Action                                                                                     |
 | -------------------- | ------------------------------------------------------------------------------------------ |
-| Enter                | Send the current prompt; complete an incomplete highlighted command in the command menu    |
+| Enter                | Start a task when idle or steer the active task; complete an incomplete command name       |
 | Tab                  | Complete the highlighted command when the command menu is open; otherwise insert a tab     |
 | Ctrl+J / Shift+Enter | Insert a newline                                                                           |
 | Ctrl+G               | Edit the current draft in `VISUAL` or `EDITOR`                                             |

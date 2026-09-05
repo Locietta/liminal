@@ -19,6 +19,10 @@ The normal session has four stable regions:
 
 Transcript browsing is part of normal session interaction. The composer stays editable, prompt history stays in the composer, and a semantic viewport anchor fixes the user's position after they leave the live tail.
 
+`SessionInput` routes interactive Enter independently of the running task: ordinary input steers while busy and starts a task while idle. `/queue` requests a separate follow-up; `/pending` lists, withdraws, or edits pending input immediately. Other commands run through the REPL dispatcher, with idle-only commands rejected at submission when busy. Follow-ups belong to their originating session and are held after cancellation or failure; they are process-local drafts rather than semantic history.
+
+Pending steering and queued input occupy a bounded band above the composer, with overflow available through `/pending`. Compact pickers temporarily own that space while open. Pending labels distinguish waiting delivery, scheduled follow-ups, and unsent input requiring explicit resubmission. Delivery appends a user transcript block without restarting activity.
+
 Bounded contextual choices use one of two selection surfaces:
 
 - Compact pickers render above the composer and preserve the normal session layout. Slash-command discovery and `/model` use this form.

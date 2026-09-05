@@ -11,7 +11,7 @@ Architecture notes for the slash-command registry, compact command and model pic
 - `/help` (`describe_commands`) renders it as a durable transcript notice.
 - Tests assert a bijection between `CommandKind` and registry entries.
 
-Execution lives in the dispatcher switch in `repl_body`; `idle_only` is presentation metadata, and the dispatcher's idle guards are the executable truth. Adding a command means adding one registry entry, one `CommandKind`, and one dispatch case — parsing, completion, and `/help` follow automatically.
+Interactive submissions pass through `SessionInput`, which handles `/queue` and `/pending` immediately and enforces `idle_only` before queuing other commands. Ordinary command execution lives in the dispatcher switch in `repl_body`, retaining its idle guards. Redirected input goes directly to that dispatcher and reports input-management commands as interactive-only. Adding a command means adding one registry entry, one `CommandKind`, and the appropriate execution handler; parsing, completion, and `/help` follow automatically.
 
 ## Compact picker primitive
 

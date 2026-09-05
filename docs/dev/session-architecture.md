@@ -6,7 +6,7 @@ This document records the stable concepts behind Liminal sessions. Concrete sche
 
 Liminal owns a provider-neutral semantic session as the sole authority. Provider request history, the terminal transcript, copyable replies, and catalog summaries are projections of that session.
 
-A session records stable events, not streaming presentation updates. User task boundaries, completed provider output items, provider-call outcomes, tool-result batches, task outcomes, model preference changes, branch selection, and compaction checkpoints are semantic. Partial text deltas, timers, animations, scroll state, and drafts are not.
+A session records stable events, not streaming presentation updates. User task boundaries, steering submission and resolution, completed provider output items, provider-call outcomes, tool-result batches, task outcomes, model preference changes, branch selection, and compaction checkpoints are semantic. Partial text deltas, timers, animations, scroll state, and unsubmitted drafts are not.
 
 Provider-private items retain their provenance. A compatible adapter may replay them; an incompatible adapter preserves but omits them. Liminal does not invent a misleading provider-neutral interpretation.
 
@@ -30,6 +30,8 @@ An unmatched durable tool call receives a synthetic outcome-unknown result expla
 
 No conversation operation claims to undo filesystem, process, network, or other external tool effects.
 
+When an unfinished task otherwise has a terminal provider response, pending steering or steering delivered after that response prevents inferring successful completion; recovery records interruption. Recovery retains unresolved submissions for explicit withdrawal or resubmission and never routes them to a new task.
+
 ## History and projections
 
 Entries form an append-only parent-linked history. Selecting an ancestor moves the active cursor; appending afterward creates another branch without deleting the original descendants. Compaction changes the active context projection while retaining earlier history.
@@ -44,9 +46,17 @@ A fork is a new durable session containing the exact semantic prefix through a s
 
 Fork preparation is not publication. A disposable fork plan owns the new identity's exclusive lease, rollback-journal staging database, unpublished persistence queue, projected transcript, and resolved model without creating a catalog row. Cancellation removes the staging directory. After the source saves successfully or the user explicitly accepts its remaining unsaved state, publication closes the staged database, creates its catalog-pending marker, atomically moves the directory without replacement, reopens the published database in verified WAL mode, and then attempts catalog projection. Once the atomic move succeeds, the queue retains that exact finalized snapshot until attachment completes; a fork may replace the live session with an explicit persistence-degraded notice while this recovery remains pending. If the source save is explicitly abandoned, the origin remains exact semantic provenance and may identify a checkpoint that never became durable in the source session.
 
+## Steering
+
+Steering extends an active task. Admission is guarded by both session identity and task identity on the agent event loop. Submission records the exact UTF-8 text and its target; a separate resolution records delivery or withdrawal. Delivery is valid only in that active task between settled provider/tool rounds. Withdrawal remains possible after interruption. Input identity references must resolve to an unresolved ancestor submission, and forks remap those references along with entry and task identities.
+
+Provider context and transcript hydration project only delivered input, at its delivery position, with ordinary user authority. Pending submissions stay outside provider context, checkpoints, and transcript messages. Resolving a submission after a compaction checkpoint still locates its original text in the session. Steering creates no additional conversation navigation checkpoint and does not reset the task's activity timer.
+
+The agent drains accepted input before its next model request and checks again before closing a successful task. Delivery and closure have no suspension between the final inbox check and the state change. Streaming and tool execution finish normally; steering does not preempt tools or repeat their effects. Cancellation and failure leave undelivered input attached to its original task.
+
 ## Prompt admission and compaction
 
-The session preserves what the user submitted. Recording a task start is distinct from admitting its next model request. Request context consists of resolved instructions, accumulated conversation or its checkpoint, and any pending new prompt. Liminal manages capacity so users can continue working without budgeting tokens themselves.
+The session preserves what the user submitted. Recording a task start or steering submission is distinct from admitting its next model request. Request context consists of resolved instructions, accumulated conversation or its checkpoint, and pending new input. Liminal manages capacity so users can continue working without budgeting tokens themselves.
 
 At a task boundary, admission preserves the new prompt unchanged:
 
@@ -55,7 +65,9 @@ At a task boundary, admission preserves the new prompt unchanged:
 - If there is no accumulated history, a prompt that fits proceeds directly even above the proactive threshold.
 - If resolved instructions and the prompt alone cannot fit, report that the input is too large. Compaction cannot make space by shortening the pending prompt. If a usable checkpoint and the pending prompt still cannot fit together, report that admission failed without committing an unusable checkpoint.
 
-During an ongoing task, accumulated model output and settled tool results can require compaction before the next round. Compaction may then summarize progress on that task, including its original prompt, while preserving the goals, constraints, and state needed to continue. Tool calls and outcomes must remain settled and replayable; compaction must not repeat external effects. Explicit `/compact` operates on the accumulated conversation and does not admit a new prompt.
+The same admission rules protect all unprocessed steering messages, in order and exactly once. New input stays outside summarization and retention limits, including during a context-rejection retry. Input may change while compaction awaits the provider, so admission rechecks the current pending set before delivery.
+
+During an ongoing task, accumulated model output and settled tool results can require compaction before the next round. Compaction may then summarize already processed input and progress while preserving the goals, constraints, and state needed to continue. Tool calls and outcomes must remain settled and replayable; compaction must not repeat external effects. Explicit `/compact` operates on the accumulated conversation and does not admit new input.
 
 Capacity estimates include instructions and conversation framing, reserve output space, and use a safety margin for estimation error and provider request overhead. Provider usage can improve those estimates, but the provider remains authoritative about whether a request fits. The footer gives an approximate indication of remaining capacity. The proactive threshold schedules maintenance; it is neither a prompt-size limit nor a promised percentage at which compaction always occurs. Trigger percentages, retention caps, and checkpoint size targets are implementation tuning choices.
 
