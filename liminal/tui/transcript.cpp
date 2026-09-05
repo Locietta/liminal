@@ -35,6 +35,10 @@ void Transcript::apply_one(const PromptSubmitted &event) {
     append({.kind = BlockKind::USER, .state = BlockState::COMPLETED, .text = event.text});
 }
 
+void Transcript::apply_one(const SteeringApplied &event) {
+    append({.kind = BlockKind::USER, .state = BlockState::COMPLETED, .text = event.text});
+}
+
 void Transcript::apply_one(const AssistantTextDelta &event) {
     for (auto block = blocks.rbegin(); block != blocks.rend(); ++block) {
         if (block->kind != BlockKind::ASSISTANT || block->activity_scope != event.activity_scope || block->output_item_id != event.item_id)

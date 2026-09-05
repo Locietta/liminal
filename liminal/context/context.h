@@ -3,7 +3,6 @@
 #include <filesystem>
 #include <optional>
 #include <span>
-#include <span>
 #include <string>
 #include <vector>
 
@@ -92,7 +91,8 @@ struct ContextBuilder {
     /// Optional projected outcomes settle the latest provisional provider
     /// round for admission planning and participate in exact usage estimation.
     Result<ContextManifest> build(std::span<const InstructionSource> sources, const session::Session &session, ContextBudget budget = {},
-                                  std::span<const ToolOutcome> projected_tool_outcomes = {}) const;
+                                  std::span<const ToolOutcome> projected_tool_outcomes = {},
+                                  std::span<const std::string> pending_inputs = {}) const;
 
     /// Converts a provider compaction result into a semantic checkpoint after
     /// verifying that its resolved instruction prefix is unchanged.

@@ -267,7 +267,8 @@ std::optional<usize> input_budget_tokens(const ContextBudget &budget) {
 }
 
 Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource> sources, const session::Session &session,
-                                              ContextBudget budget, std::span<const ToolOutcome> projected_tool_outcomes) const {
+                                              ContextBudget budget, std::span<const ToolOutcome> projected_tool_outcomes,
+                                              std::span<const std::string> pending_inputs) const {
     std::vector<InstructionSource> ordered(sources.begin(), sources.end());
     std::stable_sort(ordered.begin(), ordered.end(),
                      [](const auto &left, const auto &right) { return authority_rank(left.authority) < authority_rank(right.authority); });
@@ -320,6 +321,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
             auto replayed = project_entries(candidate, std::span(branch).subspan(*unit), session, projected_tool_outcomes,
                                             *unit == start ? &baseline : nullptr);
             if (!replayed) return lighter::outcome_error(std::move(replayed).error());
+            for (const auto &input : pending_inputs) provider::append_user(candidate, input);
             const auto candidate_usage = estimate_usage(candidate, budget, baseline);
             const bool fits = *candidate_usage.remaining_input_tokens >= 0;
             if (!fits && unit != unit_starts.rbegin()) break;
@@ -351,6 +353,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
     auto replayed = project_entries(manifest.provider_history, std::span(branch).subspan(selected_start), session, projected_tool_outcomes,
                                     selected_start == start ? &baseline : nullptr);
     if (!replayed) return lighter::outcome_error(std::move(replayed).error());
+    for (const auto &input : pending_inputs) provider::append_user(manifest.provider_history, input);
     manifest.usage = estimate_usage(manifest.provider_history, manifest.budget, baseline);
     return manifest;
 }

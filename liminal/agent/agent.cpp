@@ -12,6 +12,7 @@
 #include <utility>
 
 #include <lighter/async/vocab/cancellation.h>
+#include <lighter/encoding/utf8.h>
 
 #include <liminal/text.h>
 
@@ -78,18 +79,17 @@ bool exceeds_compaction_threshold(const context::ContextUsage &usage) {
     return usage.estimated_input_tokens >= threshold;
 }
 
-bool has_compactable_history(const context::ContextManifest &manifest, bool pending_prompt) {
-    return manifest.omitted_budget_entries != 0 ||
-           manifest.provider_history.size() > manifest.instructions.size() + (pending_prompt ? 1 : 0);
+bool has_compactable_history(const context::ContextManifest &manifest, usize pending_inputs) {
+    return manifest.omitted_budget_entries != 0 || manifest.provider_history.size() > manifest.instructions.size() + pending_inputs;
 }
 
-bool needs_automatic_compaction(const context::ContextManifest &manifest, bool pending_prompt) {
-    if (!has_compactable_history(manifest, pending_prompt)) return false;
+bool needs_automatic_compaction(const context::ContextManifest &manifest, usize pending_inputs) {
+    if (!has_compactable_history(manifest, pending_inputs)) return false;
     if (manifest.omitted_budget_entries != 0 || (manifest.usage.remaining_input_tokens && *manifest.usage.remaining_input_tokens < 0))
         return true;
     auto accumulated = manifest.usage;
-    if (pending_prompt) {
-        const auto prompt_tokens = context::estimate_input_tokens(std::span(manifest.provider_history).last(1));
+    if (pending_inputs != 0) {
+        const auto prompt_tokens = context::estimate_input_tokens(std::span(manifest.provider_history).last(pending_inputs));
         accumulated.estimated_input_tokens -= std::min(accumulated.estimated_input_tokens, prompt_tokens);
     }
     return exceeds_compaction_threshold(accumulated);
@@ -161,6 +161,7 @@ void Agent::select_model(model::Choice next) {
 }
 
 void Agent::replace_session(model::Choice next_model, session::Session next_session) {
+    contract_assert(!current_task);
     model = std::move(next_model);
     session = std::move(next_session);
     session.set_model_preference(model.entry.provider, model.entry.id, model.reasoning_effort);
@@ -170,11 +171,40 @@ Result<context::ContextManifest> Agent::context_manifest() const {
     return context::ContextBuilder{}.build(instructions, session, context_budget(model.entry));
 }
 
+Result<session::EntryId> Agent::steer(TaskTarget expected_task, std::string text) {
+    if (active_task() != expected_task) {
+        return lighter::outcome_error(Error::command("the target task is no longer active"));
+    }
+    if (text.empty() || !lighter::encoding::utf8::is_valid(text)) {
+        return lighter::outcome_error(Error::command("steering input must be nonempty UTF-8"));
+    }
+    return session.append(session::SteeringSubmitted{.task_id = expected_task.task_id, .text = std::move(text)});
+}
+
+std::vector<session::PendingSteering> Agent::current_steering() const {
+    auto pending = session.pending_steering();
+    std::erase_if(pending, [this](const auto &input) { return !current_task || input.task_id != *current_task; });
+    return pending;
+}
+
 Task<void, Error, lighter::Cancellation> Agent::run_task(std::string prompt, EventSink events,
                                                          std::optional<lighter::CancellationToken> cancellation) {
+    if (current_task) co_await fail(Error::command("an agent task is already active"));
     const auto task_id = session.start_task(prompt);
+    current_task = task_id;
+    struct ResetActiveTask {
+        std::optional<session::TaskId> &task;
+        const session::Session &session;
+        TaskTarget target;
+        ~ResetActiveTask() {
+            if (session.id == target.session_id && task == target.task_id) task.reset();
+        }
+    } reset_active_task{current_task, session, *active_task()};
     const auto activity_task_generation = next_activity_task_generation++;
     auto outcome = co_await run_task_loop(task_id, activity_task_generation, prompt, events, cancellation);
+    // Closing input admission and recording the task outcome are synchronous
+    // on the same event loop as steer(), so a late input cannot be stranded.
+    current_task.reset();
     if (outcome.is_cancelled()) {
         session.append(session::TaskFinished{.id = task_id, .outcome = session::TaskOutcome::CANCELLED});
         co_await cancel();
@@ -192,7 +222,8 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
                                                               std::string_view prompt, const EventSink &events,
                                                               const std::optional<lighter::CancellationToken> &cancellation) {
     bool automatically_compacted = false;
-    std::optional<std::string_view> pending_prompt = prompt;
+    std::vector<std::string> pending_inputs{std::string(prompt)};
+    bool compacted_for_request = false;
     // The byte estimate can undercount the provider's tokenization or hidden
     // request material. A context rejection that arrives before any visible
     // output is recovered by compacting once and re-issuing the call; a
@@ -201,20 +232,35 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
     // of a round settled as omitted leave nothing behind.
     bool recovered_from_exhaustion = false;
     while (true) {
+        if (cancellation && cancellation->cancelled()) co_await cancel();
+        auto queued = current_steering();
+        std::vector<std::string> queued_text;
+        for (const auto &input : queued) queued_text.push_back(input.text);
+        const auto pending_count = pending_inputs.size() + queued_text.size();
         context::ContextBuilder builder;
-        auto built = builder.build(instructions, session, context_budget(model.entry));
+        auto built = builder.build(instructions, session, context_budget(model.entry), {}, queued_text);
         if (!built) {
             co_await fail(std::move(built).error());
         }
-        if (!recovered_from_exhaustion && needs_automatic_compaction(*built, pending_prompt.has_value())) {
-            auto compacted = co_await compact_automatically(pending_prompt, cancellation);
+        if (!recovered_from_exhaustion && !compacted_for_request && needs_automatic_compaction(*built, pending_count)) {
+            auto compacted = co_await compact_automatically(pending_inputs, queued_text, cancellation);
             if (compacted.is_cancelled()) co_await cancel();
             if (compacted.has_error()) co_await fail(std::move(compacted).error());
             automatically_compacted = true;
-            built = builder.build(instructions, session, context_budget(model.entry));
-            if (!built) {
-                co_await fail(std::move(built).error());
-            }
+            compacted_for_request = true;
+            // Input can be added, edited or withdrawn while compaction awaits
+            // the provider. Re-snapshot it before admission and delivery.
+            continue;
+        }
+        if (built->usage.remaining_input_tokens && *built->usage.remaining_input_tokens < 0) {
+            co_await fail(Error::protocol("pending input and accumulated context exceed the model input budget"));
+        }
+        for (const auto &input : queued) {
+            session.append(session::SteeringResolved{.task_id = task_id, .input_id = input.id});
+            pending_inputs.push_back(input.text);
+        }
+        for (const auto &input : queued) {
+            emit(events, SteeringApplied{.input_id = input.id.value, .text = input.text});
         }
         const auto provider_call_id = session.next_provider_call();
         const ActivityScope activity_scope{
@@ -304,9 +350,9 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
                 .replay = session::ProviderRoundReplay::OMIT,
             });
             if (completed.error().code == ErrorCode::CONTEXT_EXHAUSTED && !visible_output && !recovered_from_exhaustion &&
-                has_compactable_history(*built, pending_prompt.has_value())) {
+                has_compactable_history(*built, pending_inputs.size())) {
                 recovered_from_exhaustion = true;
-                auto compacted = co_await compact_automatically(pending_prompt, cancellation);
+                auto compacted = co_await compact_automatically(pending_inputs, {}, cancellation);
                 if (compacted.is_cancelled()) co_await cancel();
                 if (compacted.has_error()) co_await fail(std::move(compacted).error());
                 automatically_compacted = true;
@@ -383,6 +429,10 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
             });
         }
 
+        // This is a settled round: allow already-ready input processing to
+        // run before the final-answer decision, without delaying on a timer.
+        co_await lighter::yield();
+        if (cancellation && cancellation->cancelled()) co_await cancel();
         switch (completion.stop) {
             case provider::StopKind::DONE:
                 if (call_count == 0) {
@@ -390,6 +440,13 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
                         co_await fail(Error::protocol("provider completed the task without a terminal assistant answer"));
                     }
                     emit(events, ProviderActivityCompleted{.activity_scope = activity_scope});
+                    if (!current_steering().empty()) {
+                        pending_inputs.clear();
+                        compacted_for_request = false;
+                        recovered_from_exhaustion = false;
+                        continue;
+                    }
+                    current_task.reset();
                     co_return automatically_compacted;
                 }
                 emit(events, ProviderActivityCompleted{.activity_scope = activity_scope});
@@ -398,9 +455,9 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
             case provider::StopKind::TRUNCATED:
                 co_await fail(Error::protocol("response truncated (" + completion.stop_detail + "); raise max_tokens"));
             case provider::StopKind::CONTEXT_EXHAUSTED: {
-                if (!visible_output && !recovered_from_exhaustion && has_compactable_history(*built, pending_prompt.has_value())) {
+                if (!visible_output && !recovered_from_exhaustion && has_compactable_history(*built, pending_inputs.size())) {
                     recovered_from_exhaustion = true;
-                    auto compacted = co_await compact_automatically(pending_prompt, cancellation);
+                    auto compacted = co_await compact_automatically(pending_inputs, {}, cancellation);
                     if (compacted.is_cancelled()) co_await cancel();
                     if (compacted.has_error()) co_await fail(std::move(compacted).error());
                     automatically_compacted = true;
@@ -414,32 +471,32 @@ Task<bool, Error, lighter::Cancellation> Agent::run_task_loop(session::TaskId ta
         if (call_count == 0) {
             co_await fail(Error::protocol("provider requested tool results without any tool calls"));
         }
-        pending_prompt.reset();
+        pending_inputs.clear();
+        compacted_for_request = false;
         recovered_from_exhaustion = false;
     }
 }
 
-Task<void, Error, lighter::Cancellation> Agent::compact_automatically(std::optional<std::string_view> pending_prompt,
+Task<void, Error, lighter::Cancellation> Agent::compact_automatically(std::span<const std::string> admitted_inputs,
+                                                                      std::span<const std::string> queued_inputs,
                                                                       const std::optional<lighter::CancellationToken> &cancellation) {
     context::ContextBuilder builder;
-    auto full = builder.build(instructions, session);
+    auto full = builder.build(instructions, session, {}, {}, queued_inputs);
     if (!full) {
         co_await fail(std::move(full).error());
     }
     auto full_manifest = *std::move(full);
-    const auto original_tokens = context::estimate_input_tokens(full_manifest.provider_history);
+    const auto original_tokens = context::estimate_input_tokens(
+        std::span(full_manifest.provider_history).first(full_manifest.provider_history.size() - queued_inputs.size()));
     auto compacted = std::move(full_manifest.provider_history);
     auto request = compact_request(k_automatic_compact_instructions, model.entry);
-    if (pending_prompt) {
-        // A pending task has no replayed provider rounds. Earlier recovery
-        // checkpoints also keep its original prompt as the final input.
-        contract_assert(compacted.size() > full_manifest.instructions.size());
-        const auto &last = compacted.back();
-        contract_assert(last.role == provider::Role::USER && last.parts.size() == 1 &&
-                        std::holds_alternative<provider::TextPart>(last.parts.front()) &&
-                        std::get<provider::TextPart>(last.parts.front()).text == *pending_prompt);
-        const auto prompt_tokens = context::estimate_input_tokens(std::span(compacted).last(1));
-        compacted.pop_back();
+    const auto pending_count = admitted_inputs.size() + queued_inputs.size();
+    if (pending_count != 0) {
+        // Unprocessed inputs form the context tail, including after a
+        // rejected request or an earlier automatic checkpoint.
+        contract_assert(compacted.size() >= full_manifest.instructions.size() + pending_count);
+        const auto prompt_tokens = context::estimate_input_tokens(std::span(compacted).last(pending_count));
+        compacted.resize(compacted.size() - pending_count);
         if (auto budget = context::input_budget_tokens(context_budget(model.entry))) {
             const auto available = *budget > prompt_tokens ? *budget - prompt_tokens : 0;
             request.compacted_context_target_tokens = std::min(*request.compacted_context_target_tokens, available);
@@ -455,16 +512,19 @@ Task<void, Error, lighter::Cancellation> Agent::compact_automatically(std::optio
     if (checkpoint->items.empty()) {
         co_await fail(Error::protocol("automatic compaction produced an empty checkpoint"));
     }
-    if (pending_prompt) {
-        checkpoint->items.push_back(session::ContextInput{.parts = {provider::TextPart{.text = std::string(*pending_prompt)}}});
-    }
-    // Judge canonical replay with the pending prompt before committing. A
+    for (const auto &input : admitted_inputs)
+        checkpoint->items.push_back(session::ContextInput{.parts = {provider::TextPart{.text = input}}});
+    const auto compacted_usage = builder.estimate_checkpoint(full_manifest, *checkpoint, context_budget(model.entry));
+    auto projected_checkpoint = *checkpoint;
+    for (const auto &input : current_steering())
+        projected_checkpoint.items.push_back(session::ContextInput{.parts = {provider::TextPart{.text = input.text}}});
+    // Judge canonical replay with the current pending input before committing. A
     // usable request may remain above the proactive maintenance threshold.
-    const auto usage = builder.estimate_checkpoint(full_manifest, *checkpoint, context_budget(model.entry));
+    const auto usage = builder.estimate_checkpoint(full_manifest, projected_checkpoint, context_budget(model.entry));
     if (usage.remaining_input_tokens && *usage.remaining_input_tokens < 0) {
         co_await fail(Error::protocol("compacted context and pending input exceed the model input budget"));
     }
-    if (usage.estimated_input_tokens >= original_tokens) {
+    if (compacted_usage.estimated_input_tokens >= original_tokens) {
         co_await fail(Error::protocol("automatic compaction did not reduce context"));
     }
     session.append(*std::move(checkpoint));

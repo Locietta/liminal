@@ -2063,7 +2063,231 @@ void test_context_manifest() {
             "context builder accepted altered instructions from a provider operation");
 }
 
+std::vector<std::string> user_texts(const provider::History &history) {
+    std::vector<std::string> result;
+    for (const auto &item : history) {
+        if (item.role != provider::Role::USER) continue;
+        for (const auto &part : item.parts)
+            if (const auto *text = std::get_if<provider::TextPart>(&part)) result.push_back(text->text);
+    }
+    return result;
+}
+
+void test_steering_at_stream_tool_and_final_boundaries() {
+    lighter::EventLoop loop;
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools, {});
+    lighter::Event tools_started;
+    usize started = 0;
+    require(tools
+                .register_tool(
+                    {.definition = {.name = "gated"},
+                     .execution_mode = ToolExecutionMode::PARALLEL,
+                     .execute = [&](const ToolSet &, const provider::ToolCall &call, ToolOutputGrant) -> lighter::Task<ToolOutcome, Error> {
+                         if (++started == 2) tools_started.set();
+                         co_await tools_started.wait();
+                         if (call.id == "a")
+                             require(agent.steer(*agent.active_task(), "during tools").has_value(), "tool steering rejected");
+                         require(agent.session.pending_steering().size() >= 1, "steering was consumed before tools settled");
+                         co_return ToolOutcome{.call_id = call.id, .payload = "ok"};
+                     }})
+                .has_value(),
+            "failed to register gated tool");
+    usize completions = 0;
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([&](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                   const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            if (++completions == 1) {
+                emit_message(callbacks, "initial", "investigating", true);
+                const auto steering = agent.steer(*agent.active_task(), "during stream");
+                require(steering.has_value(), steering ? "" : "stream steering rejected: " + steering.error().message());
+                auto removed = agent.steer(*agent.active_task(), "withdrawn");
+                require(removed && agent.session.withdraw_steering(*removed), "pending edit failed");
+                auto stale = *agent.active_task();
+                ++stale.task_id.value;
+                require(!agent.steer(stale, "wrong task"), "stale steering accepted");
+                stale = *agent.active_task();
+                stale.session_id = session::generate_session_id();
+                require(!agent.steer(stale, "wrong session"), "cross-session steering accepted");
+                require(!agent.steer(*agent.active_task(), "") && !agent.steer(*agent.active_task(), "\xff"),
+                        "invalid steering text was accepted");
+                emit_tool_call(callbacks, "a", "gated");
+                emit_tool_call(callbacks, "b", "gated");
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::NEEDS_TOOL_RESULTS};
+            }
+            if (completions == 2) {
+                require(started == 2 && user_texts(history) == std::vector<std::string>{"original", "during stream", "during tools"},
+                        "steering was reordered, lost, or delivered before the parallel batch");
+                emit_message(callbacks, "premature-final", "done", true);
+                require(agent.steer(*agent.active_task(), "at final answer").has_value(), "final-answer steering rejected");
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+            }
+            require(user_texts(history) == std::vector<std::string>{"original", "during stream", "during tools", "at final answer"},
+                    "final-answer steering did not continue the same task");
+            emit_message(callbacks, "final", "corrected answer");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        })
+        .times(3);
+    std::vector<Event> events;
+    auto task = agent.run_task("original", [&](const Event &event) noexcept { events.push_back(event); });
+    loop.schedule(task);
+    loop.run();
+    require(task.result().has_value() && agent.session.validate(), "steered task failed");
+    require(!agent.active_task() && !agent.steer({.session_id = agent.session.id, .task_id = {.value = 1}}, "late"),
+            "closed task still accepted steering");
+    require(agent.session.pending_steering().empty() && agent.session.next_task_id == 2, "steering created an extra task");
+    require(agent.session.reply_from_latest() == "corrected answer", "copyable reply came from the superseded final answer");
+    require(std::ranges::count_if(events, [](const Event &e) { return std::holds_alternative<TaskCompleted>(e); }) == 1 &&
+                std::ranges::count_if(events, [](const Event &e) { return std::holds_alternative<SteeringApplied>(e); }) == 3,
+            "steering emitted incorrect lifecycle events");
+    provider_mock.verify();
+}
+
+void test_steering_during_compaction_and_rejection() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    Agent agent(
+        {.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test", .context_window = 1000, .max_output_tokens = 10}},
+        tools, compact_test_instructions());
+    append_session_message(agent.session, std::string(1800, 'u'), std::string(1800, 'a'));
+    usize compactions = 0;
+    provider_mock.expect<provider::CompactDispatch>()
+        .calls([&](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
+            const auto texts = user_texts(history);
+            require(std::ranges::find(texts, std::string("original")) == texts.end() &&
+                        std::ranges::find(texts, std::string("correction\nexact")) == texts.end(),
+                    "compaction summarized unprocessed user input");
+            if (++compactions == 1) {
+                require(agent.steer(*agent.active_task(), "correction\nexact").has_value(), "steering during compaction rejected");
+                co_await lighter::yield();
+            }
+            history.resize(provider::instruction_prefix_size(history));
+            provider::append_user(history, std::string(compactions == 1 ? 100 : 20, 's'));
+            co_return;
+        })
+        .times(2);
+    usize completions = 0;
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([&](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                   const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            const auto texts = user_texts(history);
+            require(texts.size() == 3 && texts[1] == "original" && texts[2] == "correction\nexact", "admission changed pending inputs");
+            if (++completions == 1) {
+                auto error = Error::protocol("provider context rejection");
+                error.code = ErrorCode::CONTEXT_EXHAUSTED;
+                co_await lighter::fail(std::move(error));
+            }
+            emit_message(callbacks, "final", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        })
+        .times(2);
+    lighter::EventLoop loop;
+    auto task = agent.run_task("original", {});
+    loop.schedule(task);
+    loop.run();
+    require(task.result().has_value() && agent.session.validate(), "steering compaction recovery failed");
+    require(agent.session.pending_steering().empty(), "delivered correction remained pending");
+    provider_mock.verify();
+}
+
+void test_cancelled_steering_is_not_a_follow_up() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools, {});
+    lighter::CancellationSource cancellation;
+    lighter::Event blocked;
+    std::optional<lighter::Task<void, Error, lighter::Cancellation>> cancelled_task;
+    usize completions = 0;
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([&](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                   const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            if (++completions == 1) {
+                require(agent.steer(*agent.active_task(), "keep me").has_value(), "steering before cancellation failed");
+                cancellation.cancel();
+                co_await blocked.wait();
+                co_return provider::ProviderCallCompletion{};
+            }
+            cancelled_task.reset();
+            require(agent.active_task().has_value(), "destroying a cancelled task closed a newer task's input");
+            const auto texts = user_texts(history);
+            require(std::ranges::find(texts, std::string("keep me")) == texts.end(), "cancelled steering leaked into another task");
+            emit_message(callbacks, "final", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        })
+        .times(2);
+    lighter::EventLoop loop;
+    cancelled_task.emplace(agent.run_task("first", {}, cancellation.token()));
+    loop.schedule(*cancelled_task);
+    loop.run();
+    require(cancelled_task->result().is_cancelled() && !agent.active_task() && agent.session.pending_steering().size() == 1,
+            "cancellation lost pending steering or left admission open");
+    auto next = agent.run_task("second", {});
+    loop.schedule(next);
+    loop.run();
+    require(next.result().has_value() && agent.session.validate() && agent.session.pending_steering().size() == 1,
+            "later task consumed abandoned steering");
+    provider_mock.verify();
+}
+
+void test_pending_steering_changes_during_compaction() {
+    for (const bool withdraw : {true, false}) {
+        ToolSet tools(std::filesystem::current_path());
+        lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+        Agent agent({.handle = provider_mock.handle(),
+                     .entry = {.provider = "fake", .id = "test", .context_window = 1000, .max_output_tokens = 10}},
+                    tools, {});
+        session::EntryId pending;
+        usize completions = 0;
+        provider_mock.expect<provider::CompleteDispatch>()
+            .calls([&](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                       const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+                if (++completions == 1) {
+                    emit_message(callbacks, "initial", std::string(3600, 'a'));
+                    auto accepted = agent.steer(*agent.active_task(), std::string(5000, 'u'));
+                    require(accepted.has_value(), "oversized input should remain editable until admission");
+                    pending = *accepted;
+                } else {
+                    require(user_texts(history) == std::vector<std::string>{"summary", "short"},
+                            "compaction delivered stale input after withdrawal");
+                    emit_message(callbacks, "final", "done");
+                }
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+            })
+            .times(withdraw ? 2 : 1);
+        provider_mock.expect<provider::CompactDispatch>().calls(
+            [&](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
+                require(user_texts(history) == std::vector<std::string>{"original"}, "compaction summarized pending steering");
+                if (withdraw) {
+                    require(agent.session.withdraw_steering(pending).has_value() && agent.steer(*agent.active_task(), "short").has_value(),
+                            "pending edit during compaction failed");
+                    co_await lighter::yield();
+                }
+                history.clear();
+                provider::append_user(history, "summary");
+                co_return;
+            });
+        lighter::EventLoop loop;
+        auto task = agent.run_task("original", {});
+        loop.schedule(task);
+        loop.run();
+        require(agent.session.validate().has_value() && !agent.active_task(), "admission left invalid task state");
+        if (withdraw) {
+            require(task.result().has_value() && agent.session.pending_steering().empty(), "edited input failed admission");
+        } else {
+            require(task.result().has_error() && agent.session.pending_steering().size() == 1 &&
+                        agent.session.pending_steering()[0].id == pending,
+                    "failed admission lost or delivered oversized input");
+        }
+        provider_mock.verify();
+    }
+}
+
 i32 run_all() {
+    test_steering_at_stream_tool_and_final_boundaries();
+    test_steering_during_compaction_and_rejection();
+    test_cancelled_steering_is_not_a_follow_up();
+    test_pending_steering_changes_during_compaction();
     test_successful_task();
     test_long_tool_loop();
     test_tool_output_budget_tracks_model_context();

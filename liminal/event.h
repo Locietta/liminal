@@ -28,6 +28,11 @@ struct PromptSubmitted {
     std::string text;
 };
 
+struct SteeringApplied {
+    u64 input_id;
+    std::string text;
+};
+
 struct AssistantTextDelta {
     std::string item_id;
     std::string text;
@@ -81,7 +86,7 @@ struct ModelSelected {
     std::optional<std::string> effort;
 };
 
-using Event = std::variant<PromptSubmitted, AssistantTextDelta, AssistantMessageCompleted, ToolStarted, ToolCompleted,
+using Event = std::variant<PromptSubmitted, SteeringApplied, AssistantTextDelta, AssistantMessageCompleted, ToolStarted, ToolCompleted,
                            ProviderActivityCompleted, TaskCompleted, TaskCancelled, TaskFailed, SessionNotice, ModelSelected>;
 /// Event sinks cannot fail. They observe the agent loop; a sink that could
 /// throw would turn a rendering problem into a stranded tool batch.

@@ -53,6 +53,7 @@ struct Transcript {
 
 private:
     void apply_one(const PromptSubmitted &event);
+    void apply_one(const SteeringApplied &event);
     void apply_one(const AssistantTextDelta &event);
     void apply_one(const AssistantMessageCompleted &event);
     void apply_one(const ToolStarted &event, std::chrono::steady_clock::time_point now);
