@@ -1,8 +1,8 @@
 #pragma once
 
+#include <deque>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <lighter/async/async.h>
 
@@ -12,29 +12,19 @@
 namespace liminal::tui {
 
 /// Routes interactive submissions independently of the running agent task.
-/// Steering is durable session state; follow-ups are explicit local drafts.
+/// Busy prompts become durable steering; commands and idle prompts go to the REPL.
 struct SessionInput {
     SessionInput(Agent &agent, ConsoleRenderer &renderer) : agent(&agent), renderer(&renderer) {}
 
     lighter::Error submit(std::string text);
     lighter::Task<std::string> next();
     lighter::Error refresh();
-    void pause_follow_ups();
 
 private:
-    struct QueuedPrompt {
-        u64 id;
-        session::SessionId session_id;
-        std::string text;
-        bool command = false;
-        bool held = false;
-    };
-
     lighter::Error manage_pending(std::string_view arguments);
     Agent *agent;
     ConsoleRenderer *renderer;
-    std::vector<QueuedPrompt> queued;
-    u64 next_id = 1;
+    std::deque<std::string> submissions;
     lighter::Event ready;
 };
 

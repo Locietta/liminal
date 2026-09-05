@@ -2158,6 +2158,7 @@ void check_pending_input_controls() {
     tui::ConsoleRenderer renderer;
     renderer.screen.resize({100, 16});
     tui::SessionInput inputs(agent, renderer);
+    require(!tui::find_command("queue") && !tui::describe_commands().contains("/queue"), "removed command remains discoverable");
     session::EntryId unsent;
     provider_mock.expect<provider::CompleteDispatch>().calls(
         [&](const provider::History &, const std::vector<provider::ToolDefinition> &,
@@ -2169,11 +2170,13 @@ void check_pending_input_controls() {
             require(!inputs.submit("/pending edit " + identifier) && agent.session.pending_steering().empty(),
                     "editing did not withdraw the pending correction");
             require(renderer.take_prompt() == "//literal\ncorrection", "editing lost multiline or escaped slash text");
-            require(!inputs.submit("revised correction") && !inputs.submit("/queue later task"), "pending submission failed");
-            require(renderer.screen.pending_inputs.size() == 2 && frame_text(renderer.screen.frame()).contains("Steer s"),
-                    "pending steering and follow-up should both be visible");
-            require(!inputs.submit("/pending drop q1") && renderer.screen.pending_inputs.size() == 1, "dropping a queued follow-up failed");
-            require(!inputs.submit("/queue held task"), "queuing follow-up failed");
+            require(!inputs.submit("discard this correction"), "pending submission failed");
+            const auto discard = agent.session.pending_steering().front().id;
+            require(!inputs.submit("/pending drop s" + std::to_string(discard.value)) && renderer.screen.pending_inputs.empty(),
+                    "dropping pending steering failed");
+            require(!inputs.submit("revised correction") && !inputs.submit("/queue unexpected task"), "pending submission failed");
+            require(renderer.screen.pending_inputs.size() == 1 && frame_text(renderer.screen.frame()).contains("Steer s"),
+                    "pending input should contain only the submitted correction");
             require(!inputs.submit("/new") && agent.session.pending_steering().size() == 1,
                     "idle-only commands must not steer or replace the active session");
             unsent = agent.session.pending_steering().front().id;
@@ -2183,18 +2186,15 @@ void check_pending_input_controls() {
     loop.schedule(task);
     loop.run();
     require(task.result().has_error(), "expected provider failure");
-    inputs.pause_follow_ups();
-    require(!inputs.refresh() && renderer.screen.pending_inputs.size() == 2 && renderer.screen.pending_inputs[0].starts_with("Unsent s") &&
-                renderer.screen.pending_inputs[1].starts_with("Unsent q"),
-            "failure must retain unsent steering and hold follow-ups");
+    require(!inputs.refresh() && renderer.screen.pending_inputs.size() == 1 && renderer.screen.pending_inputs[0].starts_with("Unsent s"),
+            "failure must retain unsent steering");
     require(!inputs.submit("/pending edit s" + std::to_string(unsent.value)) && renderer.take_prompt() == "revised correction",
             "unsent steering should be recoverable after failure");
     require(!inputs.submit("new task"), "idle submission failed");
     auto next = inputs.next();
     loop.schedule(next);
     loop.run();
-    require(next.result() == "new task", "held follow-up unexpectedly started after failure");
-    require(!inputs.submit("/pending edit q2") && renderer.take_prompt() == "held task", "held follow-up could not be edited");
+    require(next.result() == "new task", "removed command or steering was dispatched as another task");
     for (const auto *invalid : {"/pending edit", "/pending edit s", "/pending drop q0", "/pending edit s1 junk"}) {
         require(!inputs.submit(invalid), "invalid pending syntax caused a renderer error");
     }
@@ -2208,7 +2208,7 @@ void check_pending_input_layout() {
     screen.apply(PromptSubmitted{.text = "original"});
     screen.apply(AssistantTextDelta{.item_id = "stream", .text = "working"});
     const auto state = screen.state;
-    screen.set_pending_inputs({"Steer s2: correction", "Queued q1: later", "Unsent s1: old", "Queued q2: another"});
+    screen.set_pending_inputs({"Steer s2: correction", "Steer s3: additional detail", "Unsent s1: old", "Steer s4: another"});
     const auto pending = frame_text(screen.frame());
     require(pending.contains("Steer s2: correction") && pending.contains("+1 more") && pending.contains("working"),
             "pending input should reserve bounded space above the composer");

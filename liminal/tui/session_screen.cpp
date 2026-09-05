@@ -1332,8 +1332,7 @@ Frame SessionScreen::frame() const {
             result.surface.write(prompt_row - pending_band + static_cast<i32>(index), 0, pending_inputs[index], Style::MUTED);
         }
         const auto remaining = pending_inputs.size() - shown;
-        const auto hint =
-            (remaining != 0 ? "+" + std::to_string(remaining) + " more · " : "") + std::string("/pending edit/drop <id> · /queue <prompt>");
+        const auto hint = (remaining != 0 ? "+" + std::to_string(remaining) + " more · " : "") + std::string("/pending edit/drop <id>");
         result.surface.write(prompt_row - 1, 0, hint, Style::MUTED);
     }
     if (band > 0) {

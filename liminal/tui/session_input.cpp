@@ -1,9 +1,9 @@
 #include "session_input.h"
 
-#include <algorithm>
 #include <charconv>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <liminal/tui/command.h>
 
@@ -31,11 +31,6 @@ lighter::Error SessionInput::refresh() {
         const auto state = active && active->task_id == input.task_id ? "Steer s" : "Unsent s";
         rows.push_back(state + std::to_string(input.id.value) + ": " + sanitize_terminal_text(input.text, false));
     }
-    for (const auto &input : queued) {
-        if (input.session_id != agent->session.id) continue;
-        rows.push_back(std::string(input.held ? "Unsent q" : "Queued q") + std::to_string(input.id) + ": " +
-                       sanitize_terminal_text(input.text, false));
-    }
     renderer->screen.set_pending_inputs(std::move(rows));
     return renderer->redraw();
 }
@@ -53,31 +48,20 @@ lighter::Error SessionInput::manage_pending(std::string_view arguments) {
     const auto separator = arguments.find_first_of(" \t");
     const auto action = arguments.substr(0, separator);
     auto identifier = separator == std::string_view::npos ? std::string_view{} : trim(arguments.substr(separator));
-    if ((action != "edit" && action != "drop") || identifier.size() < 2 || (identifier.front() != 's' && identifier.front() != 'q')) {
-        return renderer->notice("[usage: /pending [edit|drop <sN|qN>]]\n");
+    if ((action != "edit" && action != "drop") || identifier.size() < 2 || identifier.front() != 's') {
+        return renderer->notice("[usage: /pending [edit|drop <sN>]]\n");
     }
     u64 id = 0;
     const auto number = identifier.substr(1);
     const auto parsed = std::from_chars(number.data(), number.data() + number.size(), id);
     if (id == 0 || parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size()) {
-        return renderer->notice("[usage: /pending [edit|drop <sN|qN>]]\n");
+        return renderer->notice("[usage: /pending [edit|drop <sN>]]\n");
     }
     if (action == "edit" && !renderer->prompt_empty()) return renderer->notice("[clear the current draft before editing pending input]\n");
-    std::string text;
-    if (identifier.front() == 's') {
-        auto withdrawn = agent->session.withdraw_steering({.value = id});
-        if (!withdrawn) return renderer->notice("[" + withdrawn.error().message() + "]\n");
-        text = *std::move(withdrawn);
-        text = escaped_prompt(std::move(text));
-    } else {
-        const auto found =
-            std::ranges::find_if(queued, [&](const auto &input) { return input.id == id && input.session_id == agent->session.id; });
-        if (found == queued.end()) return renderer->notice("[input is no longer pending]\n");
-        text = std::move(found->text);
-        queued.erase(found);
-    }
+    auto withdrawn = agent->session.withdraw_steering({.value = id});
+    if (!withdrawn) return renderer->notice("[" + withdrawn.error().message() + "]\n");
     if (action == "edit") {
-        if (auto error = renderer->replace_prompt(std::move(text))) return error;
+        if (auto error = renderer->replace_prompt(escaped_prompt(*std::move(withdrawn)))) return error;
     }
     return refresh();
 }
@@ -90,14 +74,8 @@ lighter::Error SessionInput::submit(std::string text) {
         const auto *spec = find_command(command->name);
         if (!spec) return renderer->notice("[unknown command '/" + command->name + "']\n");
         if (spec->kind == CommandKind::PENDING) return manage_pending(command->arguments);
-        if (spec->kind == CommandKind::QUEUE) {
-            if (command->arguments.empty()) return renderer->notice("[usage: /queue <prompt>]\n");
-            queued.push_back({.id = next_id++, .session_id = agent->session.id, .text = escaped_prompt(command->arguments)});
-        } else {
-            if (spec->idle_only && agent->active_task()) {
-                return renderer->notice("[/" + command->name + " is available only while the agent is idle]\n");
-            }
-            queued.push_back({.id = next_id++, .session_id = agent->session.id, .text = std::move(text), .command = true});
+        if (spec->idle_only && agent->active_task()) {
+            return renderer->notice("[/" + command->name + " is available only while the agent is idle]\n");
         }
     } else if (const auto active = agent->active_task()) {
         auto accepted = agent->steer(*active, std::move(std::get<UserPrompt>(*parsed).text));
@@ -105,30 +83,21 @@ lighter::Error SessionInput::submit(std::string text) {
             if (auto error = renderer->replace_prompt(std::move(text))) return error;
             return renderer->notice("[" + accepted.error().message() + "]\n");
         }
-    } else {
-        queued.push_back({.id = next_id++, .session_id = agent->session.id, .text = std::move(text)});
+        return refresh();
     }
+    submissions.push_back(std::move(text));
     ready.set();
-    return refresh();
+    return renderer->redraw();
 }
 
 lighter::Task<std::string> SessionInput::next() {
-    while (true) {
-        const auto found =
-            std::ranges::find_if(queued, [&](const auto &input) { return input.session_id == agent->session.id && !input.held; });
-        if (found != queued.end()) {
-            auto text = std::move(found->text);
-            queued.erase(found);
-            co_return text;
-        }
+    while (submissions.empty()) {
         ready.reset();
         co_await ready.wait();
     }
-}
-
-void SessionInput::pause_follow_ups() {
-    for (auto &input : queued)
-        if (input.session_id == agent->session.id && !input.command) input.held = true;
+    auto text = std::move(submissions.front());
+    submissions.pop_front();
+    co_return text;
 }
 
 } // namespace liminal::tui

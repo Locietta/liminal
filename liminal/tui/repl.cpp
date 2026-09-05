@@ -583,8 +583,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
     EventSink events = [&renderer, &render_error, &control, &reader](const Event &event) noexcept {
         if (render_error) return;
         render_error = renderer.render(event);
-        if (!render_error && reader.prompts &&
-            (std::holds_alternative<SteeringApplied>(event) || std::holds_alternative<TaskCompleted>(event))) {
+        if (!render_error && reader.prompts && std::holds_alternative<SteeringApplied>(event)) {
             render_error = reader.prompts->refresh();
         }
         if (render_error && control.active_task) control.active_task->cancel();
@@ -630,7 +629,6 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
             co_return 0;
         }
         auto prompt = *std::move(*line);
-        if (reader.prompts && !rendered(reader.prompts->refresh(), "cannot render pending input")) co_return 1;
         auto input = parse_repl_input(std::move(prompt));
         if (!input) {
             if (!rendered(renderer.notice("[command error: " + input.error().detail + "]\n"), "cannot render command error")) co_return 1;
@@ -648,7 +646,6 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                 continue;
             }
             switch (*command) {
-                case CommandKind::QUEUE:
                 case CommandKind::PENDING:
                     if (!rendered(renderer.notice("[input management requires an interactive terminal]\n"), "cannot render command error"))
                         co_return 1;
@@ -895,7 +892,6 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
         control.active_task = &task_cancellation;
         auto outcome = co_await agent.run_task(std::move(prompt), events, task_cancellation.token());
         control.active_task = nullptr;
-        if (reader.prompts && !outcome.has_value()) reader.prompts->pause_follow_ups();
         if (render_error) {
             failure.record("cannot render session", render_error, control);
             co_return 1;

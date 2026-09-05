@@ -1443,7 +1443,7 @@ def steering_terminal(env, arguments=()):
         os.close(slave)
 
 
-def test_steering_and_explicit_follow_up(openai_slow_mock, tmp_path):
+def test_steering_edits_stay_in_active_task(openai_slow_mock, tmp_path):
     import sqlite3
 
     base_url, state = openai_slow_mock
@@ -1463,22 +1463,20 @@ def test_steering_and_explicit_follow_up(openai_slow_mock, tmp_path):
             expect(PROMPT_MARKER + b" prefer minimal changes")
             write(b" and tests\r")
             expect(b"Steer s")
-            write(b"/queue next separate task\r")
-            expect(b": next separate task")
-            write(b"/quit\r")
-            expect(b": /quit")
+            write(b"/queue unexpected task\r")
+            expect(b"unknown command '/queue'")
             # A gated response makes ordering independent of network/typing speed.
             state["stream_release"].set()
+            expect(b"Finished (")
+            write(b"/quit\r")
             expect(b"\x1b[?1049l")
             assert process.wait(timeout=30) == 0
     finally:
         state["stream_release"].set()
 
     assert not state["errors"], "\n".join(state["errors"])
-    assert (
-        state["calls"] == 4
-    )  # rate-limit retry, tools, steered continuation, follow-up
-    steered, following = state["request_bodies"][-2:]
+    assert state["calls"] == 3  # rate-limit retry, tools, steered continuation
+    steered = state["request_bodies"][-1]
 
     def user_texts(body):
         return [
@@ -1490,11 +1488,6 @@ def test_steering_and_explicit_follow_up(openai_slow_mock, tmp_path):
         ]
 
     assert user_texts(steered) == ["inspect", "prefer minimal changes and tests"]
-    assert user_texts(following) == [
-        "inspect",
-        "prefer minimal changes and tests",
-        "next separate task",
-    ]
     assert steered["input"][-1]["role"] == "user"
     assert any(item["type"] == "function_call_output" for item in steered["input"][:-1])
     databases = list((tmp_path / "sessions").glob("*/session.sqlite3"))
@@ -1506,10 +1499,7 @@ def test_steering_and_explicit_follow_up(openai_slow_mock, tmp_path):
                 "SELECT kind,payload_json FROM session_entries ORDER BY entry_id"
             )
         ]
-    assert [payload["text"] for kind, payload in entries if kind == 1] == [
-        "inspect",
-        "next separate task",
-    ]
+    assert [payload["text"] for kind, payload in entries if kind == 1] == ["inspect"]
     assert [payload["disposition"] for kind, payload in entries if kind == 10] == [
         "withdrawn",
         "delivered",
@@ -1530,8 +1520,6 @@ def test_cancelled_steering_survives_restart(openai_slow_mock, tmp_path):
             write(b"keep this correction\r")
             expect(b"Steer s")
             pending_id = re.findall(rb"Steer (s\d+):", output)[-1]
-            write(b"/queue held follow-up\r")
-            expect(b": held follow-up")
             write(b"\x1b")
             expect(b"Unsent s")
             write(b"/quit\r")
@@ -1542,7 +1530,6 @@ def test_cancelled_steering_survives_restart(openai_slow_mock, tmp_path):
 
     with steering_terminal(env, ("continue",)) as (process, write, expect, output):
         expect(b"Unsent " + pending_id + b": keep this correction")
-        assert b"held follow-up" not in output  # follow-up drafts are process-local
         write(b"/pending edit " + pending_id + b"\r")
         expect(PROMPT_MARKER + b" keep this correction")
         write(b"\x7f" * len("keep this correction") + b"/quit\r")
