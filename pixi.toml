@@ -47,9 +47,9 @@ libiconv = ">=1.18,<2"
 # GCC 16 is the only toolchain currently shipping P2996 static reflection
 # (-freflection) and P2900 contracts, which this project depends on.
 [target.win-64.dependencies]
-gcc_win-64 = "16.1.*"
-gxx_win-64 = "16.1.*"
+gcc_win-64 = "16.2.*"
+gxx_win-64 = "16.2.*"
 
 [target.linux-64.dependencies]
-gcc = "16.1.*"
-gxx = "16.1.*"
+gcc = "16.2.*"
+gxx = "16.2.*"

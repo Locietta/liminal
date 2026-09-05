@@ -67,6 +67,11 @@ if is_host("windows") then
 end
 
 if is_os("windows") then
+    -- conda-forge GCC 16.2 searches sysroot/lib for startup objects, but its
+    -- MinGW CRT package installs them in sysroot/usr/lib. -B also supplies
+    -- the corresponding library search path to the linker.
+    add_ldflags("-B" .. path.join(conda_prefix, "Library", "x86_64-w64-mingw32", "sysroot", "usr", "lib") .. "/",
+        {tools = {"gcc", "gxx"}, force = true})
     add_defines("_CRT_SECURE_NO_WARNINGS")
     add_defines("WIN32_LEAN_AND_MEAN", "NOGDI", "UNICODE", "_UNICODE", "NOMINMAX", "_WINDOWS")
     -- set_policy("build.optimization.lto", true)
