@@ -157,6 +157,7 @@ struct SessionScreen {
     void set_session_title(std::optional<std::string> explicit_title, std::string prompt_preview);
     void set_footer(SessionFooter next);
     void show_status(std::string text);
+    void set_pending_inputs(std::vector<std::string> rows);
     void apply(const Event &event);
     void add_notice(std::string text);
     void load_transcript(std::vector<Block> blocks);
@@ -226,6 +227,7 @@ struct SessionScreen {
     SessionHeader header;
     SessionFooter footer;
     std::optional<std::string> transient_status;
+    std::vector<std::string> pending_inputs;
     CommandMenu command_menu;
     std::optional<CompactPicker> picker;
     std::optional<ViewportAnchor> anchor;
@@ -245,6 +247,7 @@ private:
     std::optional<std::string_view> command_token() const noexcept;
     void complete_highlighted_command();
     i32 compact_band_rows(i32 base_viewport) const noexcept;
+    i32 pending_band_rows(i32 base_viewport) const noexcept;
     void refresh_activity_state() noexcept;
     void clear_activity_identities() noexcept;
     void retire_activity() noexcept;

@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -1385,3 +1386,170 @@ def test_ctrl_c_routes_by_ui_state(openai_slow_mock, tmp_path):
             process.wait(timeout=5)
         os.close(master)
         os.close(slave)
+
+
+@contextmanager
+def steering_terminal(env, arguments=()):
+    """One terminal interface for the Windows and Linux steering contract."""
+    output = bytearray()
+    if os.name == "nt":
+        from windows_pty import ConPtyProcess
+
+        process = ConPtyProcess(
+            [BINARY, *arguments], cwd=REPO_ROOT, env=env, columns=100, rows=24
+        )
+        try:
+            yield (
+                process,
+                process.write,
+                lambda marker: read_conpty_until_fresh(process, output, marker, 15),
+                output,
+            )
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            process.close()
+        return
+
+    import fcntl
+    import pty
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    process = subprocess.Popen(
+        [str(BINARY), *arguments],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        close_fds=True,
+    )
+    try:
+        yield (
+            process,
+            lambda data: os.write(master, data),
+            lambda marker: read_pty_until_fresh(master, output, marker, 15),
+            output,
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        os.close(master)
+        os.close(slave)
+
+
+def test_steering_and_explicit_follow_up(openai_slow_mock, tmp_path):
+    import sqlite3
+
+    base_url, state = openai_slow_mock
+    env = terminal_test_environment(
+        tmp_path, base_url=base_url, api_key=mock_openai.API_KEY
+    )
+    try:
+        with steering_terminal(env) as (process, write, expect, output):
+            expect(PROMPT_MARKER)
+            write(b"inspect\r")
+            expect(b"Let me inspect the repository.")
+            assert state["stream_paused"].wait(5)
+            write(b"prefer minimal changes\r")
+            expect(b"Steer s")
+            pending_id = re.findall(rb"Steer (s\d+):", output)[-1]
+            write(b"/pending edit " + pending_id + b"\r")
+            expect(PROMPT_MARKER + b" prefer minimal changes")
+            write(b" and tests\r")
+            expect(b"Steer s")
+            write(b"/queue next separate task\r")
+            expect(b": next separate task")
+            write(b"/quit\r")
+            expect(b": /quit")
+            # A gated response makes ordering independent of network/typing speed.
+            state["stream_release"].set()
+            expect(b"\x1b[?1049l")
+            assert process.wait(timeout=30) == 0
+    finally:
+        state["stream_release"].set()
+
+    assert not state["errors"], "\n".join(state["errors"])
+    assert (
+        state["calls"] == 4
+    )  # rate-limit retry, tools, steered continuation, follow-up
+    steered, following = state["request_bodies"][-2:]
+
+    def user_texts(body):
+        return [
+            part["text"]
+            for item in body["input"]
+            if item.get("role") == "user"
+            for part in item["content"]
+            if part.get("type") == "input_text"
+        ]
+
+    assert user_texts(steered) == ["inspect", "prefer minimal changes and tests"]
+    assert user_texts(following) == [
+        "inspect",
+        "prefer minimal changes and tests",
+        "next separate task",
+    ]
+    assert steered["input"][-1]["role"] == "user"
+    assert any(item["type"] == "function_call_output" for item in steered["input"][:-1])
+    databases = list((tmp_path / "sessions").glob("*/session.sqlite3"))
+    assert len(databases) == 1
+    with sqlite3.connect(databases[0]) as database:
+        entries = [
+            (kind, json.loads(payload))
+            for kind, payload in database.execute(
+                "SELECT kind,payload_json FROM session_entries ORDER BY entry_id"
+            )
+        ]
+    assert [payload["text"] for kind, payload in entries if kind == 1] == [
+        "inspect",
+        "next separate task",
+    ]
+    assert [payload["disposition"] for kind, payload in entries if kind == 10] == [
+        "withdrawn",
+        "delivered",
+    ]
+
+
+def test_cancelled_steering_survives_restart(openai_slow_mock, tmp_path):
+    base_url, state = openai_slow_mock
+    env = terminal_test_environment(
+        tmp_path, base_url=base_url, api_key=mock_openai.API_KEY
+    )
+    try:
+        with steering_terminal(env) as (process, write, expect, output):
+            expect(PROMPT_MARKER)
+            write(b"inspect\r")
+            expect(b"Let me inspect the repository.")
+            assert state["stream_paused"].wait(5)
+            write(b"keep this correction\r")
+            expect(b"Steer s")
+            pending_id = re.findall(rb"Steer (s\d+):", output)[-1]
+            write(b"/queue held follow-up\r")
+            expect(b": held follow-up")
+            write(b"\x1b")
+            expect(b"Unsent s")
+            write(b"/quit\r")
+            expect(b"\x1b[?1049l")
+            assert process.wait(timeout=10) == 0
+    finally:
+        state["stream_release"].set()
+
+    with steering_terminal(env, ("continue",)) as (process, write, expect, output):
+        expect(b"Unsent " + pending_id + b": keep this correction")
+        assert b"held follow-up" not in output  # follow-up drafts are process-local
+        write(b"/pending edit " + pending_id + b"\r")
+        expect(PROMPT_MARKER + b" keep this correction")
+        write(b"\x7f" * len("keep this correction") + b"/quit\r")
+        expect(b"\x1b[?1049l")
+        assert process.wait(timeout=10) == 0
+
+    assert state["calls"] == 2, (
+        "cancellation or resume unexpectedly started another request"
+    )
+    assert not state["errors"], "\n".join(state["errors"])

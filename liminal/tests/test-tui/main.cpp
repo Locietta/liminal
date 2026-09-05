@@ -14,6 +14,7 @@
 #include <lighter/types.hpp>
 #include <lighter/async/io/loop.h>
 #include <lighter/encoding/utf8.h>
+#include <lighter/mock/mock.h>
 
 #include <liminal/event.h>
 #include <liminal/session/session.h>
@@ -30,6 +31,7 @@
 #include <liminal/tui/selectable_list_dialog.h>
 #include <liminal/tui/session_commands.h>
 #include <liminal/tui/session_screen.h>
+#include <liminal/tui/session_input.h>
 #include <liminal/tui/surface.h>
 #include <liminal/tui/syntax_highlight.h>
 
@@ -2148,7 +2150,87 @@ void check_headless_resize_and_markup_stress() {
     require(snapshot.text_bytes <= 8 * 1024 * 1024, "stress session must remain inside its declared text budget");
 }
 
+void check_pending_input_controls() {
+    lighter::EventLoop loop;
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    Agent agent({.handle = provider_mock.handle(), .entry = {.provider = "fake", .id = "test"}}, tools, {});
+    tui::ConsoleRenderer renderer;
+    renderer.screen.resize({100, 16});
+    tui::SessionInput inputs(agent, renderer);
+    session::EntryId unsent;
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [&](const provider::History &, const std::vector<provider::ToolDefinition> &,
+            const provider::StreamCallbacks &) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            require(!inputs.submit("//literal\ncorrection"), "submitting busy input failed");
+            auto pending = agent.session.pending_steering();
+            require(pending.size() == 1 && pending[0].text == "/literal\ncorrection", "busy Enter did not steer literally");
+            const auto identifier = "s" + std::to_string(pending[0].id.value);
+            require(!inputs.submit("/pending edit " + identifier) && agent.session.pending_steering().empty(),
+                    "editing did not withdraw the pending correction");
+            require(renderer.take_prompt() == "//literal\ncorrection", "editing lost multiline or escaped slash text");
+            require(!inputs.submit("revised correction") && !inputs.submit("/queue later task"), "pending submission failed");
+            require(renderer.screen.pending_inputs.size() == 2 && frame_text(renderer.screen.frame()).contains("Steer s"),
+                    "pending steering and follow-up should both be visible");
+            require(!inputs.submit("/pending drop q1") && renderer.screen.pending_inputs.size() == 1, "dropping a queued follow-up failed");
+            require(!inputs.submit("/queue held task"), "queuing follow-up failed");
+            require(!inputs.submit("/new") && agent.session.pending_steering().size() == 1,
+                    "idle-only commands must not steer or replace the active session");
+            unsent = agent.session.pending_steering().front().id;
+            co_await lighter::fail(Error::protocol("test provider failure"));
+        });
+    auto task = agent.run_task("original", {});
+    loop.schedule(task);
+    loop.run();
+    require(task.result().has_error(), "expected provider failure");
+    inputs.pause_follow_ups();
+    require(!inputs.refresh() && renderer.screen.pending_inputs.size() == 2 && renderer.screen.pending_inputs[0].starts_with("Unsent s") &&
+                renderer.screen.pending_inputs[1].starts_with("Unsent q"),
+            "failure must retain unsent steering and hold follow-ups");
+    require(!inputs.submit("/pending edit s" + std::to_string(unsent.value)) && renderer.take_prompt() == "revised correction",
+            "unsent steering should be recoverable after failure");
+    require(!inputs.submit("new task"), "idle submission failed");
+    auto next = inputs.next();
+    loop.schedule(next);
+    loop.run();
+    require(next.result() == "new task", "held follow-up unexpectedly started after failure");
+    require(!inputs.submit("/pending edit q2") && renderer.take_prompt() == "held task", "held follow-up could not be edited");
+    for (const auto *invalid : {"/pending edit", "/pending edit s", "/pending drop q0", "/pending edit s1 junk"}) {
+        require(!inputs.submit(invalid), "invalid pending syntax caused a renderer error");
+    }
+    require(agent.session.pending_steering().empty() && agent.session.validate(), "pending controls produced invalid session state");
+    provider_mock.verify();
+}
+
+void check_pending_input_layout() {
+    tui::SessionScreen screen;
+    screen.resize({80, 14});
+    screen.apply(PromptSubmitted{.text = "original"});
+    screen.apply(AssistantTextDelta{.item_id = "stream", .text = "working"});
+    const auto state = screen.state;
+    screen.set_pending_inputs({"Steer s2: correction", "Queued q1: later", "Unsent s1: old", "Queued q2: another"});
+    const auto pending = frame_text(screen.frame());
+    require(pending.contains("Steer s2: correction") && pending.contains("+1 more") && pending.contains("working"),
+            "pending input should reserve bounded space above the composer");
+    screen.apply(SteeringApplied{.input_id = 2, .text = "correction"});
+    require(screen.state == state && screen.transcript.blocks.back().kind == tui::BlockKind::USER,
+            "steering must append a user message without resetting active task state");
+    screen.insert("/");
+    require(!frame_text(screen.frame()).contains("Steer s2"), "command completion should own its band while open");
+    screen.take_prompt();
+    for (const auto columns : {1, 8, 40, 100}) {
+        for (i32 rows = 1; rows <= 18; ++rows) {
+            screen.resize({columns, rows});
+            const auto frame = screen.frame();
+            require(frame.cursor.row >= 0 && frame.cursor.row < rows && frame.cursor.column >= 0 && frame.cursor.column < columns,
+                    "pending input displaced the composer cursor beyond the terminal");
+        }
+    }
+}
+
 i32 run_all(std::string_view executable) {
+    check_pending_input_controls();
+    check_pending_input_layout();
     check_surface_cells_and_encoding();
     check_header_identity_and_path_presentation();
     check_composer_editing();

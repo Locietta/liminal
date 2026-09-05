@@ -24,7 +24,7 @@ std::string_view trim(std::string_view text) {
 
 constexpr std::array<std::string_view, 1> k_quit_aliases{"exit"};
 
-constexpr std::array<CommandSpec, 10> k_command_registry{{
+constexpr std::array<CommandSpec, 12> k_command_registry{{
     {.kind = CommandKind::HELP, .name = "help", .synopsis = "", .description = "list every command"},
     {.kind = CommandKind::MODEL, .name = "model", .synopsis = "[selector]", .description = "select the agent model"},
     {.kind = CommandKind::CONTEXT, .name = "context", .synopsis = "", .description = "show what occupies the model context"},
@@ -38,6 +38,8 @@ constexpr std::array<CommandSpec, 10> k_command_registry{{
      .description = "switch to another session in this workspace",
      .idle_only = true},
     {.kind = CommandKind::HISTORY, .name = "history", .synopsis = "", .description = "browse conversation checkpoints", .idle_only = true},
+    {.kind = CommandKind::QUEUE, .name = "queue", .synopsis = "<prompt>", .description = "queue a prompt for after the current task"},
+    {.kind = CommandKind::PENDING, .name = "pending", .synopsis = "[edit|drop <id>]", .description = "list, edit or remove pending input"},
     {.kind = CommandKind::QUIT, .name = "quit", .aliases = k_quit_aliases, .synopsis = "", .description = "leave liminal"},
 }};
 

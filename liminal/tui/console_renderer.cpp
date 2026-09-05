@@ -26,6 +26,8 @@ lighter::Error render_plain(const Event &event) {
             using T = std::remove_cvref_t<decltype(value)>;
             if constexpr (std::same_as<T, AssistantTextDelta>) {
                 return write_stdout(plain_text(value.text));
+            } else if constexpr (std::same_as<T, SteeringApplied>) {
+                return write_stdout("\n[steering applied] " + plain_text(value.text) + "\n");
             } else if constexpr (std::same_as<T, ToolStarted>) {
                 if (!value.command.empty()) return write_stdout("\n[tool running] Running " + plain_text(value.command) + "\n");
                 const auto description = value.description.empty() ? value.name : value.description;

@@ -31,6 +31,7 @@
 #include <liminal/tui/platform_paths.h>
 #include <liminal/tui/selectable_list_dialog.h>
 #include <liminal/tui/session_commands.h>
+#include <liminal/tui/session_input.h>
 #include <liminal/session/persistence.h>
 
 namespace liminal::tui {
@@ -91,24 +92,6 @@ SessionHeader session_header(const Agent &agent, std::string workspace_path, std
     };
 }
 
-struct PromptQueue {
-    void push(std::string prompt) {
-        pending.push_back(std::move(prompt));
-        ready.set();
-    }
-
-    Task<std::string> next() {
-        while (pending.empty()) co_await ready.wait();
-        auto prompt = std::move(pending.front());
-        pending.pop_front();
-        if (pending.empty()) ready.reset();
-        co_return prompt;
-    }
-
-    std::deque<std::string> pending;
-    lighter::Event ready;
-};
-
 struct ExternalEditorRequests {
     void request() {
         pending = true;
@@ -168,7 +151,7 @@ std::string finish_prompt(std::string line) {
 /// by terminal_input_loop, including while a provider task is active.
 struct PromptReader {
     Stream *input = nullptr;
-    PromptQueue *prompts = nullptr;
+    SessionInput *prompts = nullptr;
     std::string buffered;
     bool eof = false;
 
@@ -205,7 +188,7 @@ struct PromptReader {
     }
 };
 
-lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, ConsoleRenderer &renderer, PromptQueue &prompts,
+lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, ConsoleRenderer &renderer, SessionInput &prompts,
                                     ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
                                     SelectableListDialog &dialog, CompactPickerDialog &model_picker, TaskControl &task_control,
                                     i32 &held_mouse_buttons) {
@@ -304,8 +287,7 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
             if (event.key == TerminalKey::ENTER) {
                 if (shift) return renderer.insert("\n");
                 if (route_compact(PickerKey::ENTER, routing_error)) return routing_error;
-                prompts.push(finish_prompt(renderer.take_prompt()));
-                return renderer.redraw();
+                return prompts.submit(finish_prompt(renderer.take_prompt()));
             }
             if (event.key == TerminalKey::BACKSPACE) return control ? renderer.backspace_word() : renderer.backspace();
             if (event.key == TerminalKey::TAB) {
@@ -363,7 +345,7 @@ lighter::Error apply_terminal_event(const lighter::TerminalEvent &event, Console
     return {};
 }
 
-Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &renderer, PromptQueue &prompts,
+Task<i32> terminal_input_loop(TerminalSession &terminal, ConsoleRenderer &renderer, SessionInput &prompts,
                               ExternalEditorRequests &editor_requests, CopyRequests &copy_requests, SelectionCopies &selection_copies,
                               SelectableListDialog &dialog, CompactPickerDialog &model_picker, TaskControl &control,
                               SessionFailure &failure) {
@@ -598,9 +580,13 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                     application::SessionCoordinator *sessions, const session::SessionWorkspace &workspace, SelectableListDialog &dialog,
                     CompactPickerDialog &model_picker, SessionFailure &failure) {
     lighter::Error render_error;
-    EventSink events = [&renderer, &render_error, &control](const Event &event) noexcept {
+    EventSink events = [&renderer, &render_error, &control, &reader](const Event &event) noexcept {
         if (render_error) return;
         render_error = renderer.render(event);
+        if (!render_error && reader.prompts &&
+            (std::holds_alternative<SteeringApplied>(event) || std::holds_alternative<TaskCompleted>(event))) {
+            render_error = reader.prompts->refresh();
+        }
         if (render_error && control.active_task) control.active_task->cancel();
     };
     auto rendered = [&failure, &control](lighter::Error error, std::string_view context) {
@@ -612,6 +598,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
     bool saving_notice_visible = false;
     bool catalog_notice_visible = false;
     while (true) {
+        if (reader.prompts && !rendered(reader.prompts->refresh(), "cannot render pending input")) co_return 1;
         if (const auto *queue = agent.session.persistence_queue()) {
             const auto persistence_status = queue->status();
             if (persistence_status.degraded && !saving_notice_visible) {
@@ -643,6 +630,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
             co_return 0;
         }
         auto prompt = *std::move(*line);
+        if (reader.prompts && !rendered(reader.prompts->refresh(), "cannot render pending input")) co_return 1;
         auto input = parse_repl_input(std::move(prompt));
         if (!input) {
             if (!rendered(renderer.notice("[command error: " + input.error().detail + "]\n"), "cannot render command error")) co_return 1;
@@ -660,6 +648,11 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
                 continue;
             }
             switch (*command) {
+                case CommandKind::QUEUE:
+                case CommandKind::PENDING:
+                    if (!rendered(renderer.notice("[input management requires an interactive terminal]\n"), "cannot render command error"))
+                        co_return 1;
+                    continue;
                 case CommandKind::QUIT: {
                     auto arguments = require_no_arguments(command_line.name, command_line.arguments);
                     if (!arguments) {
@@ -902,6 +895,7 @@ Task<i32> repl_body(Agent &agent, PromptReader &reader, ConsoleRenderer &rendere
         control.active_task = &task_cancellation;
         auto outcome = co_await agent.run_task(std::move(prompt), events, task_cancellation.token());
         control.active_task = nullptr;
+        if (reader.prompts && !outcome.has_value()) reader.prompts->pause_follow_ups();
         if (render_error) {
             failure.record("cannot render session", render_error, control);
             co_return 1;
@@ -1006,7 +1000,7 @@ Task<i32> run_repl(Agent &agent, InterruptSource &interrupts, model::Catalog &mo
             failure.record("cannot render banner", error, control);
             exit_code = 1;
         } else if (interactive) {
-            PromptQueue prompts;
+            SessionInput prompts(agent, renderer);
             ExternalEditorRequests editor_requests;
             CopyRequests copy_requests;
             SelectionCopies selection_copies;

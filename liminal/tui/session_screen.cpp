@@ -1178,12 +1178,23 @@ std::string SessionScreen::take_selection() {
     return text;
 }
 
+void SessionScreen::set_pending_inputs(std::vector<std::string> rows) {
+    if (pending_inputs == rows) return;
+    clear_selection();
+    pending_inputs = std::move(rows);
+}
+
+i32 SessionScreen::pending_band_rows(i32 base_viewport) const noexcept {
+    if (compact_surface_active() || pending_inputs.empty()) return 0;
+    return std::min({static_cast<i32>(std::min<usize>(pending_inputs.size() + 1, 4)), std::max(base_viewport - 1, 0)});
+}
+
 i32 SessionScreen::viewport_rows() const {
     const auto projection = project_composer(*this);
     const auto header = size.rows >= 2 ? 1 : 0;
     const auto footer = size.rows >= 3 ? 1 : 0;
     const auto base = std::max(size.rows - header - footer - composer_layout(*this, projection).rows(), 0);
-    return std::max(base - compact_band_rows(base), 0);
+    return std::max(base - compact_band_rows(base) - pending_band_rows(base), 0);
 }
 
 bool SessionScreen::task_active() const noexcept {
@@ -1314,6 +1325,17 @@ Frame SessionScreen::frame() const {
 
     const auto base_viewport = std::max(size.rows - (header ? 1 : 0) - (has_footer ? 1 : 0) - composer.rows(), 0);
     const auto band = compact_band_rows(base_viewport);
+    const auto pending_band = pending_band_rows(base_viewport);
+    if (pending_band > 0) {
+        const auto shown = std::min<usize>(pending_inputs.size(), static_cast<usize>(std::max(pending_band - 1, 0)));
+        for (usize index = 0; index < shown; ++index) {
+            result.surface.write(prompt_row - pending_band + static_cast<i32>(index), 0, pending_inputs[index], Style::MUTED);
+        }
+        const auto remaining = pending_inputs.size() - shown;
+        const auto hint =
+            (remaining != 0 ? "+" + std::to_string(remaining) + " more · " : "") + std::string("/pending edit/drop <id> · /queue <prompt>");
+        result.surface.write(prompt_row - 1, 0, hint, Style::MUTED);
+    }
     if (band > 0) {
         const auto *active = picker ? &*picker : &command_menu.picker;
         const auto band_cursor = active->project(result.surface, prompt_row - band, band, picker.has_value());

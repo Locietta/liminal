@@ -28,6 +28,8 @@ using ReplInput = std::variant<UserPrompt, CommandLine>;
 Result<ReplInput> parse_repl_input(std::string text);
 
 enum struct CommandKind {
+    QUEUE,
+    PENDING,
     QUIT,
     COPY,
     CONTEXT,
