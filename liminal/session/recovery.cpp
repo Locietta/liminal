@@ -45,6 +45,8 @@ RecoveryResult recover_interrupted(Session &session) {
     std::optional<TaskId> task_id;
     bool finished = true;
     std::vector<CallRecovery> calls;
+    u64 last_delivery = 0;
+    u64 last_completion = 0;
     auto find_call = [&calls](ProviderCallId id) -> CallRecovery & {
         auto found = std::ranges::find(calls, id, &CallRecovery::id);
         if (found == calls.end()) found = calls.insert(calls.end(), CallRecovery{.id = id});
@@ -56,9 +58,14 @@ RecoveryResult recover_interrupted(Session &session) {
             task_id = started->id;
             finished = false;
             calls.clear();
+            last_delivery = 0;
+            last_completion = 0;
             continue;
         }
         if (!task_id || finished) continue;
+        if (const auto *input = std::get_if<SteeringResolved>(&entry->payload);
+            input && input->disposition == SteeringDisposition::DELIVERED)
+            last_delivery = entry->id.value;
         if (const auto *output = std::get_if<OutputItemCompleted>(&entry->payload); output && output->task_id == *task_id) {
             auto &call = find_call(output->provider_call_id);
             if (const auto *tool = std::get_if<provider::ToolCallItem>(&output->item)) call.tools.push_back(tool->call);
@@ -66,6 +73,7 @@ RecoveryResult recover_interrupted(Session &session) {
         }
         if (const auto *completed = std::get_if<ProviderCallCompleted>(&entry->payload); completed && completed->task_id == *task_id) {
             find_call(completed->id).completed = *completed;
+            last_completion = entry->id.value;
             continue;
         }
         if (const auto *aborted = std::get_if<ProviderCallAborted>(&entry->payload); aborted && aborted->task_id == *task_id) {
@@ -122,7 +130,13 @@ RecoveryResult recover_interrupted(Session &session) {
             });
         }
     }
-    session.append(TaskFinished{.id = *task_id, .outcome = recovered_outcome(calls)});
+    auto outcome = recovered_outcome(calls);
+    const auto pending = session.pending_steering();
+    if (outcome == TaskOutcome::COMPLETED &&
+        (last_delivery > last_completion || std::ranges::any_of(pending, [&](const auto &input) { return input.task_id == *task_id; }))) {
+        outcome = TaskOutcome::INTERRUPTED;
+    }
+    session.append(TaskFinished{.id = *task_id, .outcome = outcome});
     recovered.recovered_tasks = 1;
     return recovered;
 }

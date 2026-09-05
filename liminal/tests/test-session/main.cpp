@@ -10,6 +10,7 @@
 
 #include <liminal/context/context.h>
 #include <liminal/session/recovery.h>
+#include <liminal/session/codec.h>
 #include <liminal/session/session.h>
 #include <liminal/text.h>
 
@@ -508,7 +509,85 @@ void test_fork_remaps_lifecycle_and_preserves_private_items() {
     require(fork->validate().has_value(), "fork lifecycle counters are incoherent");
 }
 
+void test_steering_lifecycle() {
+    session::Session log;
+    const auto task = log.start_task("original");
+    const auto input = log.append(session::SteeringSubmitted{.task_id = task, .text = "keep the interface\nunchanged"});
+    require(log.validate().has_value(), "valid steering was rejected");
+    auto manifest = context::ContextBuilder{}.build({}, log);
+    require(manifest && manifest->provider_history.size() == 1, "pending steering entered model context");
+    require(log.pending_steering().size() == 1, "pending steering was lost");
+    for (const auto &payload : {session::EntryPayload{session::SteeringSubmitted{.task_id = task, .text = "correction"}},
+                                session::EntryPayload{session::SteeringResolved{.task_id = task, .input_id = input}}}) {
+        auto encoded = session::encode_payload(payload);
+        require(encoded.has_value(), "steering encoding failed");
+        auto decoded = session::decode_payload(encoded->kind, encoded->version, encoded->json);
+        require(decoded.has_value(), "steering decoding failed");
+        auto roundtrip = session::encode_payload(*decoded);
+        require(roundtrip && roundtrip->json == encoded->json && roundtrip->task_id == task, "steering codec changed its payload");
+    }
+    // The submitted text can precede the active context checkpoint.
+    log.append(session::ContextCheckpoint{.items = {session::ContextInput{.parts = {provider::TextPart{.text = "summary"}}}}});
+    log.append(session::SteeringResolved{.task_id = task, .input_id = input});
+    manifest = context::ContextBuilder{}.build({}, log);
+    require(manifest && manifest->provider_history.size() == 2 &&
+                std::get<provider::TextPart>(manifest->provider_history.back().parts.front()).text == "keep the interface\nunchanged",
+            "delivered steering did not survive the checkpoint");
+    require(log.pending_steering().empty(), "delivered input is still pending");
+    require(!log.withdraw_steering(input), "delivered steering was withdrawn");
+    const auto pending = log.append(session::SteeringSubmitted{.task_id = task, .text = "unsent"});
+    const auto completed = log.append(session::TaskFinished{.id = task, .outcome = session::TaskOutcome::CANCELLED});
+    auto fork = log.fork_at(checkpoint_id(completed));
+    require(fork && fork->validate() && fork->pending_steering().size() == 1, "fork lost pending steering");
+    require(log.withdraw_steering(pending).value() == "unsent" && log.validate(), "cancelled task input cannot be recovered for editing");
+    log.append(session::SteeringResolved{.task_id = task, .input_id = input});
+    require(!log.validate(), "duplicate or idle delivery was accepted");
+}
+
+void test_steering_cannot_split_rounds_or_escape_branches() {
+    session::Session log;
+    const auto task = log.start_task("task");
+    const auto input = log.append(session::SteeringSubmitted{.task_id = task, .text = "correction"});
+    const auto call = log.next_provider_call();
+    append_message(log, task, "partial", call);
+    log.append(session::SteeringResolved{.task_id = task, .input_id = input});
+    require(!log.validate(), "delivery split an unsettled round");
+    require(!context::ContextBuilder{}.build({}, log), "projection admitted delivery inside a provider round");
+
+    session::Session branches;
+    const auto root_task = branches.start_task("root");
+    const auto root = branches.append(session::TaskFinished{.id = root_task});
+    const auto discarded_task = branches.start_task("discarded");
+    const auto foreign = branches.append(session::SteeringSubmitted{.task_id = discarded_task, .text = "foreign"});
+    branches.append(session::TaskFinished{.id = discarded_task, .outcome = session::TaskOutcome::CANCELLED});
+    require(branches.checkout(checkpoint_id(root)).has_value(), "checkout failed");
+    const auto active = branches.start_task("active");
+    branches.append(session::SteeringResolved{.task_id = active, .input_id = foreign});
+    require(!branches.validate(), "resolution referenced another branch");
+}
+
+void test_steering_recovery_after_terminal_response() {
+    for (const bool delivered : {false, true}) {
+        session::Session log;
+        const auto task = log.start_task("task");
+        const auto call = log.next_provider_call();
+        append_message(log, task, "answer", call);
+        log.append(session::ProviderCallCompleted{.task_id = task, .id = call, .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL});
+        settle_round(log, task, call);
+        const auto input = log.append(session::SteeringSubmitted{.task_id = task, .text = "one more correction"});
+        if (delivered) log.append(session::SteeringResolved{.task_id = task, .input_id = input});
+        require(session::recover_interrupted(log).recovered_tasks == 1, "steered task was not recovered");
+        require(std::get<session::TaskFinished>(log.entries.back().payload).outcome == session::TaskOutcome::INTERRUPTED,
+                "recovery called a task complete despite unprocessed steering");
+        require(log.validate() && log.pending_steering().size() == (delivered ? 0 : 1), "recovery changed steering disposition");
+        require(!log.reply_from_latest(), "interrupted steered task exposed a completed reply");
+    }
+}
+
 i32 run_all() {
+    test_steering_lifecycle();
+    test_steering_cannot_split_rounds_or_escape_branches();
+    test_steering_recovery_after_terminal_response();
     test_append_only_branching();
     test_monotonic_timestamps_and_utf8_bounds();
     test_checkpoint_projection();

@@ -345,6 +345,31 @@ void test_independent_session_write_transactions() {
     sqlite3_close(left);
 }
 
+void test_durable_steering() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open steering storage");
+    auto value = make_session("steering");
+    const auto task = std::get<session::TaskStarted>(value.entries.front().payload).id;
+    const auto delivered = value.append(session::SteeringSubmitted{.task_id = task, .text = "delivered correction"});
+    value.append(session::SteeringResolved{.task_id = task, .input_id = delivered});
+    value.append(session::SteeringSubmitted{.task_id = task, .text = "pending correction"});
+    auto published = publish(storage->repository, std::move(value));
+    require(published.has_value(), "steering publication failed");
+    auto loaded = published->writer.load();
+    require(loaded.has_value(), loaded ? "" : "steering reload failed: " + loaded.error().message());
+    const auto valid = loaded->validate();
+    require(valid.has_value(), valid ? "" : "steering reload invalid: " + valid.error().message());
+    require(loaded->pending_steering().size() == 1 && loaded->pending_steering().front().text == "pending correction",
+            "reload lost steering delivery state");
+    session::recover_interrupted(*loaded);
+    ToolSet tools(std::filesystem::current_path());
+    auto transcript = tui::project_transcript(*loaded, tools);
+    require(std::ranges::count_if(transcript, [](const auto &block) { return block.text == "delivered correction"; }) == 1 &&
+                std::ranges::none_of(transcript, [](const auto &block) { return block.text == "pending correction"; }),
+            "hydration confused pending and delivered steering");
+}
+
 int lease_child(const std::filesystem::path &root, std::string_view id_text) {
     auto storage = open_storage(root);
     if (!storage) return 2;
@@ -2134,6 +2159,7 @@ int main(int argc, char **argv) {
     test_topology_publication_and_minimal_schemas();
     test_within_task_compaction_round_trips_through_storage();
     test_independent_session_write_transactions();
+    test_durable_steering();
     test_cross_process_lease_exclusion(executable);
     test_encoding_failure_precedes_begin();
     test_unsigned_values_must_fit_sqlite_integer_range();

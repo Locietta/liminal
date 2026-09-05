@@ -97,12 +97,20 @@ Result<void> replay_round(provider::History &history, PendingRound &round, std::
 }
 
 Result<void> project_entries(provider::History &history, std::span<const session::SessionEntry *const> entries,
-                             std::span<const ToolOutcome> projected, std::optional<UsageBaseline> *baseline = nullptr) {
+                             const session::Session &session, std::span<const ToolOutcome> projected,
+                             std::optional<UsageBaseline> *baseline = nullptr) {
     PendingRound round;
     for (const auto *entry : entries) {
         if (const auto *started = std::get_if<session::TaskStarted>(&entry->payload)) {
             if (round.id) return lighter::outcome_error(Error::protocol("task boundary splits an unsettled provider round"));
             provider::append_user(history, started->text);
+        } else if (const auto *resolved = std::get_if<session::SteeringResolved>(&entry->payload);
+                   resolved && resolved->disposition == session::SteeringDisposition::DELIVERED) {
+            if (round.id) return lighter::outcome_error(Error::protocol("steering delivery splits an unsettled provider round"));
+            const auto *submitted = session.find(resolved->input_id);
+            const auto *input = submitted ? std::get_if<session::SteeringSubmitted>(&submitted->payload) : nullptr;
+            if (!input) return lighter::outcome_error(Error::protocol("steering delivery has no submitted input"));
+            provider::append_user(history, input->text);
         } else if (const auto *output = std::get_if<session::OutputItemCompleted>(&entry->payload)) {
             if (auto valid = check_round_id(round, output->provider_call_id); !valid) return valid;
             round.output.push_back(output->item);
@@ -309,8 +317,8 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
         for (auto unit = unit_starts.rbegin(); unit != unit_starts.rend(); ++unit) {
             auto candidate = instruction_history;
             std::optional<UsageBaseline> baseline;
-            auto replayed =
-                project_entries(candidate, std::span(branch).subspan(*unit), projected_tool_outcomes, *unit == start ? &baseline : nullptr);
+            auto replayed = project_entries(candidate, std::span(branch).subspan(*unit), session, projected_tool_outcomes,
+                                            *unit == start ? &baseline : nullptr);
             if (!replayed) return lighter::outcome_error(std::move(replayed).error());
             const auto candidate_usage = estimate_usage(candidate, budget, baseline);
             const bool fits = *candidate_usage.remaining_input_tokens >= 0;
@@ -340,7 +348,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
     manifest.provider_history.reserve(manifest.provider_history.size() + branch.size() - selected_start);
     std::optional<UsageBaseline> baseline;
     for (usize index = selected_start; index < branch.size(); ++index) manifest.session_entries.push_back(branch[index]->id);
-    auto replayed = project_entries(manifest.provider_history, std::span(branch).subspan(selected_start), projected_tool_outcomes,
+    auto replayed = project_entries(manifest.provider_history, std::span(branch).subspan(selected_start), session, projected_tool_outcomes,
                                     selected_start == start ? &baseline : nullptr);
     if (!replayed) return lighter::outcome_error(std::move(replayed).error());
     manifest.usage = estimate_usage(manifest.provider_history, manifest.budget, baseline);

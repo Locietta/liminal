@@ -22,6 +22,8 @@ enum struct EntryKind : u32 {
     TASK_FINISHED = 6,
     CONTEXT_CHECKPOINT = 7,
     PROVIDER_ROUND_SETTLED = 8,
+    STEERING_SUBMITTED = 9,
+    STEERING_RESOLVED = 10,
 };
 
 struct EncodedPayload {

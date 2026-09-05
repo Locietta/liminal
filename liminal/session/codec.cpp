@@ -53,6 +53,12 @@ struct glz::meta<liminal::session::TaskOutcome> {
 };
 
 template <>
+struct glz::meta<liminal::session::SteeringDisposition> {
+    using enum liminal::session::SteeringDisposition;
+    static constexpr auto value = enumerate("delivered", DELIVERED, "withdrawn", WITHDRAWN);
+};
+
+template <>
 struct glz::meta<liminal::session::CheckpointItem> {
     static constexpr std::string_view tag = "type";
     static constexpr auto ids = std::array{"input", "output"};
@@ -91,6 +97,8 @@ std::string_view entry_kind_name(EntryKind kind) noexcept {
         case EntryKind::TASK_FINISHED: return "TaskFinished";
         case EntryKind::CONTEXT_CHECKPOINT: return "ContextCheckpoint";
         case EntryKind::PROVIDER_ROUND_SETTLED: return "ProviderRoundSettled";
+        case EntryKind::STEERING_SUBMITTED: return "SteeringSubmitted";
+        case EntryKind::STEERING_RESOLVED: return "SteeringResolved";
     }
     return "unknown";
 }
@@ -106,6 +114,15 @@ Result<EncodedPayload> encode_payload(const EntryPayload &payload) {
                 }
                 encoded.kind = EntryKind::TASK_STARTED;
                 encoded.task_id = value.id;
+            } else if constexpr (std::same_as<T, SteeringSubmitted>) {
+                if (value.text.empty() || !lighter::encoding::utf8::is_valid(value.text)) {
+                    return lighter::outcome_error(Error::protocol("steering text must be nonempty UTF-8"));
+                }
+                encoded.kind = EntryKind::STEERING_SUBMITTED;
+                encoded.task_id = value.task_id;
+            } else if constexpr (std::same_as<T, SteeringResolved>) {
+                encoded.kind = EntryKind::STEERING_RESOLVED;
+                encoded.task_id = value.task_id;
             } else if constexpr (std::same_as<T, OutputItemCompleted>) {
                 encoded.kind = EntryKind::OUTPUT_ITEM_COMPLETED;
                 encoded.task_id = value.task_id;
@@ -154,6 +171,8 @@ Result<EntryPayload> decode_payload(EntryKind kind, u32 version, std::string_vie
         case EntryKind::TASK_FINISHED: return decode<TaskFinished>(json, kind);
         case EntryKind::CONTEXT_CHECKPOINT: return decode<ContextCheckpoint>(json, kind);
         case EntryKind::PROVIDER_ROUND_SETTLED: return decode<ProviderRoundSettled>(json, kind);
+        case EntryKind::STEERING_SUBMITTED: return decode<SteeringSubmitted>(json, kind);
+        case EntryKind::STEERING_RESOLVED: return decode<SteeringResolved>(json, kind);
     }
     return lighter::outcome_error(Error::protocol("unknown session entry kind " + std::to_string(static_cast<u32>(kind))));
 }

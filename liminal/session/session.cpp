@@ -93,6 +93,26 @@ TaskId Session::start_task(std::string text, std::optional<i64> admission_time_m
 
 ProviderCallId Session::next_provider_call() { return {.value = next_provider_call_id++}; }
 
+std::vector<PendingSteering> Session::pending_steering() const {
+    std::vector<PendingSteering> pending;
+    for (const auto *entry : active_branch()) {
+        if (const auto *input = std::get_if<SteeringSubmitted>(&entry->payload)) {
+            pending.push_back({.id = entry->id, .task_id = input->task_id, .text = input->text});
+        } else if (const auto *resolved = std::get_if<SteeringResolved>(&entry->payload)) {
+            std::erase_if(pending, [&](const PendingSteering &input) { return input.id == resolved->input_id; });
+        }
+    }
+    return pending;
+}
+
+Result<std::string> Session::withdraw_steering(EntryId id) {
+    auto pending = pending_steering();
+    const auto found = std::ranges::find(pending, id, &PendingSteering::id);
+    if (found == pending.end()) return lighter::outcome_error(Error::command("steering input is no longer pending"));
+    append(SteeringResolved{.task_id = found->task_id, .input_id = id, .disposition = SteeringDisposition::WITHDRAWN});
+    return std::move(found->text);
+}
+
 Result<void> Session::checkout(ConversationCheckpointId checkpoint) {
     auto projected = conversation_checkpoints();
     if (!projected) return lighter::outcome_error(std::move(projected).error());
@@ -156,6 +176,8 @@ Result<void> Session::validate() const {
                 using T = std::remove_cvref_t<decltype(payload)>;
                 if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>) {
                     maximum_task_id = std::max(maximum_task_id, payload.id.value);
+                } else if constexpr (std::same_as<T, SteeringSubmitted> || std::same_as<T, SteeringResolved>) {
+                    maximum_task_id = std::max(maximum_task_id, payload.task_id.value);
                 } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolOutcomes> ||
                                      std::same_as<T, ProviderRoundSettled>) {
                     maximum_task_id = std::max(maximum_task_id, payload.task_id.value);
@@ -182,6 +204,7 @@ Result<void> Session::validate() const {
         std::optional<ProviderCallLoopOutcome> completed;
         bool aborted = false;
         bool has_outcomes = false;
+        std::map<u64, TaskId> pending_inputs;
     };
     std::vector<BranchState> states(entries.size() + 1);
     for (const auto &entry : entries) {
@@ -197,6 +220,24 @@ Result<void> Session::validate() const {
         if (const auto *started = std::get_if<TaskStarted>(&entry.payload)) {
             if (state.task || state.round) return lighter::outcome_error(Error::protocol("session branch starts an overlapping task"));
             state.task = started->id;
+        } else if (const auto *input = std::get_if<SteeringSubmitted>(&entry.payload)) {
+            if (!state.task || *state.task != input->task_id || input->text.empty() || !lighter::encoding::utf8::is_valid(input->text)) {
+                return lighter::outcome_error(Error::protocol("steering submission must belong to an active task and contain UTF-8 text"));
+            }
+            state.pending_inputs.emplace(entry.id.value, input->task_id);
+        } else if (const auto *resolved = std::get_if<SteeringResolved>(&entry.payload)) {
+            const auto input = state.pending_inputs.find(resolved->input_id.value);
+            if (input == state.pending_inputs.end() || input->second != resolved->task_id) {
+                return lighter::outcome_error(Error::protocol("steering resolution must name an unresolved ancestor input"));
+            }
+            if (resolved->disposition == SteeringDisposition::DELIVERED &&
+                (!state.task || *state.task != resolved->task_id || state.round)) {
+                return lighter::outcome_error(Error::protocol("steering delivery requires its active task and a settled provider round"));
+            }
+            if (resolved->disposition != SteeringDisposition::DELIVERED && resolved->disposition != SteeringDisposition::WITHDRAWN) {
+                return lighter::outcome_error(Error::protocol("unknown steering disposition"));
+            }
+            state.pending_inputs.erase(input);
         } else if (const auto *output = std::get_if<OutputItemCompleted>(&entry.payload)) {
             if (!state.task || *state.task != output->task_id) {
                 return lighter::outcome_error(Error::protocol("session branch has provider output outside its active task"));
@@ -469,6 +510,7 @@ Result<Session> Session::fork_at(ConversationCheckpointId checkpoint) const {
 
     std::map<u64, TaskId> task_ids;
     std::map<u64, ProviderCallId> provider_call_ids;
+    std::map<u64, EntryId> entry_ids;
     auto remap_task = [&task_ids](TaskId source) -> TaskId {
         if (const auto found = task_ids.find(source.value); found != task_ids.end()) return found->second;
         const TaskId mapped{.value = task_ids.size() + 1};
@@ -489,6 +531,9 @@ Result<Session> Session::fork_at(ConversationCheckpointId checkpoint) const {
                 using T = std::remove_cvref_t<decltype(value)>;
                 if constexpr (std::same_as<T, TaskStarted> || std::same_as<T, TaskFinished>) {
                     value.id = remap_task(value.id);
+                } else if constexpr (std::same_as<T, SteeringSubmitted> || std::same_as<T, SteeringResolved>) {
+                    value.task_id = remap_task(value.task_id);
+                    if constexpr (std::same_as<T, SteeringResolved>) value.input_id = entry_ids.at(value.input_id.value);
                 } else if constexpr (std::same_as<T, OutputItemCompleted> || std::same_as<T, ToolOutcomes> ||
                                      std::same_as<T, ProviderRoundSettled>) {
                     value.task_id = remap_task(value.task_id);
@@ -500,6 +545,7 @@ Result<Session> Session::fork_at(ConversationCheckpointId checkpoint) const {
             },
             payload);
         const EntryId id{.value = fork.next_entry_id++};
+        entry_ids.emplace(source->id.value, id);
         fork.entries.push_back({
             .id = id,
             .parent_id = fork.active_leaf,
@@ -535,6 +581,10 @@ std::optional<std::string> Session::reply_from_latest(usize ordinal) const {
             continue;
         }
         if (!active_task) continue;
+        if (const auto *input = std::get_if<SteeringResolved>(&entry->payload);
+            input && input->disposition == SteeringDisposition::DELIVERED) {
+            terminal_call.reset();
+        }
         const auto *output = std::get_if<OutputItemCompleted>(&entry->payload);
         if (output && output->task_id == *active_task) {
             const auto *message = std::get_if<provider::AssistantMessageItem>(&output->item);

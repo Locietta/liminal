@@ -42,6 +42,16 @@ std::vector<Block> project_branch(const std::vector<const session::SessionEntry 
             blocks.push_back({.kind = BlockKind::USER, .state = BlockState::COMPLETED, .text = started->text});
             continue;
         }
+        if (const auto *resolved = std::get_if<session::SteeringResolved>(&entry->payload);
+            resolved && resolved->disposition == session::SteeringDisposition::DELIVERED) {
+            const auto submitted = std::ranges::find(branch, resolved->input_id, &session::SessionEntry::id);
+            if (submitted != branch.end()) {
+                if (const auto *input = std::get_if<session::SteeringSubmitted>(&(*submitted)->payload)) {
+                    blocks.push_back({.kind = BlockKind::USER, .state = BlockState::COMPLETED, .text = input->text});
+                }
+            }
+            continue;
+        }
         if (const auto *output = std::get_if<session::OutputItemCompleted>(&entry->payload)) {
             if (const auto *message = std::get_if<provider::AssistantMessageItem>(&output->item)) {
                 auto text = assistant_text(*message);

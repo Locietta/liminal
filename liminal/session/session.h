@@ -53,6 +53,30 @@ struct TaskStarted {
     std::string text;
 };
 
+/// User input accepted while a task is active. Its entry ID identifies the
+/// pending correction; it becomes model-visible only at delivery.
+struct SteeringSubmitted {
+    TaskId task_id;
+    std::string text;
+};
+
+enum struct SteeringDisposition {
+    DELIVERED,
+    WITHDRAWN,
+};
+
+struct SteeringResolved {
+    TaskId task_id;
+    EntryId input_id;
+    SteeringDisposition disposition = SteeringDisposition::DELIVERED;
+};
+
+struct PendingSteering {
+    EntryId id;
+    TaskId task_id;
+    std::string text;
+};
+
 struct OutputItemCompleted {
     TaskId task_id;
     ProviderCallId provider_call_id;
@@ -135,7 +159,7 @@ struct ContextCheckpoint {
 };
 
 using EntryPayload = std::variant<TaskStarted, OutputItemCompleted, ProviderCallCompleted, ProviderCallAborted, ToolOutcomes,
-                                  ProviderRoundSettled, TaskFinished, ContextCheckpoint>;
+                                  ProviderRoundSettled, TaskFinished, ContextCheckpoint, SteeringSubmitted, SteeringResolved>;
 
 struct SessionEntry {
     EntryId id;
@@ -215,6 +239,8 @@ struct Session {
     EntryId append(EntryPayload payload);
     TaskId start_task(std::string text, std::optional<i64> admission_time_ms = std::nullopt);
     ProviderCallId next_provider_call();
+    std::vector<PendingSteering> pending_steering() const;
+    Result<std::string> withdraw_steering(EntryId id);
 
     /// Moves the append point to a safe idle checkpoint without modifying
     /// descendants. A later append creates another branch.
