@@ -1,3 +1,4 @@
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -12,6 +13,7 @@
 namespace {
 
 using namespace liminal;
+using namespace std::chrono_literals;
 
 void require(bool condition, std::string_view message) {
     if (!condition) {
@@ -223,9 +225,62 @@ void test_invalid_event_order() {
 
 } // namespace
 
+void test_streamed_context_rejection_is_classified() {
+    using lighter::http::sse::Event;
+    std::vector<Event> too_long{
+        {.event = "message_start",
+         .data = R"({"type":"message_start","message":{"id":"msg_long","model":"adaptive-model","usage":{"input_tokens":12}}})"},
+        {.event = "error",
+         .data =
+             R"({"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 213462 tokens > 200000 maximum"}})"},
+    };
+    auto decoded = anthropic::protocol::decode_stream(too_long, {}, "req_long");
+    require(!decoded && decoded.error().code == ErrorCode::CONTEXT_EXHAUSTED && decoded.error().api_type == "invalid_request_error",
+            "a streamed oversized-prompt error was not classified as context exhaustion");
+
+    std::vector<Event> overloaded{
+        {.event = "message_start",
+         .data = R"({"type":"message_start","message":{"id":"msg_busy","model":"adaptive-model","usage":{"input_tokens":12}}})"},
+        {.event = "error", .data = R"({"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}})"},
+    };
+    decoded = anthropic::protocol::decode_stream(overloaded, {}, "req_busy");
+    require(!decoded && decoded.error().code == ErrorCode::NONE && decoded.error().retryable(),
+            "an unrelated streamed error was classified as context exhaustion or lost its transient flag");
+    too_long.erase(too_long.begin());
+    decoded = anthropic::protocol::decode_stream(too_long, {}, "req_long");
+    require(!decoded && decoded.error().kind == ErrorKind::HTTP_STATUS && decoded.error().code == ErrorCode::CONTEXT_EXHAUSTED &&
+                decoded.error().api_type == "invalid_request_error" && decoded.error().request_id == "req_long",
+            "an error-only too_long stream lost its API error classification or request ID");
+
+    overloaded.erase(overloaded.begin());
+    decoded = anthropic::protocol::decode_stream(overloaded, {}, "req_busy");
+    require(!decoded && decoded.error().kind == ErrorKind::HTTP_STATUS && decoded.error().code == ErrorCode::NONE &&
+                decoded.error().api_type == "overloaded_error" && decoded.error().request_id == "req_busy" && decoded.error().retryable(),
+            "an error-only overloaded stream lost its API error classification or request ID");
+}
+
+void test_status_error_classification() {
+    const auto too_long = anthropic::protocol::decode_status_error(
+        400,
+        R"({"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 213462 tokens > 200000 maximum"},"request_id":"req_long"})",
+        "");
+    require(too_long.kind == ErrorKind::HTTP_STATUS && too_long.status == 400 && too_long.code == ErrorCode::CONTEXT_EXHAUSTED &&
+                too_long.api_type == "invalid_request_error" && too_long.request_id == "req_long",
+            "an oversized prompt rejection was not classified as context exhaustion");
+    const auto other = anthropic::protocol::decode_status_error(
+        400, R"({"type":"error","error":{"type":"invalid_request_error","message":"messages: roles must alternate"}})", "req_other");
+    require(other.code == ErrorCode::NONE && other.detail == "messages: roles must alternate" && other.request_id == "req_other",
+            "an unrelated 400 was classified as context exhaustion");
+    const auto raw = anthropic::protocol::decode_status_error(529, "overloaded", "req_raw", 2s);
+    require(raw.code == ErrorCode::NONE && raw.detail == "overloaded" && raw.retry_after == 2s && raw.retryable(),
+            "a non-JSON error body lost its detail or retry hint");
+}
+
 int main() {
     test_request_encoding();
     test_stream_decoding_and_replay();
     test_web_tools_decode_citations_and_replay();
     test_invalid_event_order();
+    test_status_error_classification();
+    test_streamed_context_rejection_is_classified();
 }

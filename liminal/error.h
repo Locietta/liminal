@@ -32,6 +32,10 @@ enum struct ErrorCode {
     INVALID_DATA,
     AUTH_NOT_CONFIGURED,
     AUTH_INVALID,
+    /// The provider rejected the request because its input no longer fits
+    /// the model's context window. Only the provider knows its own error
+    /// vocabulary, so it classifies this at creation.
+    CONTEXT_EXHAUSTED,
 };
 
 struct Error {

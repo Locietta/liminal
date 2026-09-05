@@ -426,6 +426,17 @@ struct ApiErrorEnvelope {
     std::optional<std::string> request_id;
 };
 
+/// Classifies a context-window rejection whichever way it arrives, as an
+/// HTTP status or as a streamed error event: Anthropic reports an oversized
+/// prompt as an invalid_request_error whose message reads
+/// "prompt is too long: N tokens > M maximum".
+Error classify_context_exhaustion(Error error) {
+    if (error.detail.contains("prompt is too long")) {
+        error.code = ErrorCode::CONTEXT_EXHAUSTED;
+    }
+    return error;
+}
+
 // --- stream accumulator -------------------------------------------------
 
 struct PendingText {
@@ -669,6 +680,15 @@ Result<void> StreamAccumulator::consume(const http::sse::Event &event, const pro
         }
         return {};
     }
+    if (name == "error") {
+        auto parsed = parse_wire<ErrorEvent>(event.data, "error event");
+        if (!parsed) {
+            return outcome_error(std::move(parsed).error());
+        }
+        bool transient = transient_api_type(parsed->error.type);
+        return outcome_error(classify_context_exhaustion(
+            Error::api(std::move(parsed->error.type), std::move(parsed->error.message), message.request_id, transient)));
+    }
     if (!saw_message_start) {
         return outcome_error(Error::protocol("event before message_start: " + name));
     }
@@ -720,14 +740,6 @@ Result<void> StreamAccumulator::consume(const http::sse::Event &event, const pro
         }
         saw_message_stop = true;
         return {};
-    }
-    if (name == "error") {
-        auto parsed = parse_wire<ErrorEvent>(event.data, "error event");
-        if (!parsed) {
-            return outcome_error(std::move(parsed).error());
-        }
-        bool transient = transient_api_type(parsed->error.type);
-        return outcome_error(Error::api(std::move(parsed->error.type), std::move(parsed->error.message), message.request_id, transient));
     }
     // Unknown event types are ignored per Anthropic versioning policy.
     return {};
@@ -807,17 +819,7 @@ Task<provider::ProviderCallCompletion, Error> attempt_stream(http::Client &http_
 
     if (!response.ok()) {
         auto error_body = co_await read_bounded_body(response, 64 * 1024);
-        auto retry_after = parse_retry_after(response);
-        std::string api_type;
-        std::string detail = error_body;
-        if (auto envelope = parse_wire<ApiErrorEnvelope>(error_body, "error body")) {
-            api_type = std::move(envelope->error.type);
-            detail = std::move(envelope->error.message);
-            if (request_id.empty() && envelope->request_id) {
-                request_id = std::move(*envelope->request_id);
-            }
-        }
-        co_await fail(Error::http_status(response.status, std::move(api_type), std::move(detail), std::move(request_id), retry_after));
+        co_await fail(protocol::decode_status_error(response.status, error_body, std::move(request_id), parse_retry_after(response)));
     }
 
     auto content_type = response.header_value("content-type").value_or("");
@@ -852,6 +854,20 @@ Task<provider::ProviderCallCompletion, Error> attempt_stream(http::Client &http_
 } // namespace
 
 namespace protocol {
+
+Error decode_status_error(int status, std::string_view body, std::string request_id, std::optional<std::chrono::milliseconds> retry_after) {
+    std::string api_type;
+    std::string detail(body);
+    if (auto envelope = parse_wire<ApiErrorEnvelope>(body, "error body")) {
+        api_type = std::move(envelope->error.type);
+        detail = std::move(envelope->error.message);
+        if (request_id.empty() && envelope->request_id) {
+            request_id = std::move(*envelope->request_id);
+        }
+    }
+    return classify_context_exhaustion(
+        Error::http_status(status, std::move(api_type), std::move(detail), std::move(request_id), retry_after));
+}
 
 Result<std::string> encode_complete_request(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
                                             const ClientOptions &options) {

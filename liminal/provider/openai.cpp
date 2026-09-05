@@ -481,6 +481,17 @@ struct ApiErrorEnvelope {
     WireApiError error;
 };
 
+/// Classifies a context-window rejection whichever way it arrives, as an
+/// HTTP status or as a streamed error envelope: OpenAI uses the
+/// `context_length_exceeded` code, and the Codex backend answers with a bare
+/// detail string saying the input exceeds the context window.
+Error classify_context_exhaustion(Error error) {
+    if (error.api_type == "context_length_exceeded" || error.detail.contains("exceeds the context window")) {
+        error.code = ErrorCode::CONTEXT_EXHAUSTED;
+    }
+    return error;
+}
+
 struct ErrorEvent {
     std::optional<std::string> code;
     std::string message;
@@ -613,6 +624,29 @@ struct StreamAccumulator {
             completion.model = std::move(parsed->response.model);
             return {};
         }
+        if (name == "response.failed") {
+            auto parsed = parse_wire<FailedResponseEvent>(event.data, name);
+            if (!parsed) {
+                return outcome_error(std::move(parsed).error());
+            }
+            if (parsed->response.error) {
+                auto type = parsed->response.error->code.value_or(parsed->response.error->type.value_or(""));
+                bool transient = transient_api_type(type);
+                return outcome_error(classify_context_exhaustion(
+                    Error::api(std::move(type), std::move(parsed->response.error->message), completion.request_id, transient)));
+            }
+            return outcome_error(Error::protocol(name + " without error detail"));
+        }
+        if (name == "error") {
+            auto parsed = parse_wire<ErrorEvent>(event.data, name);
+            if (!parsed) {
+                return outcome_error(std::move(parsed).error());
+            }
+            auto code = parsed->code.value_or("");
+            bool transient = transient_api_type(code);
+            return outcome_error(
+                classify_context_exhaustion(Error::api(std::move(code), std::move(parsed->message), completion.request_id, transient)));
+        }
         if (!saw_created) {
             return outcome_error(Error::protocol("event before response.created: " + name));
         }
@@ -698,28 +732,6 @@ struct StreamAccumulator {
             saw_completed = true;
             return {};
         }
-        if (name == "response.failed") {
-            auto parsed = parse_wire<FailedResponseEvent>(event.data, name);
-            if (!parsed) {
-                return outcome_error(std::move(parsed).error());
-            }
-            if (parsed->response.error) {
-                auto type = parsed->response.error->code.value_or(parsed->response.error->type.value_or(""));
-                bool transient = transient_api_type(type);
-                return outcome_error(
-                    Error::api(std::move(type), std::move(parsed->response.error->message), completion.request_id, transient));
-            }
-            return outcome_error(Error::protocol(name + " without error detail"));
-        }
-        if (name == "error") {
-            auto parsed = parse_wire<ErrorEvent>(event.data, name);
-            if (!parsed) {
-                return outcome_error(std::move(parsed).error());
-            }
-            auto code = parsed->code.value_or("");
-            bool transient = transient_api_type(code);
-            return outcome_error(Error::api(std::move(code), std::move(parsed->message), completion.request_id, transient));
-        }
         return {};
     }
 
@@ -799,18 +811,6 @@ struct DetailErrorEnvelope {
     std::optional<std::string> detail;
 };
 
-Error parse_status_error(int status, std::string_view body, std::string request_id, std::optional<std::chrono::milliseconds> retry_after) {
-    std::string api_type;
-    std::string detail(body);
-    if (auto envelope = parse_wire<ApiErrorEnvelope>(body, "error body"); envelope && !envelope->error.message.empty()) {
-        api_type = envelope->error.code.value_or(envelope->error.type.value_or(""));
-        detail = std::move(envelope->error.message);
-    } else if (auto bare = parse_wire<DetailErrorEnvelope>(body, "error body"); bare && bare->detail && !bare->detail->empty()) {
-        detail = *std::move(bare->detail);
-    }
-    return Error::http_status(status, std::move(api_type), std::move(detail), std::move(request_id), retry_after);
-}
-
 Task<provider::ProviderCallCompletion, Error> attempt_stream(http::Client &http_client, const ClientOptions &options,
                                                              const std::string &body, const provider::StreamCallbacks &callbacks,
                                                              bool &output_emitted) {
@@ -827,7 +827,7 @@ Task<provider::ProviderCallCompletion, Error> attempt_stream(http::Client &http_
 
     if (!response.ok()) {
         auto error_body = co_await read_bounded_body(response, 64 * 1024);
-        co_await fail(parse_status_error(response.status, error_body, std::move(request_id), parse_retry_after(response)));
+        co_await fail(protocol::decode_status_error(response.status, error_body, std::move(request_id), parse_retry_after(response)));
     }
     auto content_type = response.header_value("content-type").value_or("");
     const bool missing_allowed = options.allow_missing_event_stream_content_type && content_type.empty();
@@ -903,7 +903,7 @@ Task<std::vector<provider::OpaquePart>, Error> attempt_remote_compact(http::Clie
     auto response = *std::move(sent);
     std::string request_id(response.header_value("x-request-id").value_or(""));
     if (!response.ok()) {
-        co_await fail(parse_status_error(response.status, response.text(), std::move(request_id), parse_retry_after(response)));
+        co_await fail(protocol::decode_status_error(response.status, response.text(), std::move(request_id), parse_retry_after(response)));
     }
 
     auto envelope = parse_wire<CompactEnvelope>(response.text(), "compact response");
@@ -926,6 +926,19 @@ Task<std::vector<provider::OpaquePart>, Error> attempt_remote_compact(http::Clie
 } // namespace
 
 namespace protocol {
+
+Error decode_status_error(int status, std::string_view body, std::string request_id, std::optional<std::chrono::milliseconds> retry_after) {
+    std::string api_type;
+    std::string detail(body);
+    if (auto envelope = parse_wire<ApiErrorEnvelope>(body, "error body"); envelope && !envelope->error.message.empty()) {
+        api_type = envelope->error.code.value_or(envelope->error.type.value_or(""));
+        detail = std::move(envelope->error.message);
+    } else if (auto bare = parse_wire<DetailErrorEnvelope>(body, "error body"); bare && bare->detail && !bare->detail->empty()) {
+        detail = *std::move(bare->detail);
+    }
+    return classify_context_exhaustion(
+        Error::http_status(status, std::move(api_type), std::move(detail), std::move(request_id), retry_after));
+}
 
 Result<std::string> encode_complete_request(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
                                             const ClientOptions &options) {
@@ -1040,7 +1053,7 @@ Task<std::vector<provider::DiscoveredModel>, Error> list_models_impl(ClientOptio
     }
     if (!sent->ok()) {
         auto request_id = std::string(sent->header_value("x-request-id").value_or(""));
-        co_await fail(parse_status_error(sent->status, sent->text(), std::move(request_id), {}));
+        co_await fail(protocol::decode_status_error(sent->status, sent->text(), std::move(request_id), {}));
     }
 
     auto response = parse_wire<wire::ModelsResponse>(sent->text(), "models response");

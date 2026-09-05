@@ -400,6 +400,73 @@ void test_native_compaction_retries_and_replaces_conversation() {
 
 } // namespace
 
+void test_streamed_context_rejection_is_classified() {
+    using lighter::http::sse::Event;
+    std::vector<Event> failed{
+        {.event = "response.created", .data = R"({"response":{"id":"resp_full","model":"manual-model","status":"in_progress"}})"},
+        {.event = "response.failed",
+         .data =
+             R"({"response":{"id":"resp_full","status":"failed","error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}})"},
+    };
+    auto decoded = openai::protocol::decode_stream(failed, {}, "req_full");
+    require(!decoded && decoded.error().code == ErrorCode::CONTEXT_EXHAUSTED && decoded.error().api_type == "context_length_exceeded",
+            "a response.failed event carrying context_length_exceeded was not classified as context exhaustion");
+
+    std::vector<Event> errored{
+        {.event = "response.created", .data = R"({"response":{"id":"resp_err","model":"manual-model","status":"in_progress"}})"},
+        {.event = "error",
+         .data = R"({"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."})"},
+    };
+    decoded = openai::protocol::decode_stream(errored, {}, "req_err");
+    require(!decoded && decoded.error().code == ErrorCode::CONTEXT_EXHAUSTED,
+            "an error event carrying context_length_exceeded was not classified as context exhaustion");
+
+    std::vector<Event> other{
+        {.event = "response.created", .data = R"({"response":{"id":"resp_other","model":"manual-model","status":"in_progress"}})"},
+        {.event = "error", .data = R"({"code":"server_error","message":"upstream hiccup"})"},
+    };
+    decoded = openai::protocol::decode_stream(other, {}, "req_other");
+    require(!decoded && decoded.error().code == ErrorCode::NONE, "an unrelated streamed error was classified as context exhaustion");
+    failed.erase(failed.begin());
+    decoded = openai::protocol::decode_stream(failed, {}, "req_full");
+    require(!decoded && decoded.error().kind == ErrorKind::HTTP_STATUS && decoded.error().code == ErrorCode::CONTEXT_EXHAUSTED &&
+                decoded.error().api_type == "context_length_exceeded" && decoded.error().request_id == "req_full",
+            "an error-only failed stream lost its API error classification or request ID");
+
+    errored.erase(errored.begin());
+    decoded = openai::protocol::decode_stream(errored, {}, "req_err");
+    require(!decoded && decoded.error().kind == ErrorKind::HTTP_STATUS && decoded.error().code == ErrorCode::CONTEXT_EXHAUSTED &&
+                decoded.error().api_type == "context_length_exceeded" && decoded.error().request_id == "req_err",
+            "an error-only errored stream lost its API error classification or request ID");
+
+    other.erase(other.begin());
+    decoded = openai::protocol::decode_stream(other, {}, "req_other");
+    require(!decoded && decoded.error().kind == ErrorKind::HTTP_STATUS && decoded.error().code == ErrorCode::NONE &&
+                decoded.error().api_type == "server_error" && decoded.error().request_id == "req_other" && decoded.error().retryable(),
+            "an error-only other stream lost its API error classification or request ID");
+}
+
+void test_status_error_classification() {
+    const auto exceeded = openai::protocol::decode_status_error(
+        400,
+        R"({"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}})",
+        "req_1");
+    require(exceeded.kind == ErrorKind::HTTP_STATUS && exceeded.status == 400 && exceeded.code == ErrorCode::CONTEXT_EXHAUSTED &&
+                exceeded.api_type == "context_length_exceeded" && exceeded.request_id == "req_1",
+            "a context_length_exceeded rejection was not classified as context exhaustion");
+    const auto codex = openai::protocol::decode_status_error(
+        400, R"({"detail":"Your input exceeds the context window of this model. Please adjust your input and try again."})", "req_2");
+    require(codex.code == ErrorCode::CONTEXT_EXHAUSTED && codex.detail.starts_with("Your input exceeds the context window"),
+            "the Codex backend's bare context rejection was not classified as context exhaustion");
+    const auto other = openai::protocol::decode_status_error(
+        400, R"({"error":{"type":"invalid_request_error","code":"invalid_value","message":"bad value"}})", "req_3");
+    require(other.code == ErrorCode::NONE && other.api_type == "invalid_value" && other.detail == "bad value",
+            "an unrelated 400 was classified as context exhaustion");
+    const auto raw = openai::protocol::decode_status_error(503, "unavailable", "req_4", 5ms);
+    require(raw.code == ErrorCode::NONE && raw.detail == "unavailable" && raw.retry_after == 5ms && raw.retryable(),
+            "a non-JSON error body lost its detail or retry hint");
+}
+
 int main() {
     test_request_encoding();
     test_stream_decoding_and_replay();
@@ -412,4 +479,6 @@ int main() {
     test_completion_does_not_retry_visible_output();
     test_compaction_falls_back_for_missing_endpoint();
     test_native_compaction_retries_and_replaces_conversation();
+    test_status_error_classification();
+    test_streamed_context_rejection_is_classified();
 }

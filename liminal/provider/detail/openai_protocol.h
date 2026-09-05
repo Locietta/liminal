@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -22,6 +24,11 @@ Result<std::string> encode_complete_request(const provider::History &history, co
 /// its immutable instruction prefix.
 Result<std::string> encode_compact_request(const provider::History &conversation, std::string_view instructions,
                                            const ClientOptions &options);
+
+/// Decode a non-2xx response body into an error, classifying context-window
+/// rejections with ErrorCode::CONTEXT_EXHAUSTED.
+Error decode_status_error(int status, std::string_view body, std::string request_id,
+                          std::optional<std::chrono::milliseconds> retry_after = std::nullopt);
 
 /// Decode an already framed sequence of Responses API server-sent events.
 /// Network chunk framing is tested independently by lighter::http::sse.
