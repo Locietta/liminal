@@ -32,7 +32,7 @@ One blank line separates activity from the prompt composer. A soft highlight shi
 
 ## Prompt composer
 
-The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline continuation rows align to the draft column and remain vertically windowed around the cursor when the text grows. The footer beneath the composer shows the selected model and effort, remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan.
+The draft appears inside a dark, padded input surface with a concise `›` marker. Multiline continuation rows align to the draft column and remain vertically windowed around the cursor when the text grows. The footer beneath the composer shows the selected model and effort, approximate remaining context percentage, and cumulative tokens used. Each field has its own color so the metadata remains easy to scan.
 
 On a narrow terminal, the footer removes whole fields in order: tokens first, context second, and an optional provider-limit field third. The model and effort remain last and are shortened by displayed terminal width only when nothing else remains. Separators disappear with their fields, and Unicode model names are never split inside a displayed character. Provider limits appear when provider integration supplies an authoritative value.
 

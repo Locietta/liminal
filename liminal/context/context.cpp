@@ -174,20 +174,7 @@ usize part_bytes(const provider::Part &part) {
         part);
 }
 
-usize estimate_tokens(std::span<const provider::Item> history) {
-    usize bytes = 0;
-    usize part_count = 0;
-    for (const auto &item : history) {
-        for (const auto &part : item.parts) {
-            bytes += part_bytes(part);
-            ++part_count;
-        }
-    }
-    return (bytes + 3) / 4 + history.size() * 4 + part_count * 2;
-}
-
-ContextUsage estimate_usage(const provider::History &history, const ContextBudget &budget,
-                            std::optional<UsageBaseline> baseline = std::nullopt) {
+ContextUsage estimate_usage(const provider::History &history, const ContextBudget &budget, std::optional<UsageBaseline> baseline) {
     ContextUsage usage;
     const auto instruction_count = provider::instruction_prefix_size(history);
     for (usize item_index = 0; item_index < history.size(); ++item_index) {
@@ -206,15 +193,14 @@ ContextUsage estimate_usage(const provider::History &history, const ContextBudge
     }
     if (baseline && baseline->history_size <= history.size()) {
         usage.reported_context_tokens = baseline->context_tokens;
-        usage.estimated_trailing_tokens = estimate_tokens(std::span(history).subspan(baseline->history_size));
+        usage.estimated_trailing_tokens = estimate_input_tokens(std::span(history).subspan(baseline->history_size));
         usage.estimated_input_tokens = baseline->context_tokens + usage.estimated_trailing_tokens;
     } else {
-        usage.estimated_input_tokens = estimate_tokens(history);
+        usage.estimated_input_tokens = estimate_input_tokens(history);
     }
-    if (budget.context_window_tokens) {
-        const auto unavailable = static_cast<u64>(budget.reserved_output_tokens) + budget.safety_margin_tokens;
-        usage.input_budget_tokens = unavailable < *budget.context_window_tokens ? *budget.context_window_tokens - unavailable : 0;
-        usage.remaining_input_tokens = static_cast<i64>(*usage.input_budget_tokens) - static_cast<i64>(usage.estimated_input_tokens);
+    if (auto budget_tokens = input_budget_tokens(budget)) {
+        usage.input_budget_tokens = *budget_tokens;
+        usage.remaining_input_tokens = static_cast<i64>(*budget_tokens) - static_cast<i64>(usage.estimated_input_tokens);
     }
     return usage;
 }
@@ -254,6 +240,24 @@ void append_entry_ids(std::string &description, std::span<const session::EntryId
 
 } // namespace
 
+usize estimate_input_tokens(std::span<const provider::Item> history) {
+    usize bytes = 0;
+    usize part_count = 0;
+    for (const auto &item : history) {
+        for (const auto &part : item.parts) {
+            bytes += part_bytes(part);
+            ++part_count;
+        }
+    }
+    return (bytes + 3) / 4 + history.size() * 4 + part_count * 2;
+}
+
+std::optional<usize> input_budget_tokens(const ContextBudget &budget) {
+    if (!budget.context_window_tokens) return std::nullopt;
+    const auto unavailable = static_cast<u64>(budget.reserved_output_tokens) + budget.safety_margin_tokens;
+    return unavailable < *budget.context_window_tokens ? *budget.context_window_tokens - unavailable : 0;
+}
+
 Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource> sources, const session::Session &session,
                                               ContextBudget budget, std::span<const ToolOutcome> projected_tool_outcomes) const {
     std::vector<InstructionSource> ordered(sources.begin(), sources.end());
@@ -291,7 +295,7 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
 
     usize selected_start = start;
     if (budget.context_window_tokens) {
-        const auto instruction_usage = estimate_usage(instruction_history, budget);
+        const auto instruction_usage = estimate_usage(instruction_history, budget, std::nullopt);
         if (instruction_usage.remaining_input_tokens && *instruction_usage.remaining_input_tokens < 0) {
             return lighter::outcome_error(Error::config("resolved instructions exceed the model input budget"));
         }
@@ -309,13 +313,23 @@ Result<ContextManifest> ContextBuilder::build(std::span<const InstructionSource>
                 project_entries(candidate, std::span(branch).subspan(*unit), projected_tool_outcomes, *unit == start ? &baseline : nullptr);
             if (!replayed) return lighter::outcome_error(std::move(replayed).error());
             const auto candidate_usage = estimate_usage(candidate, budget, baseline);
-            if (*candidate_usage.remaining_input_tokens < 0) {
-                if (unit == unit_starts.rbegin()) {
-                    return lighter::outcome_error(Error::protocol("the latest semantic task exceeds the model input budget"));
-                }
-                break;
+            const bool fits = *candidate_usage.remaining_input_tokens >= 0;
+            if (!fits && unit != unit_starts.rbegin()) break;
+            // The newest unit is admitted even when it alone exceeds the
+            // budget: the manifest then reports negative remaining input and
+            // the agent compacts before the provider call. A unit that is just
+            // the user's prompt has nothing a summary could shrink away, so it
+            // is rejected outright instead of costing a doomed provider call.
+            // A lone checkpoint item is still admitted: a summary written for
+            // a larger model can be summarized again for a smaller one.
+            const bool lone_prompt =
+                candidate.size() == instruction_history.size() + 1 && std::holds_alternative<session::TaskStarted>(branch[*unit]->payload);
+            if (!fits && lone_prompt) {
+                return lighter::outcome_error(
+                    Error::protocol("the latest prompt, after the resolved instructions, exceeds the model input budget"));
             }
             selected_start = *unit;
+            if (!fits) break;
         }
     }
 
@@ -378,6 +392,15 @@ std::string describe(const ContextManifest &manifest) {
                    std::to_string(manifest.usage.conversation_bytes) + ", tools " + std::to_string(manifest.usage.tool_bytes) +
                    ", opaque " + std::to_string(manifest.usage.opaque_bytes) + "\n";
     return description;
+}
+
+ContextUsage ContextBuilder::estimate_checkpoint(const ContextManifest &manifest, const session::ContextCheckpoint &checkpoint,
+                                                 ContextBudget budget) const {
+    provider::History history;
+    history.reserve(manifest.instructions.size() + checkpoint.items.size());
+    for (const auto &source : manifest.instructions) append_instruction(history, source);
+    for (const auto &item : checkpoint.items) append_checkpoint_item(history, item);
+    return estimate_usage(history, budget, std::nullopt);
 }
 
 Result<session::ContextCheckpoint> ContextBuilder::take_checkpoint(provider::History history, const ContextManifest &manifest) const {

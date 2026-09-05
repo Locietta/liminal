@@ -14,6 +14,7 @@
 #include <liminal/provider/auth.h>
 #include <liminal/provider/common.h>
 #include <liminal/provider/history.h>
+#include <liminal/provider/provider.h>
 
 namespace liminal::openai {
 
@@ -50,7 +51,7 @@ struct Client {
     /// Tries OpenAI's native `POST /responses/compact` first (stateless remote
     /// compaction returning an opaque encrypted item). Gateways that lack the
     /// endpoint (404/400/501) fall back to generic local summarization.
-    lighter::Task<void, Error> compact(provider::History &history, std::string_view instructions);
+    lighter::Task<void, Error> compact(provider::History &history, provider::CompactRequest request);
 
     ClientOptions options;
     lighter::http::Client http_client;

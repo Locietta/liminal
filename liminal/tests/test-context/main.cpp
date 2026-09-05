@@ -292,6 +292,45 @@ void test_reported_usage_accounts_for_trailing_context() {
             "context inspection omitted its reported usage baseline");
 }
 
+void test_oversized_latest_task_is_admitted_over_budget() {
+    session::Session session_log;
+    const auto old_task = session_log.start_task("small");
+    append_message(session_log, old_task, "answer");
+    complete_round(session_log, old_task, {.value = 1});
+    session_log.append(session::TaskFinished{.id = old_task});
+    const auto huge_start = session_log.entries.size();
+    const auto huge_task = session_log.start_task(std::string(400, 'h'));
+    append_message(session_log, huge_task, std::string(400, 'a'), {.value = 2});
+    complete_round(session_log, huge_task, {.value = 2});
+    session_log.append(session::TaskFinished{.id = huge_task});
+
+    auto manifest = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 100, .reserved_output_tokens = 10});
+    require(manifest.has_value(), "an oversized latest task must be admitted rather than rejected");
+    require(*manifest->usage.remaining_input_tokens < 0 && manifest->omitted_budget_entries == huge_start &&
+                manifest->session_entries.size() == session_log.entries.size() - huge_start &&
+                manifest->session_entries.front() == session_log.entries[huge_start].id,
+            "the oversized latest task must be selected alone with a negative remaining input budget");
+    require(context::describe(*manifest).contains("input remaining: -"), "context inspection must show the budget overrun");
+}
+
+void test_lone_oversized_item_is_rejected() {
+    session::Session session_log;
+    session_log.start_task(std::string(400, 'h'));
+    auto manifest = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 100, .reserved_output_tokens = 10});
+    require(!manifest && manifest.error().detail.contains("exceeds the model input budget"),
+            "a lone prompt beyond the input budget must be rejected rather than admitted for compaction");
+}
+
+void test_lone_oversized_checkpoint_is_admitted() {
+    session::Session session_log;
+    session::ContextCheckpoint carried;
+    carried.items.push_back(session::ContextInput{.parts = {provider::TextPart{.text = std::string(400, 's')}}});
+    session_log.append(std::move(carried));
+    auto manifest = context::ContextBuilder{}.build({}, session_log, {.context_window_tokens = 100, .reserved_output_tokens = 10});
+    require(manifest.has_value() && *manifest->usage.remaining_input_tokens < 0 && manifest->session_entries.size() == 1,
+            "a summary carried from a larger model must be admitted so compaction can shrink it again");
+}
+
 void test_projected_tool_outcomes_charge_exact_envelope_overhead() {
     session::Session session_log;
     const auto task_id = session_log.start_task("use tools");
@@ -324,6 +363,9 @@ i32 run_all() {
     test_manifest_deduplication_and_redacted_description();
     test_bounded_selection_keeps_complete_recent_tasks();
     test_reported_usage_accounts_for_trailing_context();
+    test_oversized_latest_task_is_admitted_over_budget();
+    test_lone_oversized_item_is_rejected();
+    test_lone_oversized_checkpoint_is_admitted();
     test_projected_tool_outcomes_charge_exact_envelope_overhead();
     return 0;
 }

@@ -13,6 +13,7 @@
 #include <liminal/provider/auth.h>
 #include <liminal/provider/common.h>
 #include <liminal/provider/history.h>
+#include <liminal/provider/provider.h>
 
 namespace liminal::anthropic {
 
@@ -47,7 +48,7 @@ struct Client {
 
     /// Anthropic has no remote compaction endpoint; summarizes locally
     /// through complete() (provider/compact.h).
-    lighter::Task<void, Error> compact(provider::History &history, std::string_view instructions);
+    lighter::Task<void, Error> compact(provider::History &history, provider::CompactRequest request);
 
     ClientOptions options;
     lighter::http::Client http_client;

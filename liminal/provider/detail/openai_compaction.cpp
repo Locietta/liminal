@@ -21,11 +21,16 @@ bool selects_local_fallback(const Error &error) {
 } // namespace
 
 lighter::Task<void, Error> compact_with_retry(const CompactionAttempts &attempts, provider::History &history, usize instruction_count,
-                                              std::string body, std::string instructions, usize max_retries,
+                                              std::string body, provider::CompactRequest request, usize max_retries,
                                               std::chrono::milliseconds initial_retry_delay) {
     for (usize attempt = 0;; ++attempt) {
         auto outcome = co_await attempts.remote(body);
         if (outcome) {
+            // An empty result would replace the conversation with nothing
+            // while still looking like a checkpoint downstream.
+            if (outcome->empty()) {
+                co_await fail(Error::protocol("native compaction returned no items"));
+            }
             provider::History compacted;
             compacted.reserve(instruction_count + 1);
             compacted.insert(compacted.end(), std::make_move_iterator(history.begin()),
@@ -40,7 +45,7 @@ lighter::Task<void, Error> compact_with_retry(const CompactionAttempts &attempts
 
         auto error = std::move(outcome).error();
         if (selects_local_fallback(error)) {
-            co_return co_await attempts.local(history, instructions).or_fail();
+            co_return co_await attempts.local(history, std::move(request)).or_fail();
         }
         if (attempt >= max_retries || !error.retryable()) {
             co_await fail(std::move(error));

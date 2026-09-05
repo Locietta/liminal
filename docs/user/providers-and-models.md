@@ -83,11 +83,19 @@ answer streams and remain available in the saved assistant text.
 The selected model and endpoint must support these provider-native tools. An incompatible
 OpenAI-compatible gateway or Anthropic model reports its normal API error.
 
-Context capabilities are likewise explicit because standard model discovery does not reliably
+## Context capacity
+
+Context capabilities are explicit because standard model discovery does not reliably
 report them. `context_window` is the total token window, `max_output_tokens` is both the request
 limit and reserved output budget, and `context_safety_margin_tokens` leaves extra headroom for
 token estimation and provider-owned request material. Discovered models without an explicit
 `context_window` remain selectable, but automatic context budgeting is disabled for them.
+
+The footer shows an approximate percentage of remaining input capacity after reserving output space
+and the safety margin. Liminal automatically compacts accumulated context as capacity runs low.
+Compaction provides a smaller working context for continued work while retaining the original saved
+conversation. The percentage is a rough guide; it does not predict exactly how much more input will
+fit or when compaction will run.
 
 ## Codex subscription
 

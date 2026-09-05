@@ -951,9 +951,9 @@ Task<provider::ProviderCallCompletion, Error> Client::complete(const provider::H
         .or_fail();
 }
 
-Task<void, Error> Client::compact(provider::History &history, std::string_view instructions) {
+Task<void, Error> Client::compact(provider::History &history, provider::CompactRequest request) {
     // No native compaction endpoint; summarize through our own complete().
-    co_return co_await provider::local_compact(this, history, instructions).or_fail();
+    co_return co_await provider::local_compact(this, history, std::move(request)).or_fail();
 }
 
 Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options) {

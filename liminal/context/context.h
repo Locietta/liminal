@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <optional>
 #include <span>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,13 @@ struct ContextBudget {
     u32 safety_margin_tokens = 0;
 };
 
+/// Tokens available to request input once reserved output and the safety
+/// margin are set aside; absent when the window is unknown.
+std::optional<usize> input_budget_tokens(const ContextBudget &budget);
+
+/// Byte-based request estimate, including item and part framing.
+usize estimate_input_tokens(std::span<const provider::Item> history);
+
 struct ContextUsage {
     usize instruction_bytes = 0;
     usize conversation_bytes = 0;
@@ -89,6 +97,16 @@ struct ContextBuilder {
     /// Converts a provider compaction result into a semantic checkpoint after
     /// verifying that its resolved instruction prefix is unchanged.
     Result<session::ContextCheckpoint> take_checkpoint(provider::History history, const ContextManifest &manifest) const;
+
+    /// Usage of the context `build` would select right after `checkpoint` is
+    /// appended: the manifest's resolved instructions followed by the
+    /// checkpoint's canonical replay, with no provider-reported baseline.
+    /// Judged on the replay rather than the provider's history because
+    /// normalization can split one interleaved assistant item into several,
+    /// each charged its own framing. Lets a prospective checkpoint be judged
+    /// before it is committed to the append-only session.
+    ContextUsage estimate_checkpoint(const ContextManifest &manifest, const session::ContextCheckpoint &checkpoint,
+                                     ContextBudget budget) const;
 };
 
 } // namespace liminal::context

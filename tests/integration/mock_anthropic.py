@@ -130,20 +130,29 @@ def make_server(port=0):
                 state["log"].append("compact-summarizer")
                 return
 
-            # Post-compaction turn: [bridge summary, new prompt], old turn gone.
-            first = body["messages"][0]
-            first_texts = [
-                b.get("text", "") for b in first["content"] if b["type"] == "text"
-            ]
-            if first["role"] == "user" and any(
-                "[Compacted context]" in t for t in first_texts
+            # Post-compaction turn: [retained prompt, bridge summary, new
+            # prompt], old turn gone. The bridge is the last item of the
+            # compacted history, directly before the new prompt.
+            def user_texts(message):
+                if message["role"] != "user":
+                    return []
+                return [
+                    b.get("text", "") for b in message["content"] if b["type"] == "text"
+                ]
+
+            if len(body["messages"]) >= 2 and any(
+                "[Compacted context]" in t for t in user_texts(body["messages"][-2])
             ):
-                assert any("SUMMARY:" in t for t in first_texts), (
+                bridge_texts = user_texts(body["messages"][-2])
+                assert any("SUMMARY:" in t for t in bridge_texts), (
                     "summary missing from bridge"
                 )
-                assert len(body["messages"]) == 2, (
-                    f"expected [bridge, prompt], got {len(body['messages'])}"
+                assert len(body["messages"]) == 3, (
+                    f"expected [retained prompt, bridge, prompt], got {len(body['messages'])}"
                 )
+                assert user_texts(body["messages"][0]) == [
+                    "what directory are we in?"
+                ], "the original prompt was not retained ahead of the bridge"
                 flattened = json.dumps(body["messages"])
                 assert "tool_use" not in flattened and "thinking" not in flattened, (
                     "old turn leaked past compaction"

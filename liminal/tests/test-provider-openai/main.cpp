@@ -336,9 +336,9 @@ void test_compaction_falls_back_for_missing_endpoint() {
         .remote = [](const std::string &) -> lighter::Task<std::vector<provider::OpaquePart>, Error> {
             co_await lighter::fail(Error::http_status(404, "not_found", "missing", "req_compact"));
         },
-        .local = [&local_calls](provider::History &history, std::string_view instructions) -> lighter::Task<void, Error> {
+        .local = [&local_calls](provider::History &history, provider::CompactRequest request) -> lighter::Task<void, Error> {
             ++local_calls;
-            require(instructions == "keep decisions", "fallback received the wrong instructions");
+            require(request.instructions == "keep decisions", "fallback received the wrong instructions");
             history.resize(1);
             provider::append_user(history, "SUMMARY");
             co_return;
@@ -350,7 +350,7 @@ void test_compaction_falls_back_for_missing_endpoint() {
     };
     auto history = base_history();
 
-    auto task = openai::detail::compact_with_retry(attempts, history, 2, "compact body", "keep decisions", 2, 1ms);
+    auto task = openai::detail::compact_with_retry(attempts, history, 2, "compact body", {.instructions = "keep decisions"}, 2, 1ms);
     lighter::EventLoop loop;
     loop.schedule(task);
     loop.run();
@@ -372,7 +372,7 @@ void test_native_compaction_retries_and_replaces_conversation() {
             }
             co_return std::vector<provider::OpaquePart>{{.provider_tag = "openai", .payload = "encrypted-compaction"}};
         },
-        .local = [&local_calls](provider::History &, std::string_view) -> lighter::Task<void, Error> {
+        .local = [&local_calls](provider::History &, provider::CompactRequest) -> lighter::Task<void, Error> {
             ++local_calls;
             co_return;
         },
@@ -384,7 +384,7 @@ void test_native_compaction_retries_and_replaces_conversation() {
     };
     auto history = base_history();
 
-    auto task = openai::detail::compact_with_retry(attempts, history, 2, "compact body", "keep decisions", 2, 1ms);
+    auto task = openai::detail::compact_with_retry(attempts, history, 2, "compact body", {.instructions = "keep decisions"}, 2, 1ms);
     lighter::EventLoop loop;
     loop.schedule(task);
     loop.run();
@@ -399,6 +399,33 @@ void test_native_compaction_retries_and_replaces_conversation() {
 }
 
 } // namespace
+
+void test_native_compaction_rejects_an_empty_result() {
+    usize local_calls = 0;
+    openai::detail::CompactionAttempts attempts{
+        .remote = [](const std::string &) -> lighter::Task<std::vector<provider::OpaquePart>, Error> {
+            co_return std::vector<provider::OpaquePart>{};
+        },
+        .local = [&local_calls](provider::History &, provider::CompactRequest) -> lighter::Task<void, Error> {
+            ++local_calls;
+            co_return;
+        },
+        .sleep = [](std::chrono::milliseconds) -> lighter::Task<> { co_return; },
+    };
+    auto history = base_history();
+    const auto original_size = history.size();
+
+    auto task = openai::detail::compact_with_retry(attempts, history, 2, "compact body", {.instructions = "keep decisions"}, 2, 1ms);
+    lighter::EventLoop loop;
+    loop.schedule(task);
+    loop.run();
+    auto result = task.result();
+
+    require(result.has_error() && result.error().kind == ErrorKind::PROTOCOL && result.error().detail.contains("no items"),
+            "an empty native compaction result was not rejected as a protocol error");
+    require(history.size() == original_size && local_calls == 0,
+            "an empty native result must leave the history untouched and must not fall back to local summarization");
+}
 
 void test_streamed_context_rejection_is_classified() {
     using lighter::http::sse::Event;
@@ -479,6 +506,7 @@ int main() {
     test_completion_does_not_retry_visible_output();
     test_compaction_falls_back_for_missing_endpoint();
     test_native_compaction_retries_and_replaces_conversation();
+    test_native_compaction_rejects_an_empty_result();
     test_status_error_classification();
     test_streamed_context_rejection_is_classified();
 }

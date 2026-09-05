@@ -59,20 +59,21 @@ void emit_tool_call(const provider::StreamCallbacks &callbacks, std::string id, 
 
 session::TaskId append_session_message(session::Session &log, std::string prompt, std::string text, provider::Usage usage = {}) {
     const auto task_id = log.start_task(std::move(prompt));
+    const auto provider_call_id = log.next_provider_call();
     log.append(session::OutputItemCompleted{
         .task_id = task_id,
-        .provider_call_id = {.value = 1},
+        .provider_call_id = provider_call_id,
         .item = provider::AssistantMessageItem{.id = {.value = "seed"}, .parts = {{.text = std::move(text)}}},
     });
     log.append(session::ProviderCallCompleted{
         .task_id = task_id,
-        .id = {.value = 1},
+        .id = provider_call_id,
         .completion = {.usage = usage},
         .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL,
     });
     log.append(session::ProviderRoundSettled{
         .task_id = task_id,
-        .provider_call_id = {.value = 1},
+        .provider_call_id = provider_call_id,
         .replay = session::ProviderRoundReplay::REPLAY,
     });
     log.append(session::TaskFinished{.id = task_id});
@@ -101,6 +102,7 @@ std::shared_ptr<usize> register_noop_tool(ToolSet &tools) {
 }
 
 void test_successful_task() {
+
     ToolSet tools(std::filesystem::current_path().string());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>()
@@ -132,14 +134,15 @@ void test_successful_task() {
                 .request_id = "request-2",
             };
         });
-    provider_mock.expect<provider::CompactDispatch>().calls(
-        [](provider::History &history, std::string_view instructions) -> lighter::Task<void, Error> {
-            require(instructions == "keep decisions", "compaction received the wrong instructions");
-            const auto instruction_count = provider::instruction_prefix_size(history);
-            history.resize(instruction_count);
-            provider::append_user(history, "SUMMARY");
-            co_return;
-        });
+    provider_mock.expect<provider::CompactDispatch>().calls([](provider::History &history,
+                                                               provider::CompactRequest request) -> lighter::Task<void, Error> {
+        require(request.instructions == "keep decisions" && request.retained_prompt_tokens == provider::k_default_retained_prompt_tokens,
+                "compaction received the wrong instructions or retention budget");
+        const auto instruction_count = provider::instruction_prefix_size(history);
+        history.resize(instruction_count);
+        provider::append_user(history, "SUMMARY");
+        co_return;
+    });
     model::Choice choice{
         .handle = provider_mock.handle(),
         .entry = {.provider = "fake", .id = "test"},
@@ -220,6 +223,7 @@ void test_successful_task() {
 }
 
 void test_long_tool_loop() {
+
     constexpr usize k_tool_calls = 40;
     ToolSet tools(std::filesystem::current_path());
     auto tool_executions = register_noop_tool(tools);
@@ -256,6 +260,7 @@ void test_long_tool_loop() {
 }
 
 void test_tool_output_budget_tracks_model_context() {
+
     ToolSet tools(std::filesystem::current_path());
     auto observed_budgets = std::make_shared<std::vector<usize>>();
     auto registered = tools.register_tool({
@@ -270,6 +275,14 @@ void test_tool_output_budget_tracks_model_context() {
     require(registered.has_value(), "failed to register the output-budget test tool");
 
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    // Tools that spend their whole allowance leave the context at the
+    // compaction threshold, so the follow-up call compacts first.
+    provider_mock.expect<provider::CompactDispatch>().calls(
+        [](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
+            history.resize(provider::instruction_prefix_size(history));
+            provider::append_user(history, "SUMMARY");
+            co_return;
+        });
     provider_mock.expect<provider::CompleteDispatch>()
         .then_calls([](const provider::History &, const std::vector<provider::ToolDefinition> &,
                        const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
@@ -315,6 +328,7 @@ void test_tool_output_budget_tracks_model_context() {
 }
 
 void test_insufficient_batch_capacity_prevents_tool_dispatch() {
+
     ToolSet tools(std::filesystem::current_path());
     auto executions = register_noop_tool(tools);
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
@@ -356,6 +370,7 @@ void test_insufficient_batch_capacity_prevents_tool_dispatch() {
 }
 
 void test_tool_payload_framing_is_reserved_during_planning() {
+
     ToolSet tools(std::filesystem::current_path());
     auto registered = tools.register_tool({
         .definition = {.name = "test_framing", .description = "Test payload framing"},
@@ -382,6 +397,7 @@ void test_tool_payload_framing_is_reserved_during_planning() {
 }
 
 void test_tool_error_results_share_the_output_guard() {
+
     ToolSet tools(std::filesystem::current_path());
     auto invalid_detail = [] {
         auto detail = std::string(128 * 1024, 'e');
@@ -447,6 +463,7 @@ void test_tool_error_results_share_the_output_guard() {
 }
 
 void test_throwing_tool_settles_its_batch() {
+
     ToolSet tools(std::filesystem::current_path());
     auto throwing = tools.register_tool({
         .definition = {.name = "test_throwing"},
@@ -507,6 +524,7 @@ void test_throwing_tool_settles_its_batch() {
 }
 
 void test_tool_waits_for_committed_output_allowance() {
+
     ToolSet tools(std::filesystem::current_path());
     auto registered = tools.register_tool({
         .definition = {.name = "test_committed", .description = "Test committed scheduling"},
@@ -558,6 +576,7 @@ void test_tool_waits_for_committed_output_allowance() {
 }
 
 void test_done_requires_terminal_answer() {
+
     ToolSet tools(std::filesystem::current_path());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompleteDispatch>().calls(
@@ -590,6 +609,7 @@ void test_done_requires_terminal_answer() {
 }
 
 void test_failed_completed_round_closes_queued_tool_calls() {
+
     ToolSet tools(std::filesystem::current_path());
     auto executions = register_noop_tool(tools);
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
@@ -628,6 +648,7 @@ void test_failed_completed_round_closes_queued_tool_calls() {
 }
 
 void test_final_phase_does_not_bypass_tool_follow_up() {
+
     ToolSet tools(std::filesystem::current_path());
     auto tool_executions = register_noop_tool(tools);
     auto completions = std::make_shared<usize>(0);
@@ -676,6 +697,7 @@ void test_final_phase_does_not_bypass_tool_follow_up() {
 }
 
 void test_cancelled_task_retains_semantic_progress() {
+
     ToolSet tools(std::filesystem::current_path());
     auto registered = tools.register_tool({
         .definition = {.name = "test_slow", .description = "Test cancellation"},
@@ -733,6 +755,7 @@ void test_cancelled_task_retains_semantic_progress() {
 }
 
 void test_stream_failure_retains_queued_tool_result() {
+
     ToolSet tools(std::filesystem::current_path());
     auto executions = register_noop_tool(tools);
     const auto diagnostic_prefix_size = Error::protocol("").message().size();
@@ -771,6 +794,7 @@ void test_stream_failure_retains_queued_tool_result() {
 }
 
 void test_invalid_tool_is_rejected_before_dispatch() {
+
     ToolSet tools(std::filesystem::current_path());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     auto completions = std::make_shared<usize>(0);
@@ -816,6 +840,7 @@ struct ToolSchedulingProbe {
 };
 
 void test_tool_execution_semantics() {
+
     constexpr usize k_parallel_calls = 40;
     ToolSet tools(std::filesystem::current_path());
     auto probe = std::make_shared<ToolSchedulingProbe>();
@@ -907,10 +932,11 @@ struct RecordingSummaryProvider {
         co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
     }
 
-    lighter::Task<void, Error> compact(provider::History &, std::string_view) { co_return; }
+    lighter::Task<void, Error> compact(provider::History &, provider::CompactRequest) { co_return; }
 };
 
 void test_local_compaction_summarizes_tool_rounds_as_text() {
+
     provider::History history;
     provider::append_developer(history, "policy");
     provider::append_user(history, "first task");
@@ -926,13 +952,13 @@ void test_local_compaction_summarizes_tool_rounds_as_text() {
 
     RecordingSummaryProvider provider;
     lighter::EventLoop loop;
-    auto task = provider::local_compact(&provider, history, "");
+    auto task = provider::local_compact(&provider, history, {});
     loop.schedule(task);
     loop.run();
     require(task.result().has_value(), "local compaction failed");
 
     require(provider.tool_definitions == 0, "the summarization request must not advertise tools");
-    require(provider.seen.size() == 6, "the summarization request kept the wrong number of items: " + std::to_string(provider.seen.size()));
+    require(provider.seen.size() == 8, "the summarization request kept the wrong number of items: " + std::to_string(provider.seen.size()));
     for (const auto &item : provider.seen) {
         for (const auto &part : item.parts) {
             require(std::holds_alternative<provider::TextPart>(part),
@@ -947,23 +973,239 @@ void test_local_compaction_summarizes_tool_rounds_as_text() {
                 std::get<provider::TextPart>(provider.seen.back().parts[0]).text.contains("handoff summary"),
             "the summarization prompt must be the final user item");
 
-    require(history.size() == 4 && std::get<provider::TextPart>(history[1].parts[0]).text.contains("SUMMARY") &&
-                std::get<provider::TextPart>(history[2].parts[0]).text == "second task",
-            "compaction must replace the summarized prefix and keep the latest task verbatim");
+    require(std::get<provider::TextPart>(provider.seen[6].parts[0]).text == "answer",
+            "the summarization request must cover the latest task as well");
+    require(history.size() == 4 && history[0].role == provider::Role::DEVELOPER &&
+                std::get<provider::TextPart>(history[1].parts[0]).text == "first task" &&
+                std::get<provider::TextPart>(history[2].parts[0]).text == "second task" &&
+                std::get<provider::TextPart>(history[3].parts[0]).text.starts_with("[Compacted context]") &&
+                std::get<provider::TextPart>(history[3].parts[0]).text.contains("SUMMARY"),
+            "compaction must keep the instruction prefix and recent prompts, then end with the summary");
+}
+
+void test_local_compaction_bounds_retained_prompts() {
+
+    provider::History history;
+    provider::append_developer(history, "policy");
+    provider::append_user(history, "[Compacted context] an earlier handoff\n\nOLD SUMMARY");
+    provider::append_user(history, std::string(70'000, 'a'));
+    provider::append_output_item(history, provider::AssistantMessageItem{.id = {.value = "a1"}, .parts = {{.text = "working"}}});
+    provider::append_tool_outcomes(history, {ToolOutcome{.call_id = "call-1", .payload = "contents"}});
+    provider::append_user(history, std::string(30'000, 'b'));
+    provider::append_user(history, "latest");
+
+    RecordingSummaryProvider provider;
+    lighter::EventLoop loop;
+    auto task = provider::local_compact(&provider, history, {});
+    loop.schedule(task);
+    loop.run();
+    require(task.result().has_value(), "local compaction failed");
+
+    require(provider.seen.size() == 8, "the summarization request must cover every conversation item");
+    // 20k retained tokens: "latest" (2 + 6 framing) and the 30k-byte prompt
+    // (7'500 + 6) fit whole; the 70k-byte prompt is truncated to the
+    // remaining 12'486 tokens less its framing.
+    require(history.size() == 5 && std::get<provider::TextPart>(history[1].parts[0]).text == std::string(49'920, 'a') &&
+                std::get<provider::TextPart>(history[2].parts[0]).text == std::string(30'000, 'b') &&
+                std::get<provider::TextPart>(history[3].parts[0]).text == "latest" &&
+                std::get<provider::TextPart>(history[4].parts[0]).text.contains("SUMMARY"),
+            "retained prompts must be the newest real prompts within the token budget, oldest truncated, summary last");
+    for (const auto &item : history) {
+        for (const auto &part : item.parts) {
+            require(!std::get<provider::TextPart>(part).text.contains("OLD SUMMARY"),
+                    "an earlier handoff summary and tool rounds must not be retained as prompts");
+        }
+    }
+
+    // A caller-supplied budget bounds retention the same way: 100 tokens keep
+    // "latest" (8 with framing) and 344 bytes of the newest large prompt.
+    provider::History small;
+    provider::append_developer(small, "policy");
+    provider::append_user(small, std::string(30'000, 'b'));
+    provider::append_user(small, "latest");
+    lighter::EventLoop small_loop;
+    auto small_task = provider::local_compact(&provider, small, {.retained_prompt_tokens = 100});
+    small_loop.schedule(small_task);
+    small_loop.run();
+    require(small_task.result().has_value(), "local compaction with a small retention budget failed");
+    require(small.size() == 4 && std::get<provider::TextPart>(small[1].parts[0]).text == std::string(344, 'b') &&
+                std::get<provider::TextPart>(small[2].parts[0]).text == "latest" &&
+                std::get<provider::TextPart>(small[3].parts[0]).text.contains("SUMMARY"),
+            "a small retention budget must truncate the retained prompts accordingly");
+
+    // A target for the compacted history as a whole is applied once the
+    // summary is known: instructions and summary come first, prompts absorb
+    // the rest and vanish entirely when nothing is left. The target is
+    // best-effort: it cannot shrink the instructions or the summary.
+    provider::History bounded;
+    provider::append_developer(bounded, "policy");
+    provider::append_user(bounded, std::string(30'000, 'b'));
+    provider::append_user(bounded, "latest");
+    lighter::EventLoop bounded_loop;
+    auto bounded_task = provider::local_compact(&provider, bounded, {.compacted_context_target_tokens = 200});
+    bounded_loop.schedule(bounded_task);
+    bounded_loop.run();
+    require(bounded_task.result().has_value(), "local compaction with a compacted-context target failed");
+    const auto &bounded_prompt = std::get<provider::TextPart>(bounded[1].parts[0]).text;
+    require(bounded.size() == 4 && !bounded_prompt.empty() && bounded_prompt.size() < 30'000 &&
+                std::get<provider::TextPart>(bounded[2].parts[0]).text == "latest" &&
+                std::get<provider::TextPart>(bounded[3].parts[0]).text.contains("SUMMARY"),
+            "the compacted-context target must shrink retention below the caller's prompt cap");
+
+    provider::History tight;
+    provider::append_developer(tight, "policy");
+    provider::append_user(tight, std::string(30'000, 'b'));
+    provider::append_user(tight, "latest");
+    lighter::EventLoop tight_loop;
+    auto tight_task = provider::local_compact(&provider, tight, {.compacted_context_target_tokens = 10});
+    tight_loop.schedule(tight_task);
+    tight_loop.run();
+    require(tight_task.result().has_value(), "local compaction with an unreachable compacted-context target failed");
+    require(tight.size() == 2 && tight[0].role == provider::Role::DEVELOPER &&
+                std::get<provider::TextPart>(tight[1].parts[0]).text.contains("SUMMARY"),
+            "when instructions and summary already exceed the target, no prompts may be retained");
+}
+
+/// Rejects summarization requests above an item limit the way a provider
+/// with an exhausted context does, alternating between a classified API
+/// error and a CONTEXT_EXHAUSTED stop so both rejection shapes are covered.
+struct OverflowingSummaryProvider {
+    usize item_limit = 0;
+    std::vector<usize> attempt_sizes;
+    provider::History accepted;
+
+    lighter::Task<provider::ProviderCallCompletion, Error>
+    complete(const provider::History &history, const std::vector<provider::ToolDefinition> &, const provider::StreamCallbacks &callbacks) {
+        attempt_sizes.push_back(history.size());
+        if (history.size() > item_limit) {
+            if (attempt_sizes.size() % 2 == 1) {
+                auto error = Error::http_status(400, "invalid_request_error", "prompt is too long", "req_long");
+                error.code = ErrorCode::CONTEXT_EXHAUSTED;
+                co_await lighter::fail(std::move(error));
+            }
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::CONTEXT_EXHAUSTED,
+                                                       .stop_detail = "model_context_window_exceeded"};
+        }
+        accepted = history;
+        emit_message(callbacks, "summary", "SUMMARY");
+        co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+    }
+
+    lighter::Task<void, Error> compact(provider::History &, provider::CompactRequest) { co_return; }
+};
+
+void test_local_compaction_drops_oldest_items_in_batches_when_the_summary_request_overflows() {
+
+    provider::History history;
+    provider::append_developer(history, "policy");
+    provider::append_user(history, "one");
+    provider::append_output_item(history, provider::AssistantMessageItem{.id = {.value = "a1"}, .parts = {{.text = "reply one"}}});
+    provider::append_user(history, "two");
+    provider::append_output_item(history, provider::AssistantMessageItem{.id = {.value = "a2"}, .parts = {{.text = "reply two"}}});
+    provider::append_user(history, "three");
+
+    OverflowingSummaryProvider provider{.item_limit = 4};
+    lighter::EventLoop loop;
+    auto task = provider::local_compact(&provider, history, {});
+    loop.schedule(task);
+    loop.run();
+    require(task.result().has_value(), "local compaction did not recover from an oversized summarization request");
+
+    require(provider.attempt_sizes == std::vector<usize>{7, 6, 4},
+            "retries must drop the oldest conversation items in doubling batches from the summarization request");
+    require(provider.accepted.size() == 4 && provider.accepted[0].role == provider::Role::DEVELOPER &&
+                std::get<provider::TextPart>(provider.accepted[1].parts[0]).text == "reply two" &&
+                std::get<provider::TextPart>(provider.accepted[2].parts[0]).text == "three",
+            "the accepted summarization request must keep the instruction prefix and the newest items");
+    require(history.size() == 5 && std::get<provider::TextPart>(history[1].parts[0]).text == "one" &&
+                std::get<provider::TextPart>(history[3].parts[0]).text == "three" &&
+                std::get<provider::TextPart>(history[4].parts[0]).text.contains("SUMMARY"),
+            "prompt retention must draw on the full transcript, not on the trimmed summarization request");
+
+    // Even with room for one more item, probing stops at the first accepted
+    // cut: every accepted probe generates a billable summary, so no request
+    // is made after acceptance.
+    provider::History refined;
+    provider::append_developer(refined, "policy");
+    provider::append_user(refined, "one");
+    provider::append_output_item(refined, provider::AssistantMessageItem{.id = {.value = "a1"}, .parts = {{.text = "reply one"}}});
+    provider::append_user(refined, "two");
+    provider::append_output_item(refined, provider::AssistantMessageItem{.id = {.value = "a2"}, .parts = {{.text = "reply two"}}});
+    provider::append_user(refined, "three");
+    OverflowingSummaryProvider refining{.item_limit = 5};
+    lighter::EventLoop refined_loop;
+    auto refined_task = provider::local_compact(&refining, refined, {});
+    refined_loop.schedule(refined_task);
+    refined_loop.run();
+    require(refined_task.result().has_value(), "local compaction with room for a tighter cut failed");
+    require(refining.attempt_sizes == std::vector<usize>{7, 6, 4} && refining.accepted.size() == 4 &&
+                std::get<provider::TextPart>(refining.accepted[1].parts[0]).text == "reply two",
+            "probing must stop at the first accepted cut instead of generating further summaries");
+
+    // A request bound trims by estimate before the first attempt: three
+    // 4'000-byte items (about 1'006 tokens each) against a 1'500-token bound
+    // leave only the newest one, with no rejected request at all.
+    provider::History estimated;
+    provider::append_developer(estimated, "policy");
+    provider::append_user(estimated, std::string(4'000, 'a'));
+    provider::append_output_item(estimated,
+                                 provider::AssistantMessageItem{.id = {.value = "b"}, .parts = {{.text = std::string(4'000, 'b')}}});
+    provider::append_user(estimated, std::string(4'000, 'c'));
+    OverflowingSummaryProvider roomy{.item_limit = 10};
+    lighter::EventLoop estimated_loop;
+    auto estimated_task = provider::local_compact(&roomy, estimated, {.summary_request_tokens = 1'500});
+    estimated_loop.schedule(estimated_task);
+    estimated_loop.run();
+    require(estimated_task.result().has_value(), "local compaction with a request bound failed");
+    require(roomy.attempt_sizes == std::vector<usize>{3} && roomy.accepted.size() == 3 &&
+                std::get<provider::TextPart>(roomy.accepted[1].parts[0]).text == std::string(4'000, 'c'),
+            "the request bound must leave out the oldest items by estimate before the first attempt");
+    require(estimated.size() == 4 && std::get<provider::TextPart>(estimated[1].parts[0]).text == std::string(4'000, 'a') &&
+                std::get<provider::TextPart>(estimated[2].parts[0]).text == std::string(4'000, 'c'),
+            "prompt retention must still draw on the full transcript when the request was trimmed by estimate");
+
+    // Provider-private parts never reach the summarizer, so the estimate must
+    // not charge them either: a 40'000-byte opaque item would otherwise push
+    // the older prompt out of a request it actually fits.
+    provider::History opaque;
+    provider::append_developer(opaque, "policy");
+    provider::append_user(opaque, std::string(4'000, 'a'));
+    opaque.push_back(
+        {.role = provider::Role::ASSISTANT, .parts = {provider::OpaquePart{.provider_tag = "fake", .payload = std::string(40'000, 'o')}}});
+    provider::append_user(opaque, std::string(4'000, 'c'));
+    OverflowingSummaryProvider roomy_opaque{.item_limit = 10};
+    lighter::EventLoop opaque_loop;
+    auto opaque_task = provider::local_compact(&roomy_opaque, opaque, {.summary_request_tokens = 2'500});
+    opaque_loop.schedule(opaque_task);
+    opaque_loop.run();
+    require(opaque_task.result().has_value(), "local compaction with an opaque item failed");
+    require(roomy_opaque.attempt_sizes == std::vector<usize>{4} && roomy_opaque.accepted.size() == 4 &&
+                std::get<provider::TextPart>(roomy_opaque.accepted[1].parts[0]).text == std::string(4'000, 'a'),
+            "the request estimate must ignore provider-private parts that are never sent");
+
+    provider::History single;
+    provider::append_developer(single, "policy");
+    provider::append_user(single, "only");
+    OverflowingSummaryProvider hopeless{.item_limit = 0};
+    lighter::EventLoop hopeless_loop;
+    auto hopeless_task = provider::local_compact(&hopeless, single, {});
+    hopeless_loop.schedule(hopeless_task);
+    hopeless_loop.run();
+    require(hopeless_task.result().has_error() && hopeless_task.result().error().code == ErrorCode::CONTEXT_EXHAUSTED &&
+                hopeless.attempt_sizes.size() == 1 && single.size() == 2,
+            "a request that cannot shrink further must surface the provider rejection and leave the history unchanged");
 }
 
 void test_automatic_compaction() {
+
     ToolSet tools(std::filesystem::current_path());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompactDispatch>().calls(
-        [](provider::History &history, std::string_view instructions) -> lighter::Task<void, Error> {
-            require(instructions.contains("active task"), "automatic compaction received the wrong instructions");
-            require(history.size() == 4 && history.back().role == provider::Role::USER,
-                    "automatic compaction did not receive the full unbounded branch");
-            auto latest = std::move(history.back());
+        [](provider::History &history, provider::CompactRequest request) -> lighter::Task<void, Error> {
+            require(request.instructions.contains("active task"), "automatic compaction received the wrong instructions");
+            require(history.size() == 3, "automatic compaction did not receive the accumulated history without the pending prompt");
             history.resize(provider::instruction_prefix_size(history));
             provider::append_user(history, "SUMMARY");
-            history.push_back(std::move(latest));
             co_return;
         });
     provider_mock.expect<provider::CompleteDispatch>().calls(
@@ -990,6 +1232,7 @@ void test_automatic_compaction() {
     loop.run();
 
     require(task.result().has_value(), "automatic compaction task failed");
+    require(agent.session.validate().has_value(), "automatic compaction produced a session that does not validate");
     require(events.size() == 4 && std::holds_alternative<AssistantMessageCompleted>(events[0]) &&
                 std::holds_alternative<ProviderActivityCompleted>(events[1]) && std::holds_alternative<SessionNotice>(events[2]) &&
                 std::holds_alternative<TaskCompleted>(events[3]),
@@ -1002,12 +1245,13 @@ void test_automatic_compaction() {
 }
 
 void test_multiple_automatic_compactions_in_one_task() {
+
     ToolSet tools(std::filesystem::current_path());
     auto tool_executions = register_noop_tool(tools);
     auto compactions = std::make_shared<usize>(0);
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
     provider_mock.expect<provider::CompactDispatch>()
-        .calls([compactions](provider::History &history, std::string_view) -> lighter::Task<void, Error> {
+        .calls([compactions](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
             const auto instruction_count = provider::instruction_prefix_size(history);
             history.resize(instruction_count);
             provider::append_user(history, "SUMMARY " + std::to_string(++*compactions));
@@ -1019,7 +1263,8 @@ void test_multiple_automatic_compactions_in_one_task() {
         .calls([completions](const provider::History &history, const std::vector<provider::ToolDefinition> &,
                              const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             const auto completion = (*completions)++;
-            require(history.size() == 2 && history[0].role == provider::Role::DEVELOPER && history[1].role == provider::Role::USER,
+            require(history.size() == (completion == 0 ? 3 : 2) && history[0].role == provider::Role::DEVELOPER &&
+                        history[1].role == provider::Role::USER,
                     "completion did not use the latest automatic checkpoint");
             require(std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY " + std::to_string(completion + 1),
                     "completion used the wrong automatic checkpoint");
@@ -1048,6 +1293,7 @@ void test_multiple_automatic_compactions_in_one_task() {
     loop.run();
 
     require(task.result().has_value(), "a task requiring multiple automatic compactions failed");
+    require(agent.session.validate().has_value(), "mid-task automatic compaction produced a session that does not validate");
     require(*compactions == 2, "the long-running task did not compact as often as needed");
     require(*tool_executions == 1, "the compacted task did not execute its tool call");
     require(agent.session.entries.size() == 16 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[6].payload) &&
@@ -1059,17 +1305,20 @@ void test_multiple_automatic_compactions_in_one_task() {
 }
 
 void test_proactive_compaction_uses_reported_context() {
+
     ToolSet tools(std::filesystem::current_path());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
-    provider_mock.expect<provider::CompactDispatch>().calls([](provider::History &history, std::string_view) -> lighter::Task<void, Error> {
-        require(history.size() == 4 && history.back().role == provider::Role::USER,
-                "proactive compaction did not receive the full current context");
-        auto latest = std::move(history.back());
-        history.resize(provider::instruction_prefix_size(history));
-        provider::append_user(history, "SUMMARY");
-        history.push_back(std::move(latest));
-        co_return;
-    });
+    provider_mock.expect<provider::CompactDispatch>().calls(
+        [](provider::History &history, provider::CompactRequest request) -> lighter::Task<void, Error> {
+            require(history.size() == 3, "proactive compaction did not receive the accumulated context");
+            // A tenth of the 500-token input budget.
+            require(request.retained_prompt_tokens == 50 && request.compacted_context_target_tokens == 250 &&
+                        request.summary_request_tokens == 500,
+                    "automatic compaction did not derive its retention, compacted-context, and request bounds from the input budget");
+            history.resize(provider::instruction_prefix_size(history));
+            provider::append_user(history, "SUMMARY");
+            co_return;
+        });
     provider_mock.expect<provider::CompleteDispatch>().calls(
         [](const provider::History &history, const std::vector<provider::ToolDefinition> &,
            const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
@@ -1078,12 +1327,17 @@ void test_proactive_compaction_uses_reported_context() {
             emit_message(callbacks, "done", "done");
             co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
         });
+    // The reserved output halves the input budget: accumulated context
+    // reaches the maintenance threshold before the new prompt is charged.
     model::Choice choice{
         .handle = provider_mock.handle(),
-        .entry = {.provider = "fake", .id = "test", .context_window = 100, .max_output_tokens = 1},
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 500},
     };
     Agent agent(std::move(choice), tools, compact_test_instructions());
-    append_session_message(agent.session, "old", "answer", {.input_tokens = 70, .output_tokens = 18, .context_tokens = 88});
+    append_session_message(agent.session, "old", "answer", {.input_tokens = 400, .output_tokens = 50, .context_tokens = 450});
+    auto manifest = agent.context_manifest();
+    require(manifest && manifest->usage.input_budget_tokens == 500 && manifest->usage.reported_context_tokens == 450,
+            "test setup did not produce the intended budget and baseline");
 
     lighter::EventLoop loop;
     auto task = agent.run_task("latest", {});
@@ -1092,25 +1346,666 @@ void test_proactive_compaction_uses_reported_context() {
 
     require(task.result().has_value(), "proactive automatic compaction task failed");
     require(agent.session.entries.size() == 11 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[6].payload),
-            "90 percent context usage did not create an automatic checkpoint");
+            "90 percent input budget usage did not create an automatic checkpoint");
+    provider_mock.verify();
+}
+
+void test_estimated_context_triggers_compaction_without_reported_usage() {
+
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompactDispatch>().calls(
+        [](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
+            require(history.size() == 2, "estimate-triggered compaction did not receive the accumulated context");
+            history.resize(provider::instruction_prefix_size(history));
+            provider::append_user(history, "SUMMARY");
+            co_return;
+        });
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+           const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            require(history.size() == 3 && std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY",
+                    "estimate-triggered compaction was not used for completion");
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        });
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    // A checkpoint carries no provider usage, so only the byte estimate can
+    // notice that it fills the window while still fitting the input budget.
+    session::ContextCheckpoint oversized;
+    oversized.items.push_back(session::ContextInput{.parts = {provider::TextPart{.text = std::string(3'600, 's')}}});
+    agent.session.append(std::move(oversized));
+    auto manifest = agent.context_manifest();
+    require(manifest && !manifest->usage.reported_context_tokens && manifest->omitted_budget_entries == 0 &&
+                *manifest->usage.remaining_input_tokens > 0,
+            "test setup must fit the budget without a reported usage baseline");
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("latest", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "estimate-triggered compaction task failed");
+    require(agent.session.entries.size() == 7 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[2].payload),
+            "estimated context usage did not create an automatic checkpoint");
+    provider_mock.verify();
+}
+
+void test_ineffective_automatic_compaction_fails_the_task() {
+
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompactDispatch>().calls(
+        [](provider::History &, provider::CompactRequest) -> lighter::Task<void, Error> { co_return; });
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    session::ContextCheckpoint oversized;
+    oversized.items.push_back(session::ContextInput{.parts = {provider::TextPart{.text = std::string(3'600, 's')}}});
+    agent.session.append(std::move(oversized));
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("latest", {});
+    loop.schedule(task);
+    loop.run();
+    auto outcome = task.result();
+
+    require(outcome.has_error() && outcome.error().detail.contains("did not reduce context"),
+            "a compaction that left the context unchanged was not reported");
+    require(std::get<session::TaskFinished>(agent.session.entries.back().payload).outcome == session::TaskOutcome::FAILED,
+            "the ineffective compaction did not fail its task");
+    // The unusable checkpoint must not have been committed: the session keeps
+    // its original history rather than hiding it behind a summary that does
+    // not fit.
+    require(agent.session.entries.size() == 3 &&
+                std::ranges::count_if(agent.session.entries,
+                                      [](const session::SessionEntry &entry) {
+                                          return std::holds_alternative<session::ContextCheckpoint>(entry.payload);
+                                      }) == 1,
+            "an ineffective checkpoint was committed to the append-only session");
+    provider_mock.verify();
+}
+
+/// Compacts into one assistant item that interleaves text, an opaque part,
+/// and text. Checkpoint normalization splits it into three outputs, and the
+/// replay charges each its own framing (4 per item, 2 per part): the raw
+/// history costs 16 framing tokens, its replay 24.
+void compact_into_interleaved_item(provider::History &history, usize opaque_bytes) {
+    history.resize(provider::instruction_prefix_size(history));
+    history.push_back({.role = provider::Role::ASSISTANT,
+                       .parts = {provider::TextPart{.text = std::string(2'000, 'a')},
+                                 provider::OpaquePart{.provider_tag = "fake", .payload = std::string(opaque_bytes, 'o')},
+                                 provider::TextPart{.text = std::string(1'000, 'b')}}});
+}
+
+void test_checkpoint_is_judged_on_its_replay() {
+    // A 900-token budget admits the raw compacted history plus the pending
+    // prompt, but its normalized replay adds enough framing to overflow.
+    {
+        ToolSet tools(std::filesystem::current_path());
+        lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+        provider_mock.expect<provider::CompactDispatch>().calls(
+            [](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
+                compact_into_interleaved_item(history, 465);
+                co_return;
+            });
+        model::Choice choice{
+            .handle = provider_mock.handle(),
+            .entry = {.provider = "fake", .id = "test", .context_window = 910, .max_output_tokens = 10},
+        };
+        Agent agent(std::move(choice), tools, compact_test_instructions());
+        append_session_message(agent.session, std::string(3'600, 'u'), "answer");
+
+        lighter::EventLoop loop;
+        auto task = agent.run_task("latest", {});
+        loop.schedule(task);
+        loop.run();
+        auto outcome = task.result();
+
+        require(outcome.has_error() && outcome.error().detail.contains("exceed the model input budget"),
+                "a checkpoint whose replay exceeds the budget was accepted on the strength of its raw history");
+        require(std::ranges::none_of(
+                    agent.session.entries,
+                    [](const session::SessionEntry &entry) { return std::holds_alternative<session::ContextCheckpoint>(entry.payload); }),
+                "the over-budget checkpoint was committed");
+        provider_mock.verify();
+    }
+    // Less opaque data fits the budget even above the proactive threshold.
+    // The pending prompt follows the three normalized outputs.
+    {
+        ToolSet tools(std::filesystem::current_path());
+        lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+        provider_mock.expect<provider::CompactDispatch>().calls(
+            [](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
+                compact_into_interleaved_item(history, 400);
+                co_return;
+            });
+        provider_mock.expect<provider::CompleteDispatch>().calls(
+            [](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+               const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+                require(history.size() == 5 && history[1].role == provider::Role::ASSISTANT && history[3].role == provider::Role::ASSISTANT,
+                        "the replayed checkpoint did not carry the split assistant outputs");
+                emit_message(callbacks, "done", "done");
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+            });
+        model::Choice choice{
+            .handle = provider_mock.handle(),
+            .entry = {.provider = "fake", .id = "test", .context_window = 910, .max_output_tokens = 10},
+        };
+        Agent agent(std::move(choice), tools, compact_test_instructions());
+        append_session_message(agent.session, std::string(3'600, 'u'), "answer");
+
+        lighter::EventLoop loop;
+        auto task = agent.run_task("latest", {});
+        loop.schedule(task);
+        loop.run();
+
+        require(task.result().has_value(), "a checkpoint whose replay fits the budget was rejected");
+        const auto committed = std::ranges::find_if(agent.session.entries, [](const session::SessionEntry &entry) {
+            return std::holds_alternative<session::ContextCheckpoint>(entry.payload);
+        });
+        require(committed != agent.session.entries.end() && std::get<session::ContextCheckpoint>(committed->payload).items.size() == 4,
+                "the committed checkpoint did not keep its three normalized outputs and pending prompt");
+        provider_mock.verify();
+    }
+}
+
+void test_oversized_prompt_is_rejected_before_any_provider_call() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 80, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+
+    lighter::EventLoop loop;
+    // The prompt alone exceeds the input budget and a summary could not shrink it.
+    auto task = agent.run_task(std::string(1'000, 'p'), {});
+    loop.schedule(task);
+    loop.run();
+    auto outcome = task.result();
+
+    require(outcome.has_error() && outcome.error().detail.contains("exceeds the model input budget"),
+            "a lone oversized prompt must be rejected without a provider call");
+    require(agent.session.entries.size() == 2 &&
+                std::get<session::TaskFinished>(agent.session.entries.back().payload).outcome == session::TaskOutcome::FAILED,
+            "the rejected prompt did not fail its task cleanly");
+    provider_mock.verify();
+}
+
+/// A provider whose compaction is the real local summarizer, so the agent
+/// path is exercised end to end rather than through a mock that rewrites
+/// history by hand. Summarization requests answer "SUMMARY"; everything else
+/// answers "done" and is recorded for inspection.
+struct LocalCompactingProvider {
+    std::shared_ptr<std::vector<provider::History>> completions = std::make_shared<std::vector<provider::History>>();
+
+    lighter::Task<provider::ProviderCallCompletion, Error>
+    complete(const provider::History &history, const std::vector<provider::ToolDefinition> &, const provider::StreamCallbacks &callbacks) {
+        const auto *last = std::get_if<provider::TextPart>(&history.back().parts.back());
+        if (last && last->text.contains("context checkpoint compaction")) {
+            emit_message(callbacks, "summary", "SUMMARY");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        }
+        completions->push_back(history);
+        emit_message(callbacks, "done", "done");
+        co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+    }
+
+    lighter::Task<void, Error> compact(provider::History &history, provider::CompactRequest request) {
+        co_return co_await provider::local_compact(this, history, request).or_fail();
+    }
+};
+
+void test_automatic_compaction_through_the_local_summarizer() {
+    ToolSet tools(std::filesystem::current_path());
+    LocalCompactingProvider provider;
+    auto completions = provider.completions;
+    model::Choice choice{
+        .handle = pro::make_proxy<provider::ProviderFacade, LocalCompactingProvider>(std::move(provider)),
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    // The finished task no longer fits the 990-token budget next to a new prompt.
+    append_session_message(agent.session, std::string(3'600, 'u'), std::string(100, 'a'));
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("latest", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "automatic compaction through the local summarizer failed");
+    require(agent.session.validate().has_value(), "local summarizer compaction produced a session that does not validate");
+    // Only the old prompt is subject to retention (99 tokens including
+    // framing). The pending prompt follows the handoff unchanged.
+    require(completions->size() == 1 && completions->front().size() == 4 &&
+                std::get<provider::TextPart>(completions->front()[1].parts[0]).text == std::string(372, 'u') &&
+                std::get<provider::TextPart>(completions->front()[3].parts[0]).text == "latest" &&
+                std::get<provider::TextPart>(completions->front()[2].parts[0]).text.contains("SUMMARY"),
+            "the completion did not see the retained prompts and summary produced by the local summarizer");
+}
+
+struct BoundedCompactionState {
+    std::vector<provider::History> summaries;
+    std::vector<provider::History> requests;
+};
+
+/// Uses real local compaction and rejects oversized requests, including
+/// summarization overhead. Pending prompts must never reach the summarizer.
+struct BoundedCompactingProvider {
+    std::shared_ptr<BoundedCompactionState> state;
+
+    lighter::Task<provider::ProviderCallCompletion, Error>
+    complete(const provider::History &history, const std::vector<provider::ToolDefinition> &, const provider::StreamCallbacks &callbacks) {
+        const auto &text = std::get<provider::TextPart>(history.back().parts.back()).text;
+        const bool summary = text.contains("context checkpoint compaction");
+        (summary ? state->summaries : state->requests).push_back(history);
+        if (summary) {
+            for (const auto &item : history) {
+                for (const auto &part : item.parts) {
+                    require(!std::get<provider::TextPart>(part).text.contains("PENDING PROMPT"),
+                            "local compaction received the unprocessed prompt");
+                }
+            }
+        }
+        if (context::estimate_input_tokens(history) > 990) {
+            auto error = Error::api("context_length_exceeded", "request exceeds input budget", "req_bounded", false);
+            error.code = ErrorCode::CONTEXT_EXHAUSTED;
+            co_await lighter::fail(std::move(error));
+        }
+        emit_message(callbacks, summary ? "summary" : "done", summary ? "SUMMARY" : "done");
+        co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+    }
+
+    lighter::Task<void, Error> compact(provider::History &history, provider::CompactRequest request) {
+        co_return co_await provider::local_compact(this, history, request).or_fail();
+    }
+};
+
+void test_pending_prompt_admission_with_bounded_local_compaction() {
+    for (const usize history_size : {usize{0}, usize{1}, usize{1'000}}) {
+        for (const usize prompt_size : {usize{3'600}, usize{3'900}}) {
+            ToolSet tools(std::filesystem::current_path());
+            auto state = std::make_shared<BoundedCompactionState>();
+            model::Choice choice{
+                .handle = pro::make_proxy<provider::ProviderFacade, BoundedCompactingProvider>(BoundedCompactingProvider{state}),
+                .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+            };
+            Agent agent(std::move(choice), tools, compact_test_instructions());
+            if (history_size != 0) append_session_message(agent.session, std::string(history_size, 'u'), std::string(history_size, 'a'));
+            std::string prompt = "PENDING PROMPT";
+            prompt.resize(prompt_size, 'p');
+            provider::History fresh;
+            provider::append_developer(fresh, "test policy");
+            provider::append_user(fresh, prompt);
+            const auto input_tokens = context::estimate_input_tokens(fresh);
+            require(input_tokens >= 891 && input_tokens <= 990, "test prompt must fit above the proactive threshold");
+
+            lighter::EventLoop loop;
+            auto task = agent.run_task(prompt, {});
+            loop.schedule(task);
+            loop.run();
+            auto outcome = task.result();
+            auto valid = agent.session.validate();
+            require(valid.has_value(), valid ? "" : valid.error().message());
+            const auto checkpoints = std::ranges::count_if(agent.session.entries, [](const session::SessionEntry &entry) {
+                return std::holds_alternative<session::ContextCheckpoint>(entry.payload);
+            });
+            if (history_size != 0 && prompt_size == 3'900) {
+                require(outcome.has_error() && outcome.error().detail.contains("exceed the model input budget"),
+                        "failed admission returned: " + (outcome.has_error() ? outcome.error().message() : "success") + " (history bytes " +
+                            std::to_string(history_size) + ")");
+                require(state->summaries.size() == 1 && state->requests.empty() && checkpoints == 0,
+                        "failed admission committed an unusable checkpoint or called normal completion");
+                require(std::get<session::TaskStarted>(agent.session.entries[5].payload).text == prompt,
+                        "failed admission changed the saved user prompt");
+                continue;
+            }
+            require(outcome.has_value() && state->requests.size() == 1, "a fitting prompt did not reach normal completion");
+            require(state->summaries.size() == (history_size == 1'000 ? 1 : 0) && checkpoints == (history_size == 1'000 ? 1 : 0),
+                    "admission compacted a fresh prompt or repeatedly compacted an otherwise usable request");
+            const auto &request = state->requests.front();
+            require(std::get<provider::TextPart>(request.back().parts[0]).text == prompt,
+                    "the pending prompt was shortened or did not follow the checkpoint");
+            auto replay = agent.context_manifest();
+            require(replay && std::ranges::count_if(replay->provider_history,
+                                                    [&prompt](const provider::Item &item) {
+                                                        return item.role == provider::Role::USER && item.parts.size() == 1 &&
+                                                               std::holds_alternative<provider::TextPart>(item.parts[0]) &&
+                                                               std::get<provider::TextPart>(item.parts[0]).text == prompt;
+                                                    }) == 1,
+                    "checkpoint replay lost or duplicated the pending prompt");
+        }
+    }
+}
+
+void test_recovery_preserves_pending_prompt_above_proactive_threshold() {
+    ToolSet tools(std::filesystem::current_path());
+    const std::string prompt(3'600, 'p');
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    auto compactions = std::make_shared<usize>(0);
+    provider_mock.expect<provider::CompactDispatch>()
+        .calls([compactions, &prompt](provider::History &history, provider::CompactRequest request) -> lighter::Task<void, Error> {
+            for (const auto &item : history) {
+                for (const auto &part : item.parts) {
+                    require(std::get<provider::TextPart>(part).text != prompt, "recovery summarized the pending prompt");
+                }
+            }
+            require(request.compacted_context_target_tokens == 84, "compaction did not reserve room for the pending prompt");
+            history.resize(provider::instruction_prefix_size(history));
+            provider::append_user(history, std::string(++*compactions == 1 ? 100 : 50, 's'));
+            co_return;
+        })
+        .times(2);
+    auto completions = std::make_shared<usize>(0);
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls(
+            [completions, &prompt](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                                   const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+                require(history.size() == 3 && std::get<provider::TextPart>(history.back().parts[0]).text == prompt &&
+                            context::estimate_input_tokens(history) > 891,
+                        "recovery must preserve a pending prompt even when it keeps context above the proactive threshold");
+                if (++*completions == 1) {
+                    auto error = Error::api("context_length_exceeded", "provider counts more tokens", "req_retry", false);
+                    error.code = ErrorCode::CONTEXT_EXHAUSTED;
+                    co_await lighter::fail(std::move(error));
+                }
+                emit_message(callbacks, "done", "done");
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+            })
+        .times(2);
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    append_session_message(agent.session, std::string(1'000, 'u'), std::string(1'000, 'a'));
+    lighter::EventLoop loop;
+    auto task = agent.run_task(prompt, {});
+    loop.schedule(task);
+    loop.run();
+    require(task.result().has_value() && agent.session.validate().has_value(), "recovery did not admit the unchanged pending prompt");
+    provider_mock.verify();
+}
+
+void test_provider_rejection_of_lone_prompt_does_not_summarize_it() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [](const provider::History &, const std::vector<provider::ToolDefinition> &,
+           const provider::StreamCallbacks &) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            auto error = Error::api("context_length_exceeded", "provider counts more tokens", "req_lone", false);
+            error.code = ErrorCode::CONTEXT_EXHAUSTED;
+            co_await lighter::fail(std::move(error));
+        });
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    lighter::EventLoop loop;
+    auto task = agent.run_task("latest", {});
+    loop.schedule(task);
+    loop.run();
+    auto outcome = task.result();
+    require(outcome.has_error() && outcome.error().code == ErrorCode::CONTEXT_EXHAUSTED && outcome.error().request_id == "req_lone",
+            "a lone prompt rejection must retain the provider error without a doomed compaction attempt");
+    provider_mock.verify();
+}
+
+void test_provider_context_rejection_is_recovered_by_compaction() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompactDispatch>().calls([](provider::History &history,
+                                                               provider::CompactRequest) -> lighter::Task<void, Error> {
+        require(history.size() == 3 && history.back().role == provider::Role::ASSISTANT, "recovery compaction included the pending prompt");
+        history.resize(provider::instruction_prefix_size(history));
+        provider::append_user(history, "SUMMARY");
+        co_return;
+    });
+    auto completions = std::make_shared<usize>(0);
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([completions](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                             const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            if ((*completions)++ == 0) {
+                auto error = Error::http_status(400, "invalid_request_error", "prompt is too long", "req_long");
+                error.code = ErrorCode::CONTEXT_EXHAUSTED;
+                co_await lighter::fail(std::move(error));
+            }
+            require(history.size() == 3 && std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY" &&
+                        std::get<provider::TextPart>(history.back().parts[0]).text == "latest",
+                    "the re-issued call did not use the recovery checkpoint");
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        })
+        .times(2);
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    append_session_message(agent.session, std::string(100, 'u'), "answer");
+
+    std::vector<Event> events;
+    lighter::EventLoop loop;
+    auto task = agent.run_task("latest", [&events](const Event &event) noexcept { events.push_back(event); });
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "a context rejection before any output was not recovered");
+    require(agent.session.validate().has_value(), "recovery compaction produced a session that does not validate");
+    require(agent.session.entries.size() == 13 && std::holds_alternative<session::ProviderCallAborted>(agent.session.entries[6].payload) &&
+                std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[8].payload),
+            "recovery did not settle the rejected round before checkpointing");
+    require(std::ranges::count_if(events, [](const Event &event) { return std::holds_alternative<SessionNotice>(event); }) == 1,
+            "recovery compaction must be reported like any automatic compaction");
+    provider_mock.verify();
+}
+
+void test_context_exhausted_stop_is_recovered_by_compaction() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompactDispatch>().calls(
+        [](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
+            history.resize(provider::instruction_prefix_size(history));
+            provider::append_user(history, "SUMMARY");
+            co_return;
+        });
+    auto completions = std::make_shared<usize>(0);
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([completions](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                             const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            if ((*completions)++ == 0) {
+                co_return provider::ProviderCallCompletion{.stop = provider::StopKind::CONTEXT_EXHAUSTED,
+                                                           .stop_detail = "model_context_window_exceeded"};
+            }
+            require(history.size() == 3 && std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY" &&
+                        std::get<provider::TextPart>(history.back().parts[0]).text == "latest",
+                    "the re-issued call did not use the recovery checkpoint");
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        })
+        .times(2);
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    append_session_message(agent.session, std::string(100, 'u'), "answer");
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("latest", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "a context-exhausted stop before any output was not recovered");
+    require(agent.session.validate().has_value(), "recovery compaction produced a session that does not validate");
+    require(agent.session.entries.size() == 13 &&
+                std::holds_alternative<session::ProviderCallCompleted>(agent.session.entries[6].payload) &&
+                std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[8].payload),
+            "recovery did not settle the exhausted round before checkpointing");
+    provider_mock.verify();
+}
+
+void test_context_rejection_after_opaque_output_is_recovered() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompactDispatch>().calls(
+        [](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
+            history.resize(provider::instruction_prefix_size(history));
+            provider::append_user(history, "SUMMARY");
+            co_return;
+        });
+    auto completions = std::make_shared<usize>(0);
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([completions](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                             const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            if ((*completions)++ == 0) {
+                // Encrypted reasoning arrives before the provider gives up on
+                // the request; nothing of it was shown to the user.
+                callbacks.on_item_completed(provider::ProviderOpaqueItem{
+                    .id = {.value = "reasoning"},
+                    .part = {.provider_tag = "fake", .payload = "encrypted"},
+                });
+                auto error = Error::http_status(400, "invalid_request_error", "prompt is too long", "req_long");
+                error.code = ErrorCode::CONTEXT_EXHAUSTED;
+                co_await lighter::fail(std::move(error));
+            }
+            require(history.size() == 3 && std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY" &&
+                        std::get<provider::TextPart>(history.back().parts[0]).text == "latest",
+                    "the re-issued call did not use the recovery checkpoint");
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        })
+        .times(2);
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    append_session_message(agent.session, std::string(100, 'u'), "answer");
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("latest", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "a context rejection after only opaque output was not recovered");
+    require(agent.session.validate().has_value(), "recovery after opaque output produced a session that does not validate");
+    require(agent.session.entries.size() == 14 && std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[6].payload) &&
+                std::holds_alternative<session::ProviderCallAborted>(agent.session.entries[7].payload) &&
+                std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[9].payload),
+            "recovery did not settle the round with its opaque item as omitted before checkpointing");
+    provider_mock.verify();
+}
+
+void test_context_rejection_after_empty_message_is_recovered() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompactDispatch>().calls(
+        [](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
+            history.resize(provider::instruction_prefix_size(history));
+            provider::append_user(history, "SUMMARY");
+            co_return;
+        });
+    auto completions = std::make_shared<usize>(0);
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([completions](const provider::History &history, const std::vector<provider::ToolDefinition> &,
+                             const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            if ((*completions)++ == 0) {
+                emit_message(callbacks, "empty", "");
+                auto error = Error::http_status(400, "invalid_request_error", "prompt is too long", "req_long");
+                error.code = ErrorCode::CONTEXT_EXHAUSTED;
+                co_await lighter::fail(std::move(error));
+            }
+            require(history.size() == 3 && std::get<provider::TextPart>(history[1].parts[0]).text == "SUMMARY" &&
+                        std::get<provider::TextPart>(history.back().parts[0]).text == "latest",
+                    "the re-issued call did not use the recovery checkpoint");
+            emit_message(callbacks, "done", "done");
+            co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
+        })
+        .times(2);
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    append_session_message(agent.session, std::string(100, 'u'), "answer");
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("latest", {});
+    loop.schedule(task);
+    loop.run();
+
+    require(task.result().has_value(), "a context rejection after an empty message was not recovered");
+    require(agent.session.validate().has_value(), "recovery after an empty message produced a session that does not validate");
+    require(agent.session.entries.size() == 14 && std::holds_alternative<session::OutputItemCompleted>(agent.session.entries[6].payload) &&
+                std::holds_alternative<session::ProviderCallAborted>(agent.session.entries[7].payload) &&
+                std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[9].payload),
+            "recovery did not settle the round with its empty message as omitted before checkpointing");
+    provider_mock.verify();
+}
+
+void test_context_rejection_after_visible_output_is_not_recovered() {
+    ToolSet tools(std::filesystem::current_path());
+    lighter::mock::Mock<provider::ProviderFacade> provider_mock;
+    provider_mock.expect<provider::CompleteDispatch>().calls(
+        [](const provider::History &, const std::vector<provider::ToolDefinition> &,
+           const provider::StreamCallbacks &callbacks) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+            emit_message(callbacks, "partial", "partial answer", /*stream*/ true);
+            emit_message(callbacks, "empty", "");
+            auto error = Error::http_status(400, "invalid_request_error", "prompt is too long", "req_long");
+            error.code = ErrorCode::CONTEXT_EXHAUSTED;
+            co_await lighter::fail(std::move(error));
+        });
+    model::Choice choice{
+        .handle = provider_mock.handle(),
+        .entry = {.provider = "fake", .id = "test", .context_window = 1'000, .max_output_tokens = 10},
+    };
+    Agent agent(std::move(choice), tools, compact_test_instructions());
+    append_session_message(agent.session, std::string(100, 'u'), "answer");
+
+    lighter::EventLoop loop;
+    auto task = agent.run_task("latest", {});
+    loop.schedule(task);
+    loop.run();
+    auto outcome = task.result();
+
+    require(outcome.has_error() && outcome.error().code == ErrorCode::CONTEXT_EXHAUSTED,
+            "a context rejection after visible output must surface instead of silently compacting");
+    require(agent.session.entries.size() == 11 &&
+                std::get<session::TaskFinished>(agent.session.entries.back().payload).outcome == session::TaskOutcome::FAILED,
+            "the rejected round after visible output was not settled and failed");
     provider_mock.verify();
 }
 
 void test_failed_task_does_not_report_staged_compaction() {
+
     ToolSet tools(std::filesystem::current_path());
     lighter::mock::Mock<provider::ProviderFacade> provider_mock;
-    provider_mock.expect<provider::CompactDispatch>().calls([](provider::History &history, std::string_view) -> lighter::Task<void, Error> {
-        auto latest = std::move(history.back());
-        history.resize(provider::instruction_prefix_size(history));
-        provider::append_user(history, "SUMMARY");
-        history.push_back(std::move(latest));
-        co_return;
-    });
-    provider_mock.expect<provider::CompleteDispatch>().calls(
-        [](const provider::History &, const std::vector<provider::ToolDefinition> &,
-           const provider::StreamCallbacks &) -> lighter::Task<provider::ProviderCallCompletion, Error> {
+    auto compactions = std::make_shared<usize>(0);
+    provider_mock.expect<provider::CompactDispatch>()
+        .calls([compactions](provider::History &history, provider::CompactRequest) -> lighter::Task<void, Error> {
+            history.resize(provider::instruction_prefix_size(history));
+            provider::append_user(history, ++*compactions == 1 ? "FIRST SUMMARY" : "SUMMARY");
+            co_return;
+        })
+        .times(2);
+    // Rejected twice in a row: the first exhaustion is recovered by a second
+    // compaction, the second is reported.
+    provider_mock.expect<provider::CompleteDispatch>()
+        .calls([](const provider::History &, const std::vector<provider::ToolDefinition> &,
+                  const provider::StreamCallbacks &) -> lighter::Task<provider::ProviderCallCompletion, Error> {
             co_return provider::ProviderCallCompletion{.stop = provider::StopKind::CONTEXT_EXHAUSTED};
-        });
+        })
+        .times(2);
     model::Choice choice{
         .handle = provider_mock.handle(),
         .entry = {.provider = "fake", .id = "test", .context_window = 80, .max_output_tokens = 10},
@@ -1127,7 +2022,8 @@ void test_failed_task_does_not_report_staged_compaction() {
 
     require(outcome.has_error() && outcome.error().detail.contains("context window exhausted"),
             "failed completion did not report context exhaustion");
-    require(agent.session.entries.size() == 10 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[6].payload) &&
+    require(agent.session.entries.size() == 13 && std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[6].payload) &&
+                std::holds_alternative<session::ContextCheckpoint>(agent.session.entries[9].payload) &&
                 std::get<session::TaskFinished>(agent.session.entries.back().payload).outcome == session::TaskOutcome::FAILED,
             "failed task did not retain its resumable semantic progress");
     require(events.empty(), "failed task emitted an assistant-message boundary without an assistant message");
@@ -1135,6 +2031,7 @@ void test_failed_task_does_not_report_staged_compaction() {
 }
 
 void test_context_manifest() {
+
     std::vector<context::InstructionSource> instructions{
         {.authority = context::InstructionAuthority::PROJECT, .origin = "project:AGENTS.md", .content = "project policy"},
         {.authority = context::InstructionAuthority::APPLICATION, .origin = "profile:coding", .content = "coding policy"},
@@ -1183,9 +2080,24 @@ i32 run_all() {
     test_invalid_tool_is_rejected_before_dispatch();
     test_tool_execution_semantics();
     test_local_compaction_summarizes_tool_rounds_as_text();
+    test_local_compaction_bounds_retained_prompts();
+    test_local_compaction_drops_oldest_items_in_batches_when_the_summary_request_overflows();
     test_automatic_compaction();
     test_multiple_automatic_compactions_in_one_task();
     test_proactive_compaction_uses_reported_context();
+    test_estimated_context_triggers_compaction_without_reported_usage();
+    test_ineffective_automatic_compaction_fails_the_task();
+    test_checkpoint_is_judged_on_its_replay();
+    test_oversized_prompt_is_rejected_before_any_provider_call();
+    test_automatic_compaction_through_the_local_summarizer();
+    test_pending_prompt_admission_with_bounded_local_compaction();
+    test_recovery_preserves_pending_prompt_above_proactive_threshold();
+    test_provider_rejection_of_lone_prompt_does_not_summarize_it();
+    test_provider_context_rejection_is_recovered_by_compaction();
+    test_context_exhausted_stop_is_recovered_by_compaction();
+    test_context_rejection_after_visible_output_is_not_recovered();
+    test_context_rejection_after_opaque_output_is_recovered();
+    test_context_rejection_after_empty_message_is_recovered();
     test_failed_task_does_not_report_staged_compaction();
     test_context_manifest();
     return 0;

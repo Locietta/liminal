@@ -1018,19 +1018,19 @@ Task<provider::ProviderCallCompletion, Error> Client::complete(const provider::H
         .or_fail();
 }
 
-Task<void, Error> Client::compact(provider::History &history, std::string_view instructions) {
+Task<void, Error> Client::compact(provider::History &history, provider::CompactRequest request) {
     const auto instruction_count = provider::instruction_prefix_size(history);
     if (instruction_count == history.size()) co_return;
     provider::History conversation(history.begin() + instruction_count, history.end());
-    const std::string body = co_await or_fail(protocol::encode_compact_request(conversation, instructions, options));
+    const std::string body = co_await or_fail(protocol::encode_compact_request(conversation, request.instructions, options));
     detail::CompactionAttempts attempts{
         .remote = [this](const std::string &request_body) { return attempt_remote_compact(http_client, options, request_body); },
         .local = [this](provider::History &target,
-                        std::string_view compact_instructions) { return provider::local_compact(this, target, compact_instructions); },
+                        provider::CompactRequest local_request) { return provider::local_compact(this, target, std::move(local_request)); },
         .sleep = [](std::chrono::milliseconds delay) { return lighter::sleep(delay); },
     };
-    co_return co_await detail::compact_with_retry(attempts, history, instruction_count, body, std::string(instructions),
-                                                  options.max_retries, options.initial_retry_delay)
+    co_return co_await detail::compact_with_retry(attempts, history, instruction_count, body, std::move(request), options.max_retries,
+                                                  options.initial_retry_delay)
         .or_fail();
 }
 

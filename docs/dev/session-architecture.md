@@ -44,6 +44,25 @@ A fork is a new durable session containing the exact semantic prefix through a s
 
 Fork preparation is not publication. A disposable fork plan owns the new identity's exclusive lease, rollback-journal staging database, unpublished persistence queue, projected transcript, and resolved model without creating a catalog row. Cancellation removes the staging directory. After the source saves successfully or the user explicitly accepts its remaining unsaved state, publication closes the staged database, creates its catalog-pending marker, atomically moves the directory without replacement, reopens the published database in verified WAL mode, and then attempts catalog projection. Once the atomic move succeeds, the queue retains that exact finalized snapshot until attachment completes; a fork may replace the live session with an explicit persistence-degraded notice while this recovery remains pending. If the source save is explicitly abandoned, the origin remains exact semantic provenance and may identify a checkpoint that never became durable in the source session.
 
+## Prompt admission and compaction
+
+The session preserves what the user submitted. Recording a task start is distinct from admitting its next model request. Request context consists of resolved instructions, accumulated conversation or its checkpoint, and any pending new prompt. Liminal manages capacity so users can continue working without budgeting tokens themselves.
+
+At a task boundary, admission preserves the new prompt unchanged:
+
+- If accumulated history is below the maintenance threshold and the combined request fits, proceed directly. A large pending prompt alone does not make a short conversation due for compaction.
+- If accumulated history needs compaction, compact that history first, reserving room for the pending prompt. The next request contains the checkpoint followed by the original prompt exactly once. The pending prompt stays outside summarization and prompt-retention limits, including during context-rejection recovery before the model has processed it.
+- If there is no accumulated history, a prompt that fits proceeds directly even above the proactive threshold.
+- If resolved instructions and the prompt alone cannot fit, report that the input is too large. Compaction cannot make space by shortening the pending prompt. If a usable checkpoint and the pending prompt still cannot fit together, report that admission failed without committing an unusable checkpoint.
+
+During an ongoing task, accumulated model output and settled tool results can require compaction before the next round. Compaction may then summarize progress on that task, including its original prompt, while preserving the goals, constraints, and state needed to continue. Tool calls and outcomes must remain settled and replayable; compaction must not repeat external effects. Explicit `/compact` operates on the accumulated conversation and does not admit a new prompt.
+
+Capacity estimates include instructions and conversation framing, reserve output space, and use a safety margin for estimation error and provider request overhead. Provider usage can improve those estimates, but the provider remains authoritative about whether a request fits. The footer gives an approximate indication of remaining capacity. The proactive threshold schedules maintenance; it is neither a prompt-size limit nor a promised percentage at which compaction always occurs. Trigger percentages, retention caps, and checkpoint size targets are implementation tuning choices.
+
+Automatic compaction succeeds when its canonical replay can support the next operation. At a task boundary, assess the checkpoint together with the unchanged pending prompt and request overhead. Aim for useful headroom, but do not reject an otherwise usable request solely because it exceeds the proactive threshold. Assess the result before committing it, preserve the original session history, and avoid repeated compaction that makes no useful progress. Native and local compaction must satisfy the same admission and replay contract even though their checkpoint representations differ.
+
+Provider context rejection before visible output can trigger a bounded recovery attempt that preserves pending input and settled progress.
+
 ## Discovery
 
 Session discovery reads bounded, indexed catalog metadata without decoding entry payloads. Workspace association is immutable session metadata used for discovery. The current invocation controls the working directory and instruction discovery.
@@ -66,11 +85,11 @@ A fresh interactive session retains the invocation workspace, working directory,
 
 Naming is an authoritative session mutation and follows the same ownership and persistence rules as semantic history. It does not advance conversation recency. After its session commit, Liminal makes a bounded synchronous catalog-refresh attempt so selectors normally reflect the new title immediately.
 
-Every published session is resumable and participates in ordinary workspace discovery. Conversation recency advances non-regressingly when a user task is admitted and becomes durable atomically with that task start. Output, tools, task completion, recovery bookkeeping, model changes, rename, checkout, compaction, catalog repair, and SQLite maintenance do not advance it.
+Every published session is resumable and participates in ordinary workspace discovery. Conversation recency advances non-regressingly when a user task is recorded and becomes durable atomically with that task start. Output, tools, task completion, recovery bookkeeping, model changes, rename, checkout, compaction, catalog repair, and SQLite maintenance do not advance it.
 
 ## Catalog recovery
 
-Before publication, rename, or durable user-task admission, Liminal durably replaces `catalog-pending/<session-id>` with the target authoritative revision. After the session commit, the projection reads the latest singleton row, performs a revision-guarded catalog upsert, and removes the marker only if it still names no later revision. The session-local invalidation lock covers only marker comparison, replacement, and conditional removal; authoritative reads and catalog transactions never hold it or delay semantic commits.
+Before publication, rename, or durable task-start recording, Liminal durably replaces `catalog-pending/<session-id>` with the target authoritative revision. After the session commit, the projection reads the latest singleton row, performs a revision-guarded catalog upsert, and removes the marker only if it still names no later revision. The session-local invalidation lock covers only marker comparison, replacement, and conditional removal; authoritative reads and catalog transactions never hold it or delay semantic commits.
 
 Normal startup inspects pending markers and the bounded staging directory. It tries each relevant session lease without waiting, preserves work owned by another process, and removes abandoned staging before clearing its orphan marker. Missing-catalog rebuild and explicit repair may scan published session directories, but use validated read-only connections to read singleton rows alongside live WAL writers and never decode history payloads. Before a new catalog schema becomes valid, Liminal durably creates `catalog-rebuild-pending`; one repository opener serializes and completes the rebuild before durably removing that marker, while contending openers remain available in authority-only mode. A crash or rebuild error therefore leaves an unambiguous instruction for the next opener. Creating or rebuilding a missing catalog retains exclusive catalog-maintenance ownership until discovery has been reconstructed, so a POSIX process cannot replace a catalog while another process still writes an unlinked open handle. Corrupt replacement follows the same exclusive rule.
 

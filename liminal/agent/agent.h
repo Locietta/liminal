@@ -26,7 +26,7 @@ struct Agent {
     lighter::Task<void, Error, lighter::Cancellation> run_task(std::string prompt, EventSink events,
                                                                std::optional<lighter::CancellationToken> cancellation = std::nullopt);
 
-    lighter::Task<void, Error> compact(std::string_view instructions);
+    lighter::Task<void, Error> compact(std::string instructions);
 
     Result<context::ContextManifest> context_manifest() const;
 
@@ -40,8 +40,14 @@ struct Agent {
 
 private:
     lighter::Task<bool, Error, lighter::Cancellation> run_task_loop(session::TaskId task_id, u64 activity_task_generation,
-                                                                    const EventSink &events,
+                                                                    std::string_view prompt, const EventSink &events,
                                                                     const std::optional<lighter::CancellationToken> &cancellation);
+
+    /// Replaces the active context with an automatic compaction checkpoint
+    /// followed by any pending prompt, verifying that the next request fits
+    /// and compaction reduces context before committing the checkpoint.
+    lighter::Task<void, Error, lighter::Cancellation> compact_automatically(std::optional<std::string_view> pending_prompt,
+                                                                            const std::optional<lighter::CancellationToken> &cancellation);
 
     u64 next_activity_task_generation = 1;
     u64 next_activity_provider_call_generation = 1;

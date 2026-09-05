@@ -26,6 +26,9 @@ Provider-native hosted tools use their typed server-tool forms. Any provider-own
 
 Liminal's base session semantics stay provider-neutral; model-dependent features remain adapter-specific.
 
+Prompt admission and the behavior required of both native and local compaction are defined in
+[Session Architecture](session-architecture.md#prompt-admission-and-compaction).
+
 ## Context guidance
 
 Keep the stable runtime prompt small, put tool behavior in tool schemas, load specialized workflows on demand, and keep repository instructions focused on constraints that cannot be inferred from code and tests. Each rule has one authoritative location across the runtime prompt, project guidance, skills, and tool descriptions.
