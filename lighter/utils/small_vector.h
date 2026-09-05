@@ -166,10 +166,12 @@ protected:
     }
 
     // The null-pointer check lives in the body as contract_assert rather than
-    // as pre(): GCC 16.1 ICEs (fold_convert_loc, fold-const.cc:2800, GIMPLE
+    // as pre(): GCC 16.1 and 16.2 ICE (fold_convert_loc, fold-const.cc:2800, GIMPLE
     // dom) folding the pre()-form nullptr comparison after inlining these
     // ranges into insert/erase paths over non-trivially-copyable elements.
     // Same semantics either way; revert to pre() once the toolchain is fixed.
+    // Rechecked with enforced contracts on Windows and Linux; see
+    // docs/dev/compiler-workarounds.md.
     [[nodiscard]] constexpr static auto counted_range(pointer first, size_type count) noexcept {
         contract_assert(first != nullptr);
         if (count == 0) {

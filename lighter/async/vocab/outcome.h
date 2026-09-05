@@ -58,9 +58,11 @@ private:
     template <typename X>
     using member_t = std::conditional_t<std::is_void_v<X>, std::type_identity<void>, X>;
 
-    // GCC 16.1 ICEs when a contract on an explicit this member function is combined
-    // with a placeholder return type. Keep the return type explicitly
-    // dependent while preserving the cv/ref category deduced for Self.
+    // GCC 16.1 and 16.2 ICE when an enforced contract on an explicit this member
+    // function is combined with a placeholder return type (check_noexcept_r,
+    // cp/except.cc:1095 in 16.2). Keep the return type explicitly dependent
+    // while preserving the cv/ref category deduced for Self.
+    // Rechecked on Windows and Linux; see docs/dev/compiler-workarounds.md.
     // See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=115168 for the ICE report.
     template <usize I, typename Self>
     using member_ref_t = decltype(std::get<I>(std::declval<Self &&>().variant));
