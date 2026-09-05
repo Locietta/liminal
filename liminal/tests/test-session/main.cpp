@@ -341,6 +341,34 @@ void test_reply_selection() {
     require(log.reply_from_latest() == "first answer", "cancelled task displaced the newest completed reply");
 }
 
+void test_within_task_compaction_is_valid() {
+    session::Session log;
+    const auto task = log.start_task("long task");
+    const auto first_call = log.next_provider_call();
+    append_message(log, task, "first round", first_call);
+    log.append(
+        session::ProviderCallCompleted{.task_id = task, .id = first_call, .loop_outcome = session::ProviderCallLoopOutcome::FOLLOW_UP});
+    settle_round(log, task, first_call);
+    session::ContextCheckpoint within_task;
+    within_task.items.push_back(session::ContextInput{{provider::TextPart{.text = "automatic summary"}}});
+    log.append(std::move(within_task));
+    const auto second_call = log.next_provider_call();
+    append_message(log, task, "second round", second_call);
+    log.append(
+        session::ProviderCallCompleted{.task_id = task, .id = second_call, .loop_outcome = session::ProviderCallLoopOutcome::TERMINAL});
+    settle_round(log, task, second_call);
+    log.append(session::TaskFinished{.id = task});
+    require(log.validate().has_value(), "session validation rejected a compaction checkpoint inside an active task");
+
+    session::Session split;
+    const auto split_task = split.start_task("split round");
+    append_message(split, split_task, "unsettled");
+    session::ContextCheckpoint inside_round;
+    inside_round.items.push_back(session::ContextInput{{provider::TextPart{.text = "summary"}}});
+    split.append(std::move(inside_round));
+    require(!split.validate(), "session validation accepted a checkpoint inside an unsettled provider round");
+}
+
 void test_checkpoint_tree_projection() {
     session::Session log;
     const auto first_task = log.start_task("shared root");
@@ -484,6 +512,7 @@ i32 run_all() {
     test_append_only_branching();
     test_monotonic_timestamps_and_utf8_bounds();
     test_checkpoint_projection();
+    test_within_task_compaction_is_valid();
     test_cumulative_token_usage();
     test_provider_round_coherence_validation();
     test_recovery_omits_failed_completed_provider_round();

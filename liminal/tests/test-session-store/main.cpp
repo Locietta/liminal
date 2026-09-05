@@ -293,6 +293,40 @@ void test_topology_publication_and_minimal_schemas() {
             "global catalog contains fields outside the bounded discovery projection");
 }
 
+void test_within_task_compaction_round_trips_through_storage() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open per-session storage");
+
+    auto value = make_session("compact me mid-task");
+    const auto task = std::get<session::TaskStarted>(value.entries.back().payload).id;
+    const auto call = value.next_provider_call();
+    value.append(session::OutputItemCompleted{
+        .task_id = task,
+        .provider_call_id = call,
+        .item = provider::ToolCallItem{.id = {.value = "item"}, .call = tool_call("call-1")},
+    });
+    value.append(session::ProviderCallCompleted{.task_id = task, .id = call, .loop_outcome = session::ProviderCallLoopOutcome::FOLLOW_UP});
+    value.append(session::ToolOutcomes{.task_id = task, .provider_call_id = call, .outcomes = {{.call_id = "call-1", .payload = "ok"}}});
+    value.append(session::ProviderRoundSettled{.task_id = task, .provider_call_id = call, .replay = session::ProviderRoundReplay::REPLAY});
+    session::ContextCheckpoint automatic;
+    automatic.items.push_back(session::ContextInput{{provider::TextPart{.text = "automatic summary"}}});
+    automatic.items.push_back(
+        session::CheckpointOutput{.item = provider::AssistantMessageItem{.id = {.value = "checkpoint:0"}, .parts = {{.text = "carried"}}}});
+    value.append(std::move(automatic));
+    value.append(session::TaskFinished{.id = task});
+    require(value.validate().has_value(), "fixture with a within-task compaction did not validate in memory");
+    const auto entry_count = value.entries.size();
+
+    auto published = publish(storage->repository, std::move(value));
+    if (!published) fail("publishing a session with a within-task compaction failed: " + published.error().message());
+    auto loaded = published->writer.load();
+    if (!loaded) fail("reloading a session with a within-task compaction failed: " + loaded.error().message());
+    require(loaded->entries.size() == entry_count && std::holds_alternative<session::ContextCheckpoint>(loaded->entries[5].payload) &&
+                loaded->validate().has_value(),
+            "reloaded session lost or rejected its within-task compaction checkpoint");
+}
+
 void test_independent_session_write_transactions() {
     TemporaryState temporary;
     auto storage = open_storage(temporary.root);
@@ -2098,6 +2132,7 @@ int main(int argc, char **argv) {
     if (argc == 4 && std::string_view(argv[1]) == "--lease-child") return lease_child(argv[2], argv[3]);
     const auto executable = std::filesystem::absolute(argv[0]);
     test_topology_publication_and_minimal_schemas();
+    test_within_task_compaction_round_trips_through_storage();
     test_independent_session_write_transactions();
     test_cross_process_lease_exclusion(executable);
     test_encoding_failure_precedes_begin();

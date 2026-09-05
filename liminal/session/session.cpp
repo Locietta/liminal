@@ -258,8 +258,10 @@ Result<void> Session::validate() const {
                 return lighter::outcome_error(Error::protocol("session branch finishes an inactive task or unsettled provider round"));
             }
             state.task.reset();
-        } else if (std::holds_alternative<ContextCheckpoint>(entry.payload) && (state.task || state.round)) {
-            return lighter::outcome_error(Error::protocol("session branch checkpoints an active task or provider round"));
+        } else if (std::holds_alternative<ContextCheckpoint>(entry.payload) && state.round) {
+            // Within-task compaction is legitimate once every provider round
+            // is settled; it is merely not a selectable conversation checkpoint.
+            return lighter::outcome_error(Error::protocol("session branch checkpoints an unsettled provider round"));
         }
         states[entry.id.value] = std::move(state);
     }
