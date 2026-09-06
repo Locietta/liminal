@@ -245,6 +245,9 @@ struct Session {
     /// Moves the append point to a safe idle checkpoint without modifying
     /// descendants. A later append creates another branch.
     Result<void> checkout(ConversationCheckpointId checkpoint);
+    /// Restores a previously saved cursor from this session, including an
+    /// empty root or a semantic entry that is not a navigation checkpoint.
+    void restore_cursor(std::optional<EntryId> cursor) pre(!cursor || find(*cursor) != nullptr);
     /// Copies the selected semantic prefix into a new independently identified
     /// session while preserving provider-private payloads.
     Result<Session> fork_at(ConversationCheckpointId checkpoint) const;

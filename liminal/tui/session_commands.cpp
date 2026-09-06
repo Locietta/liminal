@@ -348,9 +348,7 @@ lighter::Task<lighter::Error> navigate_conversation(Agent &agent, application::S
         if (!queue) co_return renderer.notice("[checkout error: session persistence is unavailable]\n");
         const auto former_leaf = agent.session.active_leaf;
         auto restore = [&agent, queue, former_leaf]() -> Result<void> {
-            if (!former_leaf) return lighter::outcome_error(Error::protocol("checkout had no former append point"));
-            auto restored = agent.session.checkout(session::ConversationCheckpointId{*former_leaf});
-            if (!restored) return restored;
+            agent.session.restore_cursor(former_leaf);
             return queue->flush();
         };
         auto checked_out = agent.session.checkout(*checkpoint);

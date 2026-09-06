@@ -370,6 +370,60 @@ void test_durable_steering() {
             "hydration confused pending and delivered steering");
 }
 
+void test_checkout_rollback_after_idle_steering_withdrawal() {
+    TemporaryState temporary;
+    auto storage = open_storage(temporary.root);
+    require(storage.has_value(), "failed to open checkout rollback storage");
+    auto value = make_session("root task");
+    const auto root = value.append(session::TaskFinished{.id = {1}});
+    const auto task = value.start_task("cancelled task");
+    const auto input = value.append(session::SteeringSubmitted{.task_id = task, .text = "unsent correction"});
+    value.append(session::TaskFinished{.id = task, .outcome = session::TaskOutcome::CANCELLED});
+    auto published = publish(storage->repository, std::move(value));
+    require(published.has_value(), "failed to publish checkout rollback fixture");
+    auto writer = std::make_shared<session::SessionWriter>(std::move(published->writer));
+    auto fail_writes = std::make_shared<std::atomic<bool>>(false);
+    auto queue = session::PersistenceQueue::create_for_test(
+        published->value.id, [writer, fail_writes](const session::SessionDelta &delta) -> Result<void> {
+            if (*fail_writes) return lighter::outcome_error(Error::storage("injected checkout save failure"));
+            auto saved = writer->commit(delta);
+            if (!saved) return lighter::outcome_error(std::move(saved).error());
+            return {};
+        });
+    auto &log = published->value;
+    require(log.attach_persistence(queue).has_value(), "failed to attach checkout rollback persistence");
+    require(log.withdraw_steering(input).has_value() && queue->flush().has_value(), "failed to save idle steering withdrawal");
+    const auto saved_cursor = log.active_leaf;
+    const auto entry_count = log.entries.size();
+    ToolSet tools(temporary.root);
+    const auto before = tui::project_transcript(log, tools);
+    require(!log.checkout(checkpoint_id(*saved_cursor)), "idle withdrawal must not become a navigation checkpoint");
+
+    *fail_writes = true;
+    require(log.checkout(checkpoint_id(root)).has_value() && !queue->flush(), "checkout flush failure was not injected");
+    log.restore_cursor(saved_cursor);
+    require(!queue->flush() && log.active_leaf == saved_cursor && log.pending_steering().empty(),
+            "rollback did not restore the exact in-memory cursor while persistence remained unavailable");
+    const auto after = tui::project_transcript(log, tools);
+    require(std::ranges::equal(before, after,
+                               [](const auto &left, const auto &right) {
+                                   return left.kind == right.kind && left.state == right.state && left.text == right.text;
+                               }) &&
+                log.entries.size() == entry_count && log.validate(),
+            "rollback changed the conversation or appended history");
+
+    *fail_writes = false;
+    require(queue->flush().has_value(), "cursor restoration did not persist after recovery");
+    auto reloaded = writer->load();
+    require(reloaded && reloaded->active_leaf == saved_cursor && reloaded->pending_steering().empty() &&
+                reloaded->entries.size() == entry_count,
+            "restart lost the restored cursor or resurrected withdrawn steering");
+    log.restore_cursor(std::nullopt);
+    require(!log.active_leaf && log.active_branch().empty() && log.validate(), "empty saved cursor could not be restored");
+    log.restore_cursor(saved_cursor);
+    require(queue->flush().has_value(), "restoring from the empty cursor failed");
+}
+
 int lease_child(const std::filesystem::path &root, std::string_view id_text) {
     auto storage = open_storage(root);
     if (!storage) return 2;
@@ -2160,6 +2214,7 @@ int main(int argc, char **argv) {
     test_within_task_compaction_round_trips_through_storage();
     test_independent_session_write_transactions();
     test_durable_steering();
+    test_checkout_rollback_after_idle_steering_withdrawal();
     test_cross_process_lease_exclusion(executable);
     test_encoding_failure_precedes_begin();
     test_unsigned_values_must_fit_sqlite_integer_range();

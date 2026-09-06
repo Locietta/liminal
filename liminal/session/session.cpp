@@ -119,9 +119,13 @@ Result<void> Session::checkout(ConversationCheckpointId checkpoint) {
     if (std::ranges::none_of(*projected, [checkpoint](const ConversationCheckpoint &item) { return item.id == checkpoint; })) {
         return lighter::outcome_error(Error::protocol("requested conversation checkpoint is missing or unsafe"));
     }
-    active_leaf = checkpoint.entry;
-    if (persistence) persistence->enqueue(make_delta(*this, {}));
+    restore_cursor(checkpoint.entry);
     return {};
+}
+
+void Session::restore_cursor(std::optional<EntryId> cursor) {
+    active_leaf = cursor;
+    if (persistence) persistence->enqueue(make_delta(*this, {}));
 }
 
 void Session::set_model_preference(std::string provider, std::string model, std::optional<std::string> reasoning_effort) {
