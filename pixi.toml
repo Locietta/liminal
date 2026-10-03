@@ -38,8 +38,8 @@ ruff = "==0.16.1"
 prettier = "==3.9.3"
 taplo = "==0.10.0"
 pytest = ">=8"
-# C dependencies. These are C ABI only, so the MSVC-built Windows builds link
-# fine from GCC; see lighter/xmake.lua for the libuv import-library caveat.
+# C dependencies, used by the lighter package (Locietta/lighter). These are C ABI
+# only, so the MSVC-built Windows builds link fine from GCC.
 libuv = ">=1.52.1,<2"
 libcurl = ">=8.21.0,<9"
 libiconv = ">=1.18,<2"

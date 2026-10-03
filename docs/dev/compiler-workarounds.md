@@ -1,5 +1,7 @@
 # Compiler workarounds
 
+The `lighter/...` paths below now live in [Locietta/lighter](https://github.com/Locietta/lighter), which keeps its own copy of this note.
+
 Last checked on 2026-09-05 with conda-forge GCC 16.2.0 build 4 on Windows
 (`x86_64-w64-mingw32`) and Linux (`x86_64-conda-linux-gnu`).
 

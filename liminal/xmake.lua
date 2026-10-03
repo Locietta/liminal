@@ -1,6 +1,6 @@
 includes("xmake/rules/*.lua")
 
-add_requires("boost_uuid 1.91.0", "libunicode 0.9.2", "ngcpp-proxy", "sqlite3 >=3.51.3 <4")
+add_requires("lighter 2026.10.03", "boost_uuid 1.91.0", "libunicode 0.9.2", "ngcpp-proxy", "sqlite3 >=3.51.3 <4")
 
 target("liminal-core")
     set_kind("static")
@@ -8,7 +8,7 @@ target("liminal-core")
     add_rules("utils.version.cpp")
     add_files("agent/*.cpp", "application/*.cpp", "context/*.cpp", "model/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "session/*.cpp", "tools/*.cpp", "tui/*.cpp")
     add_files("prompts/default-agent.md", "prompts/runtime-tools.md")
-    add_deps("lighter")
+    add_packages("lighter", {public = true})
     add_packages("boost_uuid", "sqlite3")
     add_packages("libunicode", "ngcpp-proxy", {public = true})
 
