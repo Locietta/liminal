@@ -1,6 +1,6 @@
 includes("xmake/rules/*.lua")
 
-add_requires("lighter 2026.10.03", "boost_uuid 1.91.0", "libunicode 0.9.2", "ngcpp-proxy", "sqlite3 >=3.51.3 <4")
+add_requires("lighter 0.2.0", "boost_uuid 1.91.0", "libunicode 0.9.2", "ngcpp-proxy", "sqlite3 >=3.51.3 <4")
 
 target("liminal-core")
     set_kind("static")
