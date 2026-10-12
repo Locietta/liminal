@@ -2,14 +2,14 @@
 
 #include <string>
 
-#include <lighter/lexer/registry.h>
-#include <lighter/lexer/role.h>
+#include <lilac/registry.h>
+#include <lilac/role.h>
 
 namespace liminal::tui {
 
 namespace {
 
-using lighter::lexer::TokenRole;
+using lilac::TokenRole;
 
 constexpr usize k_max_highlight_bytes = 512 * 1024;
 constexpr usize k_max_highlight_lines = 10'000;
@@ -57,7 +57,7 @@ void append_span(std::vector<StyledSpan> &spans, std::string_view text, Style st
 
 } // namespace
 
-CodeHighlighter::CodeHighlighter(std::string_view language) : lexer(lighter::lexer::lexer_for_language(language)) {}
+CodeHighlighter::CodeHighlighter(std::string_view language) : lexer(lilac::lexer_for_language(language)) {}
 
 std::vector<StyledSpan> CodeHighlighter::highlight_line(std::string_view line) {
     total_bytes += line.size();
@@ -70,8 +70,8 @@ std::vector<StyledSpan> CodeHighlighter::highlight_line(std::string_view line) {
     const usize line_begin = document.source.size();
     std::string appended(line);
     appended.push_back('\n');
-    const lighter::lexer::LexRange dirty = lighter::lexer::append(document, appended);
-    auto lex_context = lighter::lexer::context(document, dirty);
+    const lilac::LexRange dirty = lilac::append(document, appended);
+    auto lex_context = lilac::context(document, dirty);
     (*lexer)->lex(lex_context);
 
     std::vector<StyledSpan> spans;

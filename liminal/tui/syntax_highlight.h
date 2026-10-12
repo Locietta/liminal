@@ -4,8 +4,8 @@
 #include <string_view>
 #include <vector>
 
-#include <lighter/lexer/document.h>
-#include <lighter/lexer/lexer.h>
+#include <lilac/document.h>
+#include <lilac/lexer.h>
 #include <lighter/types.hpp>
 
 #include <liminal/tui/surface.h>
@@ -22,8 +22,8 @@ struct CodeHighlighter {
     std::vector<StyledSpan> highlight_line(std::string_view line);
     bool supported() const noexcept { return lexer.has_value() && enabled; }
 
-    std::optional<lighter::lexer::Lexer> lexer;
-    lighter::lexer::Document document;
+    std::optional<lilac::Lexer> lexer;
+    lilac::Document document;
     bool enabled = true;
     usize total_bytes = 0;
     usize line_count = 0;

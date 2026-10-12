@@ -653,20 +653,10 @@ diff --git a/file.cpp b/file.cpp
     const auto unknown_language = tui::layout_rich_text("```unknown\nif value == 7\n```", 40);
     require(text_has_style(unknown_language, "if value == 7", tui::Style::CODE_BLOCK),
             "unknown fenced languages must fall back to the generic block code style");
-    const auto python = tui::layout_rich_text("```Python3\ndef greet(name=\"Ada\"): # welcome\n    return 1\n```", 50);
-    require(text_has_style(python, "def", tui::Style::CODE_KEYWORD) && text_has_style(python, "\"Ada\"", tui::Style::CODE_STRING) &&
-                text_has_style(python, "# welcome", tui::Style::CODE_COMMENT) && text_has_style(python, "1", tui::Style::CODE_NUMBER),
-            "language aliases must select the matching lightweight lexer family");
-    const auto typescript =
-        tui::layout_rich_text("```typescript\nconst render = (value: number) => service.format(`value=${value}`);\n```", 70);
-    require(text_has_style(typescript, "const", tui::Style::CODE_KEYWORD) && text_has_style(typescript, "number", tui::Style::CODE_TYPE) &&
-                text_has_style(typescript, "format", tui::Style::CODE_FUNCTION) &&
-                text_has_style(typescript, "value=", tui::Style::CODE_STRING),
-            "new registry-backed lexer families must render without TUI-specific language routing");
-    const auto json = tui::layout_rich_text("```json\n{\"name\": \"liminal\", \"ready\": true}\n```", 50);
-    require(text_has_style(json, "\"name\"", tui::Style::CODE_PROPERTY) && text_has_style(json, "\"liminal\"", tui::Style::CODE_STRING) &&
-                text_has_style(json, "true", tui::Style::CODE_CONSTANT),
-            "newly registered data languages must render semantic token roles");
+    // Per-language token roles and fence-name aliases are tested in lilac; this
+    // only checks that a fence name reaches the registry unchanged.
+    const auto aliased = tui::layout_rich_text("```Python3\ndef greet():\n```", 50);
+    require(text_has_style(aliased, "def", tui::Style::CODE_KEYWORD), "fence names must be passed to the lexer registry as written");
 
     tui::CodeHighlighter guarded("cpp");
     const auto oversized = guarded.highlight_line(std::string(4097, 'x'));
