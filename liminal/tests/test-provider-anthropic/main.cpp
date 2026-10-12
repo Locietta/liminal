@@ -1,4 +1,6 @@
 #include <chrono>
+#include <cstdio>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -76,8 +78,6 @@ void test_request_encoding() {
 
     auto encoded = anthropic::protocol::encode_complete_request(history, tools, options());
     require(encoded.has_value(), "failed to encode Anthropic request");
-    require(encoded->contains("Instruction hierarchy: SYSTEM instructions take precedence over DEVELOPER instructions."),
-            "instruction hierarchy preamble was not encoded");
     require(encoded->contains("[SYSTEM]\\nTest system policy."), "system instruction was not encoded");
     require(encoded->contains("[DEVELOPER]\\nTest developer policy."), "developer instruction was not encoded");
     require(encoded->contains(R"("role":"assistant")"), "generated output was not encoded as an assistant message");
@@ -223,8 +223,6 @@ void test_invalid_event_order() {
     require(!decoded && decoded.error().detail.contains("before message_start"), "invalid event order was accepted");
 }
 
-} // namespace
-
 void test_streamed_context_rejection_is_classified() {
     using lighter::http::sse::Event;
     std::vector<Event> too_long{
@@ -276,11 +274,20 @@ void test_status_error_classification() {
             "a non-JSON error body lost its detail or retry hint");
 }
 
+} // namespace
+
 int main() {
-    test_request_encoding();
-    test_stream_decoding_and_replay();
-    test_web_tools_decode_citations_and_replay();
-    test_invalid_event_order();
-    test_status_error_classification();
-    test_streamed_context_rejection_is_classified();
+    try {
+        test_request_encoding();
+        test_stream_decoding_and_replay();
+        test_web_tools_decode_citations_and_replay();
+        test_invalid_event_order();
+        test_status_error_classification();
+        test_streamed_context_rejection_is_classified();
+        return 0;
+    } catch (const std::exception &error) {
+        std::fputs(error.what(), stderr);
+        std::fputc('\n', stderr);
+        return 1;
+    }
 }

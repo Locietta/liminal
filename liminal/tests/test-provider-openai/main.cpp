@@ -1,4 +1,6 @@
 #include <chrono>
+#include <cstdio>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -398,8 +400,6 @@ void test_native_compaction_retries_and_replaces_conversation() {
     require(remote_calls == 2 && local_calls == 0 && sleep_calls == 1, "native compaction used the wrong retry path");
 }
 
-} // namespace
-
 void test_native_compaction_rejects_an_empty_result() {
     usize local_calls = 0;
     openai::detail::CompactionAttempts attempts{
@@ -494,19 +494,28 @@ void test_status_error_classification() {
             "a non-JSON error body lost its detail or retry hint");
 }
 
+} // namespace
+
 int main() {
-    test_request_encoding();
-    test_stream_decoding_and_replay();
-    test_web_search_decoding_citations_and_replay();
-    test_completed_response_carries_fallback_output();
-    test_incomplete_response_normalizes_completion();
-    test_invalid_event_order();
-    test_invalid_instruction_order();
-    test_completion_retry_is_scriptable();
-    test_completion_does_not_retry_visible_output();
-    test_compaction_falls_back_for_missing_endpoint();
-    test_native_compaction_retries_and_replaces_conversation();
-    test_native_compaction_rejects_an_empty_result();
-    test_status_error_classification();
-    test_streamed_context_rejection_is_classified();
+    try {
+        test_request_encoding();
+        test_stream_decoding_and_replay();
+        test_web_search_decoding_citations_and_replay();
+        test_completed_response_carries_fallback_output();
+        test_incomplete_response_normalizes_completion();
+        test_invalid_event_order();
+        test_invalid_instruction_order();
+        test_completion_retry_is_scriptable();
+        test_completion_does_not_retry_visible_output();
+        test_compaction_falls_back_for_missing_endpoint();
+        test_native_compaction_retries_and_replaces_conversation();
+        test_native_compaction_rejects_an_empty_result();
+        test_status_error_classification();
+        test_streamed_context_rejection_is_classified();
+        return 0;
+    } catch (const std::exception &error) {
+        std::fputs(error.what(), stderr);
+        std::fputc('\n', stderr);
+        return 1;
+    }
 }

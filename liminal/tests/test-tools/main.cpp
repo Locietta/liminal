@@ -1,9 +1,11 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -69,18 +71,28 @@ Result<ToolOutcome> execute_prepared(PreparedToolCall call, ToolOutputGrant gran
 void test_tools_are_available_by_default() {
     ToolSet tools(std::filesystem::current_path() / "liminal");
     auto definitions = tools.definitions();
-    require(definitions.size() == 7 && definitions[0].name == "read_file" && definitions[1].name == "read_file_bytes" &&
-                definitions[2].name == "apply_patch" && definitions[3].name == "exec_command" && definitions[4].name == "write_stdin" &&
-                definitions[5].kind == provider::ToolKind::WEB_SEARCH && definitions[6].kind == provider::ToolKind::WEB_FETCH,
-            "default tools must include file reading, patch editing, interactive shell execution, and hosted web access");
-    const auto &write_stdin = definitions[4];
+    const auto find_tool = [&definitions](std::string_view name) {
+        const auto found = std::ranges::find(definitions, name, &provider::ToolDefinition::name);
+        require(found != definitions.end(), "default tools must include " + std::string(name));
+        return *found;
+    };
+    const auto has_kind = [&definitions](provider::ToolKind kind) {
+        return std::ranges::find(definitions, kind, &provider::ToolDefinition::kind) != definitions.end();
+    };
+    const auto read_file = find_tool("read_file");
+    const auto read_file_bytes = find_tool("read_file_bytes");
+    const auto write_stdin = find_tool("write_stdin");
+    std::ignore = find_tool("apply_patch");
+    std::ignore = find_tool("exec_command");
+    require(has_kind(provider::ToolKind::WEB_SEARCH) && has_kind(provider::ToolKind::WEB_FETCH),
+            "default tools must include hosted web access");
     require(write_stdin.input_schema.properties.at("session_id").type == "integer" && write_stdin.input_schema.required.size() == 1 &&
                 write_stdin.input_schema.required.front() == "session_id",
             "write_stdin must require the numeric session ID returned by exec_command");
-    require(definitions[0].input_schema.properties.contains("offset") && definitions[0].input_schema.properties.contains("limit") &&
-                !definitions[0].input_schema.properties.contains("byte_offset") &&
-                definitions[1].input_schema.properties.contains("byte_offset") &&
-                !definitions[1].input_schema.properties.contains("offset"),
+    require(read_file.input_schema.properties.contains("offset") && read_file.input_schema.properties.contains("limit") &&
+                !read_file.input_schema.properties.contains("byte_offset") &&
+                read_file_bytes.input_schema.properties.contains("byte_offset") &&
+                !read_file_bytes.input_schema.properties.contains("offset"),
             "line and byte ranges must be exposed by separate file reading tools");
     require(tools.execution_mode("read_file") == ToolExecutionMode::PARALLEL &&
                 tools.execution_mode("read_file_bytes") == ToolExecutionMode::PARALLEL &&

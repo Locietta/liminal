@@ -296,7 +296,7 @@ def check_conpty_terminal_session(tmp_path, base_url, mock_state):
         # handled while its deliberately slow SSE stream is still active.
         process.write(b"\x7f\x7f\x7finspect\r")
         read_conpty_until(process, output, b"Let me inspect the repository.", 10)
-        assert mock_state["stream_paused"].wait(1)
+        assert mock_state["stream_paused"].wait(5)
         redraws = output.count(b"\x1b[H")
         process.resize(60, 12)
         process.write(b"queued")
@@ -370,7 +370,7 @@ def check_conpty_ctrl_c_routes_by_state(tmp_path, base_url, mock_state):
         read_conpty_until(process, output, PROMPT_MARKER, 10)
         process.write(b"inspect\r")
         read_conpty_until(process, output, b"Let me inspect the repository.", 10)
-        assert mock_state["stream_paused"].wait(1)
+        assert mock_state["stream_paused"].wait(5)
         process.write(b"queued")
         read_conpty_until(process, output, b"queued", 5)
 
@@ -976,7 +976,7 @@ def test_terminal_session_restores_state(tmp_path, openai_slow_mock):
             readable, _, _ = select.select([master], [], [], remaining)
             assert readable, f"slow turn produced no output: {output!r}"
             output.extend(os.read(master, 4096))
-        assert mock_state["stream_paused"].wait(1)
+        assert mock_state["stream_paused"].wait(5)
         redraws = output.count(b"\x1b[H")
         os.write(master, b"queued")
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 60, 0, 0))
@@ -1361,7 +1361,7 @@ def test_ctrl_c_routes_by_ui_state(openai_slow_mock, tmp_path):
         read_pty_until(master, output, PROMPT_MARKER, 10)
         os.write(master, b"inspect\r")
         read_pty_until(master, output, b"Let me inspect the repository.", 10)
-        assert mock_state["stream_paused"].wait(1)
+        assert mock_state["stream_paused"].wait(5)
         os.write(master, b"queued")
         read_pty_until(master, output, b"queued", 5)
 

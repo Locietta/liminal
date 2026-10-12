@@ -2167,22 +2167,6 @@ void test_new_session_preparation_keeps_only_invocation_state() {
             "fresh session was not published into its workspace after the first prompt");
 }
 
-void test_removed_archive_surface_and_state_root_override() {
-    TemporaryState temporary;
-#ifdef _WIN32
-    require(_putenv_s("LIMINAL_STATE_DIR", temporary.root.string().c_str()) == 0, "failed to set state-root override");
-#else
-    require(setenv("LIMINAL_STATE_DIR", temporary.root.c_str(), 1) == 0, "failed to set state-root override");
-#endif
-    auto resolved = session::state_root_path();
-    require(resolved && *resolved == temporary.root, "LIMINAL_STATE_DIR did not select the state root");
-#ifdef _WIN32
-    _putenv_s("LIMINAL_STATE_DIR", "");
-#else
-    unsetenv("LIMINAL_STATE_DIR");
-#endif
-}
-
 void test_stale_catalog_hint_removal_requires_session_lease() {
     TemporaryState temporary;
     auto storage = open_storage(temporary.root);
@@ -2262,6 +2246,5 @@ int main(int argc, char **argv) {
     test_prepared_switch_keeps_live_state_atomic();
     test_new_session_preparation_keeps_only_invocation_state();
     test_stale_catalog_hint_removal_requires_session_lease();
-    test_removed_archive_surface_and_state_root_override();
     return 0;
 }

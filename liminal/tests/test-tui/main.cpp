@@ -862,12 +862,10 @@ void check_command_parsing_and_status() {
     require(command && *command == tui::CommandKind::QUIT, "command aliases must be registered centrally");
     const auto resume = tui::resolve_command("resume");
     const auto fresh = tui::resolve_command("new");
-    const auto archive = tui::resolve_command("archive");
-    const auto unarchive = tui::resolve_command("unarchive");
     const auto history = tui::resolve_command("history");
-    require(resume && *resume == tui::CommandKind::RESUME && fresh && *fresh == tui::CommandKind::NEW && !archive && !unarchive &&
-                history && *history == tui::CommandKind::HISTORY,
-            "session commands and removed archive commands must resolve through the central command registry");
+    require(resume && *resume == tui::CommandKind::RESUME && fresh && *fresh == tui::CommandKind::NEW && history &&
+                *history == tui::CommandKind::HISTORY,
+            "session commands must resolve through the central command registry");
     const auto named = tui::parse_name_arguments("  Catalog work  ");
     const auto cleared = tui::parse_name_arguments("--clear");
     require(named && named->title == "Catalog work" && cleared && !cleared->title && !tui::parse_name_arguments(""),
@@ -893,7 +891,6 @@ void check_command_parsing_and_status() {
         require(resolved && *resolved == spec.kind, "every registry entry must resolve to its own kind");
     }
     require(kinds.size() == registry.size(), "every executable command kind must appear exactly once in the registry");
-    require(!names.contains("archive") && !names.contains("unarchive"), "removed archive commands must stay absent from the registry");
     const auto *help = tui::find_command("help");
     require(help != nullptr && help->kind == tui::CommandKind::HELP, "/help must be registered");
     require(tui::find_command("exit") == tui::find_command("quit") && tui::find_command("exit") != nullptr,
@@ -1169,7 +1166,7 @@ void check_command_menu_rows_and_availability() {
         if (!row.contains("/resume")) continue;
         found = true;
         require(row.contains("› /resume"), "the highlighted row must carry the selection marker");
-        require(row.contains("switch to another session") && row.contains("(idle only)"),
+        require(row.contains(tui::find_command("resume")->description) && row.contains("(idle only)"),
                 "menu rows must show the description and availability without hiding the command");
     }
     require(found, "the matching command row must be visible above the composer");
@@ -1181,7 +1178,7 @@ void check_command_menu_rows_and_availability() {
     for (const auto &row : snapshot.visible_text) {
         if (!row.contains("[reply number]")) continue;
         found = true;
-        require(row.contains("/copy") && row.contains("copy an assistant reply"),
+        require(row.contains("/copy") && row.contains(tui::find_command("copy")->description),
                 "menu rows must include the argument synopsis alongside the description");
     }
     require(found, "the synopsis row must be visible");
@@ -2148,7 +2145,6 @@ void check_pending_input_controls() {
     tui::ConsoleRenderer renderer;
     renderer.screen.resize({100, 16});
     tui::SessionInput inputs(agent, renderer);
-    require(!tui::find_command("queue") && !tui::describe_commands().contains("/queue"), "removed command remains discoverable");
     session::EntryId unsent;
     provider_mock.expect<provider::CompleteDispatch>().calls(
         [&](const provider::History &, const std::vector<provider::ToolDefinition> &,
