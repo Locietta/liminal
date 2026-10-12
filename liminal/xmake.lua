@@ -3,9 +3,10 @@ includes("xmake/rules/*.lua")
 add_requires("lighter 0.4.0", "lilac 0.1.0", "boost_uuid 1.91.0", "libunicode 0.9.2", "ngcpp-proxy", "sqlite3 >=3.51.3 <4")
 
 if is_plat("mingw") then
-    -- lighter's glaze and llhttp install through CMake, whose compiler check links
-    -- a test program and so also needs the Pixi MinGW CRT search path (see the root xmake.lua).
-    add_requireconfs("lighter.glaze", "lighter.llhttp", {configs = {
+    -- Packages built from source link test programs with the Pixi GCC, which
+    -- needs the MinGW CRT search path (see the root xmake.lua). That covers
+    -- libunicode and sqlite3 here and lighter's glaze and llhttp.
+    add_requireconfs("libunicode", "sqlite3", "lighter.glaze", "lighter.llhttp", {configs = {
         ldflags = "-B" .. path.join(os.getenv("CONDA_PREFIX"), "Library", "x86_64-w64-mingw32", "sysroot", "usr", "lib") .. "/"
     }})
 end
