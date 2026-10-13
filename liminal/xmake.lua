@@ -1,6 +1,6 @@
 includes("xmake/rules/*.lua")
 
-add_requires("lighter 0.4.0", "lilac 0.1.0", "boost_uuid 1.91.0", "libunicode 0.9.2", "ngcpp-proxy", "sqlite3 >=3.51.3 <4")
+add_requires("lighter 0.5.0", "lilac 0.1.1", "boost_uuid 1.91.0", "libunicode 0.9.2", "ngcpp-proxy", "sqlite3 >=3.51.3 <4")
 
 if is_plat("mingw") then
     -- Packages built from source link test programs with the Pixi GCC, which
